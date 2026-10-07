@@ -1,0 +1,10 @@
+module qs.modules.common.flare
+singleton FlareData 1.0 FlareData.qml
+singleton FlareStrings 1.0 Strings.qml
+singleton FlareTheme 1.0 Theme.qml
+UsageSheet 1.0 UsageSheet.qml
+DetailCard 1.0 DetailCard.qml
+SessionList 1.0 SessionList.qml
+ProviderRing 1.0 ProviderRing.qml
+AccountBadge 1.0 AccountBadge.qml
+SettingsButton 1.0 SettingsButton.qml

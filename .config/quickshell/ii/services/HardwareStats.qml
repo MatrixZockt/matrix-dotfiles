@@ -1,0 +1,362 @@
+pragma Singleton
+pragma ComponentBehavior: Bound
+
+import qs.modules.common
+import qs.services
+import QtQuick
+import Quickshell
+import Quickshell.Io
+
+/**
+ * The half of the machine the resource graphs never looked at.
+ *
+ * ResourceUsage answers two questions: how busy is the processor, and how full is
+ * the memory. On a machine that also has a graphics chip, a disk and a network
+ * card that is not a picture of the machine -- it is a picture of a third of it,
+ * which is exactly why the resource view used to read as "CPU only".
+ *
+ * This service fills the rest in, in two halves:
+ *
+ *   * what the hardware *is* -- processor name and thread count, graphics chip,
+ *     every physical disk, every network interface. Discovered once at startup by
+ *     a single shell pass; nothing here runs on a timer.
+ *   * what it is doing right now -- graphics clock, disk read/write, network
+ *     in/out. Those are plain byte counters in /proc and /sys, so they are read as
+ *     deltas between two samples rather than as absolute numbers (a counter that
+ *     only ever grows says nothing about "now").
+ *
+ * The sampling hangs off ResourceUsage's existing tick instead of starting a timer
+ * of its own, and it only runs while something is actually looking at the numbers
+ * (`active`). A closed monitor therefore costs nothing at all -- no process, no
+ * file read, no wake-up of its own.
+ */
+Singleton {
+    id: root
+
+    // Set by the monitor while it is on screen. Nothing is sampled otherwise.
+    property bool active: false
+    // Bumped on every sample so bindings reading the arrays below re-evaluate.
+    property int revision: 0
+
+    readonly property int historyLength: ResourceUsage.historyLength
+    // References the graphs are drawn against. Fixed rather than self-scaling: a
+    // graph that silently rescales hides the very thing you are watching for.
+    readonly property real diskFullScale: 200 * 1024 * 1024  // 200 MB/s
+    readonly property real netFullScale: 10 * 1024 * 1024     // 10 MB/s
+
+    // ── Inventory ────────────────────────────────────────────────────────────
+    property bool inventoryReady: false
+    property string cpuName: ""
+    property int cpuThreads: 0
+    property string cpuMaxFreq: ""
+    property var gpuNames: []
+    property var disks: []     // { name, model, size, readBps, writeBps, maxSeen, history }
+    property var networks: []  // { name, rxBps, txBps, maxSeen, history }
+
+    // Graphics clock, when the driver exposes one (Intel and AMD both do).
+    property string gpuClockPath: ""
+    property string gpuClockMaxPath: ""
+    property real gpuClockMhz: -1
+    property real gpuClockMaxMhz: -1
+    property var gpuHistory: []
+
+    property var lastDiskCounters: null
+    property var lastNetCounters: null
+    // Separate clocks on purpose. The disk and the network counters are read from
+    // two different files, and each one has to be divided by the time since *its*
+    // own previous reading -- sharing one clock makes whichever file finishes
+    // second look like it moved its whole counter in a fifth of a second.
+    property real lastDiskTime: 0
+    property real lastNetTime: 0
+
+    // Runs once at startup. `-P` gives one `KEY="value"` line per disk, which is
+    // the whole reason this is a shell script and not a JSON parser: it keeps the
+    // parsing in the service, where it can be seen and changed.
+    readonly property string inventoryScript: `
+printf 'cpu|%s|%s|%s\n' \
+    "$(awk -F: '/model name/{sub(/^[ ]+/, "", $2); print $2; exit}' /proc/cpuinfo)" \
+    "$(nproc 2>/dev/null)" \
+    "$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq 2>/dev/null)"
+lspci 2>/dev/null | grep -iE 'vga|3d|display' | while IFS= read -r line; do
+    printf 'gpu|%s\n' "$(printf '%s' "$line" | sed -E 's/^[0-9a-fA-F:.]+ [^:]*: //')"
+done
+for card in /sys/class/drm/card[0-9]*/; do
+    if [ -r "$card/gt_cur_freq_mhz" ]; then
+        printf 'gpuclock|%s|%s\n' "$card/gt_cur_freq_mhz" "$card/gt_max_freq_mhz"
+        break
+    fi
+done
+LC_ALL=C lsblk -d -P -o NAME,MODEL,SIZE,TYPE 2>/dev/null | while IFS= read -r line; do
+    # zram / loop / ram devices are not disks you read data from. zram is
+    # compressed RAM used as swap: on this machine it was a second "Disk" tile
+    # permanently reading 0 B/s, which is exactly the kind of tile that made the
+    # dashboard look like charts for the sake of charts.
+    case "$line" in
+    *'NAME="zram'*|*'NAME="loop'*|*'NAME="ram'*) continue ;;
+    esac
+    case "$line" in *'TYPE="disk"'*) printf 'disk|%s\n' "$line";; esac
+done
+for net in /sys/class/net/*; do
+    name=$(basename "$net")
+    # Physical interfaces only: virtual bridges and container links are noise on
+    # a traffic dashboard, and there can be a dozen of them.
+    case "$name" in
+    lo|docker*|veth*|virbr*|br-*|tun*|tap*|wg*) continue ;;
+    esac
+    printf 'net|%s\n' "$name"
+done
+`
+
+    Process {
+        id: inventoryProc
+        running: true
+        command: ["bash", "-c", root.inventoryScript]
+        stdout: StdioCollector {
+            onStreamFinished: root.readInventory(text)
+        }
+    }
+
+    function field(line, name) {
+        const match = line.match(new RegExp(name + '="([^"]*)"'));
+        return match ? match[1] : "";
+    }
+
+    function newNetwork(name) {
+        return {
+            name: name,
+            rxBps: 0,
+            txBps: 0,
+            maxSeen: 1,
+            history: []
+        };
+    }
+
+    function readInventory(text) {
+        const gpus = [];
+        const disks = [];
+        const networks = [];
+        for (const line of String(text ?? "").split("\n")) {
+            if (!line)
+                continue;
+            const parts = line.split("|");
+            switch (parts[0]) {
+            case "cpu": {
+                root.cpuName = parts[1] ?? "";
+                root.cpuThreads = parseInt(parts[2] ?? "0", 10) || 0;
+                const khz = parseInt(parts[3] ?? "0", 10) || 0;
+                root.cpuMaxFreq = khz > 0 ? `${(khz / 1000000).toFixed(1)} GHz` : "";
+                break;
+            }
+            case "gpu":
+                if (parts[1])
+                    gpus.push(parts[1]);
+                break;
+            case "gpuclock":
+                root.gpuClockPath = parts[1] ?? "";
+                root.gpuClockMaxPath = parts[2] ?? "";
+                break;
+            case "disk": {
+                const name = root.field(parts[1] ?? "", "NAME");
+                if (!name)
+                    break;
+                disks.push({
+                    name: name,
+                    model: root.field(parts[1] ?? "", "MODEL").trim(),
+                    size: root.field(parts[1] ?? "", "SIZE"),
+                    readBps: 0,
+                    writeBps: 0,
+                    maxSeen: 1,
+                    history: []
+                });
+                break;
+            }
+            case "net":
+                if (parts[1])
+                    networks.push(root.newNetwork(parts[1]));
+                break;
+            }
+        }
+        root.gpuNames = root.rankGpus(gpus);
+        root.disks = disks;
+        root.networks = networks;
+        root.inventoryReady = true;
+    }
+
+    // lspci lists the host's VGA devices in bus order, which on an Optimus
+    // laptop puts the Intel iGPU FIRST -- and every consumer of gpuNames
+    // reads [0] as "the graphics card". On this Razer Blade that meant the
+    // island's GPU tile described the iGPU while the machine's real GPU (the
+    // one that renders, the one people mean) sat second in the list.
+    //
+    // rankGpus fixes both halves of that:
+    //   * the dGPU leads. Vendor-name match (NVIDIA/GeForce, and discrete
+    //     Radeon RX / Arc lines) sorts ahead of everything else -- no model
+    //     is hardcoded; whatever dGPU the machine carries wins.
+    //   * the name is the human one. lspci prints a chip code plus the
+    //     marketing name in brackets ("AD106M [GeForce RTX 4070 Max-Q /
+    //     Mobile]"); the bracket content is what a spec sheet and a human
+    //     both call the card, so when brackets exist they replace the raw
+    //     line. Intel entries carry no brackets and pass through verbatim.
+    function rankGpus(list) {
+        const cleaned = (list ?? []).map(n => {
+            // The model is the LAST bracket group: AMD/ATI lines carry a
+            // vendor-alias bracket first ("[AMD/ATI] Navi 31 [Radeon RX
+            // 7900 XTX]"), and taking the first bracket would print the
+            // vendor. Lines with no brackets (Intel) pass through verbatim.
+            const matches = String(n).match(/\[([^\]]+)\]/g);
+            if (matches && matches.length > 0)
+                return matches[matches.length - 1].slice(1, -1).trim();
+            return String(n);
+        });
+        const score = n => /nvidia|geforce|radeon rx|arc a\d/i.test(n) ? 0 : 1;
+        return cleaned.slice().sort((a, b) => score(a) - score(b));
+    }
+
+    // ── Sampling ─────────────────────────────────────────────────────────────
+    // One tick of the resource service, when there is something to show it to.
+    Connections {
+        target: ResourceUsage
+        function onTick() {
+            if (root.active)
+                root.sample();
+        }
+    }
+
+    function sample() {
+        if (!root.inventoryReady)
+            return;
+        diskstatsFile.reload();
+        netdevFile.reload();
+        if (root.gpuClockPath !== "")
+            gpuClockFile.reload();
+    }
+
+    // One handler each, not two. Both `onLoaded` and `onTextChanged` fire for the
+    // same reload (the new text is what announced the load), so handling both ran
+    // the delta maths twice per tick -- the second pass comparing a counter with
+    // itself and overwriting the true rate with zero. `onLoaded` alone is exactly
+    // one measurement per reload.
+    FileView {
+        id: diskstatsFile
+        path: "/proc/diskstats"
+        onLoaded: root.applyDiskCounters(text())
+    }
+
+    FileView {
+        id: netdevFile
+        path: "/proc/net/dev"
+        onLoaded: root.applyNetCounters(text())
+    }
+
+    FileView {
+        id: gpuClockFile
+        path: root.gpuClockPath === "" ? "/dev/null" : root.gpuClockPath
+        onLoaded: root.applyGpuClock(text())
+    }
+
+    FileView {
+        id: gpuClockMaxFile
+        path: root.gpuClockMaxPath === "" ? "/dev/null" : root.gpuClockMaxPath
+        onLoaded: root.applyGpuClockMax(text())
+        onTextChanged: root.applyGpuClockMax(text())
+    }
+    // Sectors are 512 bytes here by definition, whatever the device's own sector
+    // size is, so the counter converts to bytes with a fixed number.
+    function applyDiskCounters(text) {
+        const counters = {};
+        for (const line of String(text ?? "").split("\n")) {
+            const fields = line.trim().split(/\s+/);
+            if (fields.length < 14)
+                continue;
+            const name = fields[2];
+            counters[name] = {
+                read: (parseInt(fields[5], 10) || 0) * 512,
+                write: (parseInt(fields[9], 10) || 0) * 512
+            };
+        }
+        const previous = root.lastDiskCounters;
+        const now = Date.now();
+        const span = previous ? Math.max(0.2, (now - root.lastDiskTime) / 1000) : 0;
+        root.lastDiskCounters = counters;
+        root.lastDiskTime = now;
+        if (!previous)
+            return;
+        const updated = root.disks.map(disk => {
+            const before = previous[disk.name];
+            const after = counters[disk.name];
+            if (!before || !after)
+                return disk;
+            const readBps = Math.max(0, (after.read - before.read) / span);
+            const writeBps = Math.max(0, (after.write - before.write) / span);
+            const maxSeen = Math.max(disk.maxSeen, readBps, writeBps);
+            const history = disk.history.concat([Math.min(1, Math.max(readBps, writeBps) / root.diskFullScale)]).slice(-root.historyLength);
+            return Object.assign({}, disk, { readBps: readBps, writeBps: writeBps, maxSeen: maxSeen, history: history });
+        });
+        root.disks = updated;
+        root.revision++;
+    }
+
+    function applyNetCounters(text) {
+        const counters = {};
+        for (const line of String(text ?? "").split("\n")) {
+            const colon = line.indexOf(":");
+            if (colon < 0)
+                continue;
+            const name = line.slice(0, colon).trim();
+            const fields = line.slice(colon + 1).trim().split(/\s+/);
+            if (fields.length < 9)
+                continue;
+            counters[name] = {
+                rx: parseInt(fields[0], 10) || 0,
+                tx: parseInt(fields[8], 10) || 0
+            };
+        }
+        const previous = root.lastNetCounters;
+        const now = Date.now();
+        const span = previous ? Math.max(0.2, (now - root.lastNetTime) / 1000) : 0;
+        root.lastNetCounters = counters;
+        root.lastNetTime = now;
+        if (!previous)
+            return;
+        const updated = root.networks.map(net => {
+            const before = previous[net.name];
+            const after = counters[net.name];
+            if (!before || !after)
+                return net;
+            const rxBps = Math.max(0, (after.rx - before.rx) / span);
+            const txBps = Math.max(0, (after.tx - before.tx) / span);
+            const maxSeen = Math.max(net.maxSeen, rxBps, txBps);
+            const history = net.history.concat([Math.min(1, Math.max(rxBps, txBps) / root.netFullScale)]).slice(-root.historyLength);
+            return Object.assign({}, net, { rxBps: rxBps, txBps: txBps, maxSeen: maxSeen, history: history });
+        });
+        root.networks = updated;
+        root.revision++;
+    }
+
+    function applyGpuClock(text) {
+        const value = parseInt(String(text ?? "").trim(), 10);
+        root.gpuClockMhz = isNaN(value) ? -1 : value;
+        if (root.gpuClockMaxMhz <= 0)
+            return;
+        const fraction = Math.min(1, Math.max(0, root.gpuClockMhz / root.gpuClockMaxMhz));
+        root.gpuHistory = root.gpuHistory.concat([fraction]).slice(-root.historyLength);
+        root.revision++;
+    }
+
+    function applyGpuClockMax(text) {
+        const value = parseInt(String(text ?? "").trim(), 10);
+        root.gpuClockMaxMhz = isNaN(value) ? -1 : value;
+    }
+
+    // ── Printing ─────────────────────────────────────────────────────────────
+    function formatBytes(bytes) {
+        const value = Number(bytes) || 0;
+        if (value < 1024)
+            return `${value.toFixed(0)} B/s`;
+        if (value < 1024 * 1024)
+            return `${(value / 1024).toFixed(1)} KB/s`;
+        if (value < 1024 * 1024 * 1024)
+            return `${(value / 1024 / 1024).toFixed(1)} MB/s`;
+        return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB/s`;
+    }
+}

@@ -1,0 +1,21 @@
+# The music playback engine: a headless mpv driven over JSON IPC.
+#
+# This unit is the reason the music system survives anything the UI does --
+# closing the desktop app, restarting the shell or reloading Quickshell all
+# leave playback untouched, because the engine is not part of either. The
+# left sidebar's Music tab, the desktop app and the MPRIS bridge are all
+# just clients of $XDG_RUNTIME_DIR/ii-music-ipc.
+#
+# --idle=yes keeps it alive with no file loaded; --keep-open=no closes the
+# gap between tracks so `idle-active` flips and the UI can clear itself.
+[Unit]
+Description=ii music daemon - headless mpv playback engine for the shell's Music tab
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/mpv --no-video --no-audio-display --idle=yes --input-ipc-server=%t/ii-music-ipc --volume=80 --keep-open=no --really-quiet
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

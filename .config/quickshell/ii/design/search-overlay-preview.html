@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SUPER overlay — design preview</title>
+<style>
+  /* Dimensions taken from the live shell, not invented:
+       centre island ....... 379 logical px wide  (measured on the bar)
+       BarAnchoredPanel padding ... 14
+     Palette = live ~/.local/state/quickshell/user/generated/colors.json (dark),
+     radius 6 = Appearance.rounding.small — the exact radius StyledPopup uses,
+     1px border = hyprland general:border_size. Fonts = appearance.fonts config.
+
+     Token map (dark):
+       surfaceContainer #161616 card bg      outlineVariant #3A3A3A lines
+       surfaceContainerHigh #1E1E1E hover    onSurface #E2E2E2 text
+       secondaryContainer #333333 selected   onSurfaceVariant #C6C6C6 secondary
+       primary #F0F0F0 caret/accent          outline #7E7E7E dim           */
+
+  :root {
+    --card-w: 379px;
+    --bar-h: 40px;
+    --pad: 14px;
+    --gap: 8px;
+
+    /* live dark tokens */
+    --bg:        #0a0a0a;  /* background */
+    --surface:   #161616;  /* surfaceContainer — StyledPopup bg */
+    --raised:    #1e1e1e;  /* surfaceContainerHigh — hover */
+    --selected:  #333333;  /* secondaryContainer */
+    --on-sel:    #d6d6d6;  /* onSecondaryContainer */
+    --line:      #3a3a3a;  /* outlineVariant */
+    --text:      #e2e2e2;  /* onSurface */
+    --sub:       #c6c6c6;  /* onSurfaceVariant */
+    --dim:       #7e7e7e;  /* outline */
+    --accent:    #f0f0f0;  /* primary */
+    --mono:      "JetBrains Mono NF", monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.45 "Google Sans Flex", Inter, system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 26px;
+    padding: 28px 20px 40px;
+  }
+
+  h1 { font-size: 15px; font-weight: 600; letter-spacing: .2px; }
+  .note { color: var(--sub); font-size: 11.5px; max-width: 540px; text-align: center; line-height: 1.6; }
+
+  /* ── the top bar, to scale, with the centre island highlighted ─────── */
+  .bar {
+    width: 100%; max-width: 1100px; height: var(--bar-h);
+    background: #121212; border: 1px solid #262626; border-radius: 8px;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 10px; position: relative;
+  }
+  .island { height: 24px; background: #1e1e1e; border-radius: 6px; }
+  .island.l { flex: 1; max-width: 170px; }
+  .island.c { width: var(--card-w); flex: none; outline: 1px dashed #3a3a3a; outline-offset: 3px; }
+  .island.r { flex: 1; max-width: 180px; }
+  .calign { position: absolute; left: 50%; transform: translateX(-50%); top: 100%;
+            font-size: 10px; color: var(--dim); letter-spacing: .4px; }
+
+  /* ── the card ─────────────────────────────────────────────────────── */
+  .card {
+    width: var(--card-w);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 6px;   /* Appearance.rounding.small, as StyledPopup */
+    overflow: hidden;
+    box-shadow: 0 18px 50px rgba(0,0,0,.6);
+  }
+
+  .search {
+    margin: var(--pad) var(--pad) 10px;
+    height: 34px; border-radius: 8px;   /* rounding.normal */
+    background: #121212;                /* surfaceContainerLow */
+    border: 1px solid var(--line);
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 10px;
+  }
+  .search .mag { color: var(--dim); font-size: 13px; }
+  .search .q { color: var(--text); }
+  .search .q .caret {
+    display: inline-block; width: 1px; height: 13px; background: var(--accent);
+    vertical-align: -2px; margin-left: 1px;
+  }
+  .search .esc { margin-left: auto; color: var(--dim); font-size: 10px;
+                 font-family: var(--mono);
+                 border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
+
+  /* segmented tabs */
+  .tabs { display: flex; gap: 4px; padding: 0 var(--pad) 10px; }
+  .tab {
+    flex: 1; text-align: center; padding: 5px 0; border-radius: 6px;
+    font-size: 11.5px; color: var(--sub); cursor: pointer;
+    border: 1px solid transparent; user-select: none;
+  }
+  .tab.on { background: var(--raised); color: var(--text); border-color: var(--line); }
+
+  .sect { padding: 0 var(--pad) 4px; display: flex; align-items: baseline; gap: 8px; }
+  .sect h2 { font-size: 10.5px; font-weight: 600; color: var(--sub);
+             text-transform: uppercase; letter-spacing: .7px; }
+  .sect .count { font-size: 10px; color: var(--dim); margin-left: auto; }
+
+  /* app grid — 3 across, which is what 379px comfortably holds */
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px;
+          padding: 4px var(--pad) 12px; }
+  .app { border-radius: 8px; padding: 9px 4px 7px; text-align: center;
+         border: 1px solid transparent; cursor: pointer; }
+  .app:hover { background: var(--raised); }
+  .app.sel { background: var(--raised); border-color: var(--accent); }
+  .ico { width: 34px; height: 34px; margin: 0 auto 6px; border-radius: 9px;
+         display: flex; align-items: center; justify-content: center;
+         font-size: 14px; font-weight: 700; color: #fff; }
+  .app .nm { font-size: 10.5px; color: var(--text); line-height: 1.25;
+             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .app .sub { font-size: 9px; color: var(--dim); }
+
+  /* typing state: vertical result list, icon + name (+ type on the right) */
+  .list { padding: 4px var(--pad) 12px; display: flex; flex-direction: column; gap: 2px; }
+  .row { display: flex; align-items: center; gap: 10px; padding: 6px 8px;
+         border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+  .row:hover { background: var(--raised); }
+  .row.sel { background: var(--selected); }
+  .row .ri { width: 26px; height: 26px; border-radius: 7px; flex: none;
+             display: flex; align-items: center; justify-content: center;
+             font-size: 12px; font-weight: 700; color: #fff; }
+  .row .rn { font-size: 12px; color: var(--text);
+             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .rd { margin-left: auto; font-size: 10px; color: var(--dim); flex: none; }
+  .row.sel .rn { color: var(--on-sel); }
+  .row.sel .rd { color: var(--on-sel); opacity: .6; }
+
+  /* advanced: grouped category rows */
+  .cats { padding: 2px var(--pad) 12px; }
+  .cat { display: flex; align-items: center; gap: 9px; padding: 7px 8px;
+         border-radius: 6px; cursor: pointer; }
+  .cat:hover, .cat.sel { background: var(--raised); }
+  .cat .ci { width: 24px; height: 24px; border-radius: 6px; flex: none;
+             display: flex; align-items: center; justify-content: center;
+             font-size: 12px; }
+  .cat .cn { font-size: 11.5px; }
+  .cat .cd { font-size: 9.5px; color: var(--dim); }
+  .cat .n { margin-left: auto; font-size: 10px; color: var(--dim);
+            border: 1px solid var(--line); border-radius: 9px; padding: 0 6px; }
+  .cat .ar { color: var(--dim); font-size: 10px; }
+
+  .foot { border-top: 1px solid var(--line); padding: 7px var(--pad);
+          display: flex; gap: 12px; font-size: 10px; color: var(--dim);
+          font-family: var(--mono); }
+  .foot b { color: var(--sub); font-weight: 500; }
+
+  .state { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+  .state button {
+    background: #121212; color: var(--sub); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 11px; font: inherit; font-size: 11.5px;
+    cursor: pointer;
+  }
+  .state button.on { background: var(--raised); color: var(--text); }
+  .hide { display: none !important; }
+</style>
+</head>
+<body>
+
+<h1>SUPER press — proposed overlay</h1>
+<p class="note">
+  Card is <b>379&nbsp;px</b> — the exact width of your middle bar island — hanging from
+  the island's centre line, same as the middle popup. Palette, radius and fonts are the
+  shell's live ones: <b>#161616</b> card / <b>#333333</b> selection / <b>6px</b> corners
+  (StyledPopup) / <b>Google Sans Flex</b>. Typing shows a vertical icon list.
+</p>
+
+<div class="bar">
+  <div class="island l"></div>
+  <div class="island c"></div>
+  <div class="island r"></div>
+  <div class="calign">▼ card centre line</div>
+</div>
+
+<div class="state">
+  <button class="on" data-v="empty"  onclick="show('empty')">1 · just pressed</button>
+  <button data-v="typing" onclick="show('typing')">2 · typing</button>
+  <button data-v="adv"    onclick="show('adv')">3 · Advanced tab</button>
+</div>
+
+<!-- ── 1. just pressed: previews, nothing typed ───────────────────────── -->
+<div class="card" id="v-empty">
+  <div class="search">
+    <span class="mag">⌕</span><span class="q" style="color:var(--dim)">Search apps…<span class="caret" style="background:var(--line)"></span></span>
+    <span class="esc">esc</span>
+  </div>
+  <div class="tabs"><div class="tab on">Apps</div><div class="tab">Advanced</div></div>
+  <div class="sect"><h2>Frequent</h2><span class="count">6</span></div>
+  <div class="grid" id="grid-frequent"></div>
+  <div class="sect"><h2>All apps</h2><span class="count">128</span></div>
+  <div class="grid" id="grid-all"></div>
+  <div class="foot"><span><b>↑↓</b> move</span><span><b>↵</b> launch</span><span><b>tab</b> Advanced</span></div>
+</div>
+
+<!-- ── 2. typing: vertical icon list ──────────────────────────────────── -->
+<div class="card hide" id="v-typing">
+  <div class="search">
+    <span class="mag">⌕</span><span class="q">kit<span class="caret"></span></span>
+    <span class="esc">esc</span>
+  </div>
+  <div class="tabs"><div class="tab on">Apps</div><div class="tab">Advanced</div></div>
+  <div class="sect"><h2>Matches</h2><span class="count">3</span></div>
+  <div class="list" id="list-typing"></div>
+  <div class="foot"><span><b>↑↓</b> move</span><span><b>↵</b> launch</span><span><b>tab</b> Advanced</span></div>
+</div>
+
+<!-- ── 3. Advanced ───────────────────────────────────────────────────── -->
+<div class="card hide" id="v-adv">
+  <div class="search">
+    <span class="mag">⌕</span><span class="q" style="color:var(--dim)">Search apps…<span class="caret" style="background:var(--line)"></span></span>
+    <span class="esc">esc</span>
+  </div>
+  <div class="tabs"><div class="tab">Apps</div><div class="tab on">Advanced</div></div>
+  <div class="sect"><h2>System &amp; terminal</h2><span class="count">31</span></div>
+  <div class="cats" id="cats"></div>
+  <div class="foot"><span><b>↑↓</b> move</span><span><b>↵</b> open</span><span><b>tab</b> back to Apps</span></div>
+</div>
+
+<script>
+  // Placeholder tiles: a colour plus a letter. Real icons come from the
+  // desktop entries at implementation time; this is about layout and rhythm.
+  const C = {
+    f:'#3b6ea5', t:'#2f7d5c', k:'#7a4a2e', c:'#5a3f8f', g:'#8a8f98',
+    m:'#2b6f7a', p:'#8f5a2b', s:'#4a4f8f', d:'#6b3f5a', v:'#4f7a3b'
+  };
+  const tile = (l,c) => `<div class="ico" style="background:${c}">${l}</div>`;
+
+  // `sel` marks the ONE item the keyboard is on. Only the first grid of the
+  // empty state carries it -- highlighting index 0 of every grid made two
+  // tiles look selected at once, which is not how the real thing behaves.
+  function grid(el, items, selectFirst) {
+    document.getElementById(el).innerHTML = items.map(([l,c,n,s],i) =>
+      `<div class="app${(selectFirst && i===0)?' sel':''}">${tile(l,c)}<div class="nm">${n}</div>` +
+      (s?`<div class="sub">${s}</div>`:'') + `</div>`).join('');
+  }
+
+  grid('grid-frequent', [
+    ['F',C.f,'Firefox','web'],  ['T',C.t,'Files'],      ['K',C.k,'Kitty'],
+    ['C',C.c,'Code'],           ['G',C.g,'GIMP'],       ['D',C.d,'Discord']
+  ], true);
+  grid('grid-all', [
+    ['S',C.s,'Settings'],       ['T',C.t,'Thunderbird'],['M',C.m,'Mousepad'],
+    ['V',C.v,'VLC'],            ['B',C.d,'Blender'],    ['O',C.p,'Obsidian']
+  ], false);
+
+  // typing = vertical list, one row per match: icon, name, type on the right.
+  function list(el, items, selectFirst) {
+    document.getElementById(el).innerHTML = items.map(([l,c,n,d],i) =>
+      `<div class="row${(selectFirst && i===0)?' sel':''}">${tile2(l,c)}<div class="rn">${n}</div>` +
+      (d?`<div class="rd">${d}</div>`:'') + `</div>`).join('');
+  }
+  const tile2 = (l,c) => `<div class="ri" style="background:${c}">${l}</div>`;
+
+  list('list-typing', [
+    ['K',C.k,'Kitty','terminal'],
+    ['K',C.g,'Krita','paint'],
+    ['K',C.c,'KDE Connect','']
+  ], true);
+
+  const cats = [
+    ['⌨','Terminal & shells',   '#3b6ea5','12','kitty, fish, bash, zsh'],
+    ['⚙','System settings',     '#4a4f8f','9', 'displays, users, network'],
+    ['🗂','Files & storage',     '#2f7d5c','5', 'partitions, disks, archives'],
+    ['🖧','Network & firewall',  '#2b6f7a','3', 'ports, DNS, firewall'],
+    ['📊','Logs & diagnostics', '#8f5a2b','2', 'journal, kernel messages']
+  ];
+  document.getElementById('cats').innerHTML = cats.map(([i,n,c,k,d],x) =>
+    `<div class="cat${x===0?' sel':''}"><div class="ci" style="background:${c}">${i}</div>` +
+    `<div><div class="cn">${n}</div><div class="cd">${d}</div></div>` +
+    `<div class="n">${k}</div><div class="ar">›</div></div>`).join('');
+
+  function show(v) {
+    ['empty','typing','adv'].forEach(k =>
+      document.getElementById('v-'+k).classList.toggle('hide', k!==v));
+    document.querySelectorAll('.state button').forEach(b =>
+      b.classList.toggle('on', b.dataset.v===v));
+  }
+</script>
+</body>
+</html>

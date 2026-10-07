@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Music
+GenericName=Music Player
+Comment=Play the local music library
+Exec=ii-music-app
+Icon=multimedia-audio-player
+Terminal=false
+Categories=AudioVideo;Audio;Player;Music;
+Keywords=music;player;audio;mp3;playlist;
+StartupNotify=true
+StartupWMClass=io.github.matrix.IiMusic
+X-GNOME-UsesNotifications=false

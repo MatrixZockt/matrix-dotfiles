@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Razer Command Center — template previews</title>
+<style>
+  :root{
+    --ink:#e8eaed; --ink-dim:#9aa3ad;
+    font-size:16px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0a0b0d;color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:26px 30px 80px}
+  a{color:inherit;text-decoration:none}
+
+  /* ── chooser bar ─────────────────────────────────────────── */
+  .chooser{position:sticky;top:0;z-index:50;display:flex;align-items:center;gap:10px;
+    padding:12px 16px;margin:-26px -30px 30px;background:rgba(10,11,13,.92);
+    backdrop-filter:blur(10px);border-bottom:1px solid #23262b}
+  .chooser .title{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:#9aa3ad;margin-right:10px}
+  .chooser a{font-size:12px;padding:7px 13px;border-radius:6px;border:1px solid #2b3037;color:#c6ccd4;background:#14171a;white-space:nowrap}
+  .chooser a:hover{border-color:#3d4650;color:#fff}
+  .chooser a b{color:var(--teal);margin-right:6px;font-weight:700}
+  .chooser .hint{margin-left:auto;font-size:11px;color:#6b7480}
+  .chooser .hint b{color:#2dd4bf}
+
+  /* ── section headers ─────────────────────────────────────── */
+  .t{margin-bottom:70px}
+  .th{display:flex;gap:18px;align-items:flex-start;margin:0 0 18px}
+  .tnum{font-size:44px;font-weight:700;line-height:1;color:#2a2f36;letter-spacing:-.02em}
+  .th h2{font-size:21px;font-weight:650;letter-spacing:-.01em}
+  .th h2 .tag{font-size:11.5px;font-weight:500;color:#8d97a3;border:1px solid #2b3037;border-radius:99px;padding:3px 10px;margin-left:10px;vertical-align:2px}
+  .th p{font-size:13px;color:#9aa3ad;margin-top:6px;max-width:860px;line-height:1.55}
+  .traits{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;list-style:none}
+  .traits li{font-size:11px;color:#aeb6c0;background:#15181c;border:1px solid #262b31;border-radius:5px;padding:4px 9px}
+
+  /* ── generic app-window mockup ───────────────────────────── */
+  .desk{border-radius:14px;padding:26px;background:
+        radial-gradient(1200px 500px at 20% 0%, #12151a 0%, #0b0d10 60%);border:1px solid #1e2126}
+  .win{width:1280px;max-width:100%;height:820px;border-radius:var(--r);overflow:hidden;display:flex;
+    background:var(--win);color:var(--fg);border:1px solid var(--border);box-shadow:var(--shadow);margin:0 auto}
+  .side{width:230px;min-width:230px;background:var(--side);border-right:1px solid var(--border);
+    display:flex;flex-direction:column;padding:16px 10px 12px}
+  .brand{display:flex;align-items:center;gap:9px;padding:2px 10px 14px;font-size:13px;font-weight:650;letter-spacing:.01em}
+  .logo{width:22px;height:22px;border-radius:6px;background:var(--accent);display:inline-block;position:relative}
+  .logo::after{content:"";position:absolute;inset:6px;border-radius:2px;background:var(--on-accent);opacity:.9}
+  .nav{display:flex;flex-direction:column;gap:2px}
+  .nav .grp{font-size:9.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);opacity:.75;padding:12px 10px 5px}
+  .nav a{display:flex;align-items:center;gap:9px;font-size:12.5px;padding:7px 10px;border-radius:var(--r);color:var(--muted);border-left:2px solid transparent}
+  .nav a svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.7;flex:none}
+  .nav a.on{color:var(--fg);background:var(--nav-on);border-left-color:var(--accent);font-weight:600}
+  .side-foot{margin-top:auto;padding:10px;font-size:11px;color:var(--muted);display:flex;flex-direction:column;gap:8px}
+  .mini{display:flex;justify-content:space-between}
+  .mini b{color:var(--fg);font-weight:600}
+  .bar{height:4px;border-radius:2px;background:var(--border-soft);overflow:hidden}
+  .bar i{display:block;height:100%;background:var(--accent);border-radius:2px}
+  .main{flex:1;display:flex;flex-direction:column;min-width:0}
+  .top{height:50px;min-height:50px;display:flex;align-items:center;gap:14px;padding:0 18px;border-bottom:1px solid var(--border)}
+  .crumb{font-size:13px;font-weight:600}
+  .top-right{margin-left:auto;display:flex;align-items:center;gap:8px}
+  .pill{display:inline-flex;align-items:center;gap:6px;font-size:10.5px;font-weight:600;padding:4px 9px;border-radius:99px;border:1px solid var(--border)}
+  .dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .crit{color:var(--crit)}
+  .pill.ok,.pill.warn,.pill.crit{color:var(--fg)}
+  .pill.ok .dot{background:var(--ok)} .pill.warn .dot{background:var(--warn)} .pill.crit .dot{background:var(--crit)}
+  .wctl{display:flex;gap:10px;color:var(--muted);font-size:11px;margin-left:8px}
+  .search{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--muted);border:1px solid var(--border);
+    border-radius:var(--r);padding:5px 10px;min-width:200px}
+  .body{flex:1;overflow:auto;padding:20px 22px;display:flex;flex-direction:column;gap:16px}
+  .eyebrow{font-size:10px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;color:var(--muted)}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:var(--cardp,16px)}
+  .card-h{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+  .card-h .spacer{flex:1}
+  h1{font-size:26px;font-weight:700;letter-spacing:-.02em}
+  .hero{display:flex;align-items:center;gap:18px;padding:var(--cardp,16px)}
+  .hero p{font-size:12px;color:var(--muted);margin-top:5px}
+  .hero .h-right{margin-left:auto;text-align:right}
+  .btn{font-size:12px;font-weight:600;padding:7px 13px;border-radius:var(--r);border:1px solid var(--border);color:var(--fg);background:transparent}
+  .btn.primary{background:var(--accent);color:var(--on-accent);border-color:transparent}
+  .btn.ghost{color:var(--muted)}
+  .modes{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+  .mode{border:1px solid var(--border);border-radius:var(--r);padding:12px 14px;background:var(--card);display:flex;flex-direction:column;gap:3px}
+  .mode b{font-size:13px;font-weight:650}
+  .mode span{font-size:11px;color:var(--muted)}
+  .mode.sel{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+  .mode.sel b::after{content:"●";font-size:8px;color:var(--accent);margin-left:7px;vertical-align:2px}
+  .tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+  .tile{border:1px solid var(--border);border-radius:var(--r);background:var(--card);padding:12px 14px;display:flex;flex-direction:column;gap:6px}
+  .tile .v{font-size:22px;font-weight:700;font-family:var(--num,inherit);letter-spacing:-.01em}
+  .tile .v small{font-size:12px;font-weight:600;color:var(--muted);margin-left:2px}
+  .tile .l{font-size:10.5px;color:var(--muted);font-weight:600;letter-spacing:.06em;text-transform:uppercase;display:flex;justify-content:space-between}
+  .tile svg{width:100%;height:26px;margin-top:2px}
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:start}
+  .cols3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;align-items:start}
+  .row{display:flex;align-items:center;gap:12px;padding:10px 2px;border-bottom:1px solid var(--border-soft);font-size:12.5px}
+  .row:last-child{border-bottom:0}
+  .row .t{flex:1}
+  .row .t b{font-weight:600;display:block}
+  .row .t span{font-size:11px;color:var(--muted)}
+  .row .val{font-size:12px;color:var(--muted);font-family:var(--num,inherit)}
+  .sw{width:34px;height:20px;border-radius:10px;background:var(--border);position:relative;flex:none}
+  .sw::after{content:"";position:absolute;width:16px;height:16px;border-radius:50%;background:#fff;top:2px;left:2px;box-shadow:0 1px 2px rgba(0,0,0,.35)}
+  .sw.on{background:var(--swon)}
+  .sw.on::after{left:16px}
+  .slider{width:130px;height:4px;border-radius:2px;background:var(--border);position:relative;flex:none}
+  .slider i{position:absolute;left:0;top:0;bottom:0;width:58%;background:var(--accent);border-radius:2px}
+  .slider::after{content:"";position:absolute;top:-3.5px;left:58%;width:11px;height:11px;border-radius:50%;background:var(--fg);border:2px solid var(--accent)}
+  .chips{display:flex;gap:7px;flex-wrap:wrap}
+  .chip{font-size:11.5px;font-weight:600;padding:5px 11px;border-radius:99px;border:1px solid var(--border);color:var(--muted);background:transparent}
+  .chip.sel{color:var(--fg);border-color:var(--accent);background:var(--chip-on)}
+  .chip.add{border-style:dashed}
+  .seg{display:inline-flex;border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
+  .seg span{font-size:12px;font-weight:600;padding:6px 16px;color:var(--muted)}
+  .seg span.on{background:var(--accent);color:var(--on-accent)}
+  .kb{display:grid;grid-template-rows:repeat(6,1fr);gap:4px;padding:12px;border-radius:var(--r);
+      background:var(--kb-bg);border:1px solid var(--border)}
+  .krow{display:grid;grid-template-columns:repeat(16,1fr);gap:4px}
+  .krow i{display:block;aspect-ratio:1.15;border-radius:3px}
+  .kb-foot{display:flex;align-items:center;gap:8px;margin-top:12px}
+  .kb-foot .hint{margin-left:auto;font-size:11px;color:var(--muted)}
+  .statbar{height:34px;border-top:1px solid var(--border);display:flex;align-items:center;gap:16px;padding:0 18px;font-size:10.5px;color:var(--muted);background:var(--side)}
+  .statbar b{color:var(--fg)}
+  .mono{font-family:var(--num,inherit)}
+  .led{display:inline-flex;align-items:center;gap:6px;font-size:10.5px}
+  .led i{width:7px;height:7px;border-radius:2px;background:currentColor}
+
+  /* ── template palettes ───────────────────────────────────── */
+  .t1{--bg:#0b0d0f;--win:#15181b;--side:#111316;--content:#171a1e;--card:#1b1f24;--border:#293038;--border-soft:#222830;
+      --fg:#e7eaee;--muted:#8d97a3;--accent:#2dd4bf;--on-accent:#05271f;--swon:#2dd4bf;--ok:#34d399;--warn:#fbbf24;--crit:#f87171;
+      --r:3px;--cardp:14px;--nav-on:#1d232a;--chip-on:rgba(45,212,191,.10);
+      --kb-bg:#101316;--shadow:0 26px 60px rgba(0,0,0,.55)}
+  .t1 .body{background:var(--content)}
+  .t1 h1{font-size:24px}
+
+  .t2{--bg:#e7e9ee;--win:#ffffff;--side:#f6f7f9;--content:#ffffff;--card:#ffffff;--border:#e4e7ec;--border-soft:#eef0f3;
+      --fg:#181d24;--muted:#6b7480;--accent:#191c22;--on-accent:#ffffff;--swon:#191c22;--ok:#16a34a;--warn:#d97706;--crit:#dc2626;
+      --r:9px;--cardp:16px;--nav-on:#eceef1;--chip-on:#f1f3f5;
+      --kb-bg:#f6f7f9;--shadow:0 30px 70px rgba(15,23,42,.18)}
+  .t2 .desk{background:radial-gradient(1200px 500px at 20% 0%, #f2f3f6 0%, #e2e5ea 60%);border-color:#d6dae0}
+  .t2 .wctl,.t2 .chooser-x{color:#9aa3ad}
+
+  .t3{--bg:#0b0e10;--win:#14171a;--side:#0f1214;--content:#14171a;--card:#191e23;--border:#262d34;--border-soft:#1e242a;
+      --fg:#d9e0e8;--muted:#7f8c99;--accent:#f0b429;--on-accent:#241b04;--swon:#3fb950;--ok:#3fb950;--warn:#f0b429;--crit:#f85149;
+      --r:3px;--cardp:12px;--nav-on:#1b2126;--chip-on:rgba(240,180,41,.10);
+      --kb-bg:#0f1214;--shadow:0 26px 60px rgba(0,0,0,.6);
+      --num:ui-monospace,"JetBrains Mono","SF Mono",Menlo,monospace}
+  .t3 .body{background:var(--content)}
+  .t3 .tile .v{font-size:19px}
+  .t3 h1{font-size:22px;font-family:var(--num)}
+  .t3 .row{padding:8px 2px;font-size:12px}
+
+  .t4{--bg:#eceff3;--win:#fbfcfe;--side:#ffffff;--content:#f4f6f9;--card:#ffffff;--border:#e1e6ed;--border-soft:#eef1f5;
+      --fg:#182230;--muted:#5f6b7a;--accent:#2563eb;--on-accent:#ffffff;--swon:#2563eb;--ok:#16a34a;--warn:#d97706;--crit:#dc2626;
+      --r:11px;--cardp:18px;--nav-on:#eef2ff;--chip-on:#eff4ff;
+      --kb-bg:#f4f6f9;--shadow:0 30px 70px rgba(15,23,42,.16)}
+  .t4 .desk{background:radial-gradient(1200px 500px at 20% 0%, #f4f6f9 0%, #e6e9ee 60%);border-color:#d9dee5}
+  .t4 .row{padding:12px 2px;font-size:13.5px}
+  .t4 h1{font-size:28px}
+  .t4 .side{padding-top:20px}
+</style>
+</head>
+<body>
+
+<nav class="chooser">
+  <span class="title">Template preview</span>
+  <a href="#t1"><b>01</b>Pro Console</a>
+  <a href="#t2"><b>02</b>Studio</a>
+  <a href="#t3"><b>03</b>Workspace</a>
+  <a href="#t4"><b>04</b>Enterprise</a>
+  <span class="hint">Reply with a number — <b>“2”</b>, “3 but darker”, “mix 1 + 4” …</span>
+</nav>
+
+<!-- ══════════════════════ 01 · PRO CONSOLE ══════════════════════ -->
+<section class="t" id="t1">
+  <header class="th">
+    <div class="tnum">01</div>
+    <div>
+      <h2>Pro Console <span class="tag">dark graphite · single teal accent · flat</span></h2>
+      <p>An instrument-panel look: flat graphite surfaces, hairline borders, almost no rounding, one restrained
+         accent color used only for state and actions. Reads like a professional device console, not a toy.</p>
+      <ul class="traits"><li>Flat 3px corners</li><li>2px active-nav indicator</li><li>Single teal accent</li><li>Uppercase micro-labels</li><li>No glow, no gradients</li></ul>
+    </div>
+  </header>
+  <div class="desk"><div class="win t1">
+    <aside class="side">
+      <div class="brand"><span class="logo"></span>Razer Command Center</div>
+      <nav class="nav">
+        <a class="on"><svg viewBox="0 0 24 24"><path d="M12 4a8 8 0 1 0 8 8"/><path d="M12 12l4-4"/></svg>System</a>
+        <a><svg viewBox="0 0 24 24"><rect x="3" y="8" width="16" height="9" rx="1.5"/><path d="M21 11v3"/></svg>Power</a>
+        <a><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></svg>GPU</a>
+        <a><svg viewBox="0 0 24 24"><path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-4 10.5c.7.6 1 1.4 1 2.5h6c0-1.1.3-1.9 1-2.5A6 6 0 0 0 12 3z"/></svg>Lighting</a>
+        <a><svg viewBox="0 0 24 24"><path d="M3 12h4l2-6 4 12 2-6h6"/></svg>Diagnostics</a>
+      </nav>
+      <div class="side-foot">
+        <div class="mini"><span>Battery</span><b data-live="82" data-unit="%">82%</b></div>
+        <div class="bar"><i style="width:82%"></i></div>
+        <div class="mini"><span>PPD</span><b>balanced</b></div>
+      </div>
+    </aside>
+    <div class="main">
+      <div class="top">
+        <span class="crumb">System</span>
+        <div class="top-right">
+          <span class="pill ok"><i class="dot"></i>Chroma daemon</span>
+          <span class="pill warn"><i class="dot"></i>GPU sleep — pending reboot</span>
+          <div class="wctl"><span>–</span><span>▢</span><span>✕</span></div>
+        </div>
+      </div>
+      <div class="body">
+        <div class="eyebrow">Performance mode</div>
+        <div class="card hero">
+          <div><h1>Balanced</h1><p>power-profiles-daemon · platform_profile=balanced · fans automatic</p></div>
+          <div class="h-right"><button class="btn primary">Open power page</button></div>
+        </div>
+        <div class="modes">
+          <div class="mode"><b>Quiet</b><span>power-saver · ≤ 45 dB</span></div>
+          <div class="mode sel"><b>Balanced</b><span>default · adaptive</span></div>
+          <div class="mode"><b>Performance</b><span>performance · full boost</span></div>
+        </div>
+        <div class="tiles">
+          <div class="tile"><span class="l">CPU temp <span class="ok mono" style="text-transform:none">nominal</span></span><span class="v" data-live="61" data-unit="°">61°</small></span><svg viewBox="0 0 100 26" preserveAspectRatio="none"><polyline points="0,18 12,15 24,17 36,11 48,14 60,9 72,13 84,10 100,12" fill="none" stroke="#2dd4bf" stroke-width="1.5"/></svg></div>
+          <div class="tile"><span class="l">GPU temp</span><span class="v" data-live="55" data-unit="°">55°</span><svg viewBox="0 0 100 26" preserveAspectRatio="none"><polyline points="0,14 12,16 24,12 36,15 48,11 60,14 72,10 84,13 100,11" fill="none" stroke="#8d97a3" stroke-width="1.5"/></svg></div>
+          <div class="tile"><span class="l">Fans</span><span class="v" data-live="3100" data-unit=" rpm">3100 rpm</span><svg viewBox="0 0 100 26" preserveAspectRatio="none"><polyline points="0,20 14,18 28,16 42,17 56,13 70,12 84,14 100,13" fill="none" stroke="#8d97a3" stroke-width="1.5"/></svg></div>
+          <div class="tile"><span class="l">Battery</span><span class="v" data-live="82" data-unit="%">82%</span><svg viewBox="0 0 100 26" preserveAspectRatio="none"><polyline points="0,8 16,9 32,10 48,11 64,12 80,13 100,15" fill="none" stroke="#34d399" stroke-width="1.5"/></svg></div>
+        </div>
+        <div class="cols">
+          <div class="card">
+            <div class="card-h"><span class="eyebrow">Power</span></div>
+            <div class="row"><div class="t"><b>Custom fan curve</b><span>manual duty override</span></div><div class="slider"><i></i></div></div>
+            <div class="row"><div class="t"><b>USB charging</b><span>always-on ports on battery</span></div><div class="sw on"></div></div>
+            <div class="row"><div class="t"><b>Battery care</b><span>charge limit 80%</span></div><div class="sw on"></div></div>
+            <div class="row"><div class="t"><b>Startup sound</b></div><div class="sw"></div></div>
+          </div>
+          <div class="card">
+            <div class="card-h"><span class="eyebrow">System</span></div>
+            <div class="row"><div class="t"><b>Kernel</b></div><span class="val">6.12 · CachyOS</span></div>
+            <div class="row"><div class="t"><b>openrazer daemon</b></div><span class="val ok">running</span></div>
+            <div class="row"><div class="t"><b>polkit elevation</b></div><span class="val ok">ready</span></div>
+            <div class="row"><div class="t"><b>Session</b></div><span class="val">Wayland · Hyprland</span></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-h"><span class="eyebrow">Lighting — profiles</span>
+            <div class="spacer"></div>
+            <div class="chips">
+              <span class="chip sel">Ocean</span><span class="chip">Razer green</span><span class="chip add">+ New profile</span>
+            </div>
+          </div>
+          <div class="kb kb1"></div>
+          <div class="kb-foot">
+            <button class="btn ghost">Brush</button><button class="btn ghost">Fill</button><button class="btn ghost">Clear</button>
+            <span class="hint">Paint per-key, then send the frame</span>
+            <button class="btn primary">Apply to keyboard</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div></div>
+</section>
+
+<!-- ══════════════════════ 02 · STUDIO ══════════════════════ -->
+<section class="t" id="t2">
+  <header class="th">
+    <div class="tnum">02</div>
+    <div>
+      <h2>Studio <span class="tag">light paper · ink accent · calm</span></h2>
+      <p>A bright, editorial take: white cards on soft paper, generous spacing, black-and-ink controls with color
+         reserved strictly for status. The calmest, most “native Linux app” direction.</p>
+      <ul class="traits"><li>Light theme</li><li>Black primary buttons</li><li>Soft 9px cards + subtle shadows</li><li>Search field in topbar</li><li>Status color only</li></ul>
+    </div>
+  </header>
+  <div class="desk"><div class="win t2">
+    <aside class="side">
+      <div class="brand"><span class="logo"></span>Razer Command Center</div>
+      <nav class="nav">
+        <a><svg viewBox="0 0 24 24"><path d="M12 4a8 8 0 1 0 8 8"/><path d="M12 12l4-4"/></svg>System</a>
+        <a class="on"><svg viewBox="0 0 24 24"><rect x="3" y="8" width="16" height="9" rx="1.5"/><path d="M21 11v3"/></svg>Power</a>
+        <a><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></svg>GPU</a>
+        <a><svg viewBox="0 0 24 24"><path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-4 10.5c.7.6 1 1.4 1 2.5h6c0-1.1.3-1.9 1-2.5A6 6 0 0 0 12 3z"/></svg>Lighting</a>
+        <a><svg viewBox="0 0 24 24"><path d="M3 12h4l2-6 4 12 2-6h6"/></svg>Diagnostics</a>
+      </nav>
+      <div class="side-foot">
+        <div class="mini"><span>Battery</span><b data-live="82" data-unit="%">82%</b></div>
+        <div class="bar"><i style="width:82%"></i></div>
+      </div>
+    </aside>
+    <div class="main">
+      <div class="top">
+        <span class="crumb">Power</span>
+        <div class="search">⌕&nbsp; Search settings…</div>
+        <div class="top-right">
+          <span class="pill ok"><i class="dot"></i>Daemon</span>
+          <div class="wctl"><span>–</span><span>▢</span><span>✕</span></div>
+        </div>
+      </div>
+      <div class="body">
+        <div class="eyebrow">Performance mode</div>
+        <div class="card hero" style="align-items:flex-start">
+          <div>
+            <h1>Balanced</h1>
+            <p>Adaptive performance. The platform picks boost opportunistically; fans stay automatic.</p>
+          </div>
+        </div>
+        <div class="card" style="padding:4px 16px">
+          <div class="row"><div class="t"><b>Quiet</b><span>power-saver · cooler, slower, near-silent</span></div><div class="sw"></div></div>
+          <div class="row"><div class="t"><b>Balanced</b><span>default · adaptive</span></div><div class="sw on"></div></div>
+          <div class="row"><div class="t"><b>Performance</b><span>full boost · fans audible</span></div><div class="sw"></div></div>
+        </div>
+        <div class="tiles">
+          <div class="tile"><span class="l">CPU temp</span><span class="v" data-live="61" data-unit="°">61°</span><svg viewBox="0 0 100 26" preserveAspectRatio="none"><polyline points="0,18 12,15 24,17 36,11 48,14 60,9 72,13 84,10 100,12" fill="none" stroke="#191c22" stroke-width="1.5"/></svg></div>
+          <div class="tile"><span class="l">GPU temp</span><span class="v" data-live="55" data-unit="°">55°</span><svg viewBox="0 0 100 26" preserveAspectRatio="none"><polyline points="0,14 12,16 24,12 36,15 48,11 60,14 72,10 84,13 100,11" fill="none" stroke="#191c22" stroke-width="1.5"/></svg></div>
+          <div class="tile"><span class="l">Fans</span><span class="v" data-live="3100" data-unit=" rpm">3100 rpm</span><svg viewBox="0 0 100 26" preserveAspectRatio="none"><polyline points="0,20 14,18 28,16 42,17 56,13 70,12 84,14 100,13" fill="none" stroke="#191c22" stroke-width="1.5"/></svg></div>
+          <div class="tile"><span class="l">Battery</span><span class="v" data-live="82" data-unit="%">82%</span><svg viewBox="0 0 100 26" preserveAspectRatio="none"><polyline points="0,8 16,9 32,10 48,11 64,12 80,13 100,15" fill="none" stroke="#16a34a" stroke-width="1.5"/></svg></div>
+        </div>
+        <div class="cols">
+          <div class="card">
+            <div class="card-h"><span class="eyebrow">Power settings</span></div>
+            <div class="row"><div class="t"><b>Custom fan curve</b><span>Manual duty override</span></div><div class="slider"><i></i></div></div>
+            <div class="row"><div class="t"><b>USB charging</b><span>Always-on ports on battery</span></div><div class="sw on"></div></div>
+            <div class="row"><div class="t"><b>Battery care</b><span>Charge limit 80%</span></div><div class="sw on"></div></div>
+            <div class="row"><div class="t"><b>Startup sound</b></div><div class="sw"></div></div>
+          </div>
+          <div class="card">
+            <div class="card-h"><span class="eyebrow">System</span></div>
+            <div class="row"><div class="t"><b>Kernel</b></div><span class="val">6.12 · CachyOS</span></div>
+            <div class="row"><div class="t"><b>openrazer daemon</b></div><span class="val ok">running</span></div>
+            <div class="row"><div class="t"><b>polkit elevation</b></div><span class="val ok">ready</span></div>
+            <div class="row"><div class="t"><b>Session</b></div><span class="val">Wayland · Hyprland</span></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-h"><span class="eyebrow">Lighting — profiles</span>
+            <div class="spacer"></div>
+            <div class="chips"><span class="chip sel">Ocean</span><span class="chip">Razer green</span><span class="chip add">+ New profile</span></div>
+          </div>
+          <div class="kb kb2"></div>
+          <div class="kb-foot">
+            <button class="btn ghost">Brush</button><button class="btn ghost">Fill</button>
+            <span class="hint">Paint per-key, then send the frame</span>
+            <button class="btn primary">Apply to keyboard</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div></div>
+</section>
+
+<!-- ══════════════════════ 03 · WORKSPACE ══════════════════════ -->
+<section class="t" id="t3">
+  <header class="th">
+    <div class="tnum">03</div>
+    <div>
+      <h2>Workspace <span class="tag">tactical · data-dense · amber</span></h2>
+      <p>A cockpit for people who like numbers: monospaced readouts, LED-style indicators, live clock, telemetry
+         pinned in the sidebar and three columns of dense rows. Maximum information per pixel.</p>
+      <ul class="traits"><li>Monospace numerals</li><li>Telemetry docked in sidebar</li><li>Live clock + LED strip</li><li>3-column dense layout</li><li>Amber accent</li></ul>
+    </div>
+  </header>
+  <div class="desk"><div class="win t3">
+    <aside class="side">
+      <div class="brand"><span class="logo"></span>RCC</div>
+      <nav class="nav">
+        <a class="on"><svg viewBox="0 0 24 24"><path d="M12 4a8 8 0 1 0 8 8"/><path d="M12 12l4-4"/></svg>System</a>
+        <a><svg viewBox="0 0 24 24"><rect x="3" y="8" width="16" height="9" rx="1.5"/><path d="M21 11v3"/></svg>Power</a>
+        <a><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></svg>GPU</a>
+        <a><svg viewBox="0 0 24 24"><path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-4 10.5c.7.6 1 1.4 1 2.5h6c0-1.1.3-1.9 1-2.5A6 6 0 0 0 12 3z"/></svg>Lighting</a>
+        <a><svg viewBox="0 0 24 24"><path d="M3 12h4l2-6 4 12 2-6h6"/></svg>Diagnostics</a>
+      </nav>
+      <div class="side-foot">
+        <div class="mini"><span>CPU</span><b class="mono" data-live="61" data-unit="°C">61°C</b></div>
+        <div class="mini"><span>GPU</span><b class="mono" data-live="55" data-unit="°C">55°C</b></div>
+        <div class="mini"><span>FAN</span><b class="mono" data-live="3100" data-unit=" rpm">3100 rpm</b></div>
+        <div class="mini"><span>BAT</span><b class="mono" data-live="82" data-unit="%">82%</b></div>
+        <div class="bar"><i style="width:82%"></i></div>
+      </div>
+    </aside>
+    <div class="main">
+      <div class="top">
+        <span class="crumb mono">SYSTEM</span>
+        <div class="top-right">
+          <span class="led ok"><i></i>DAEMON</span>
+          <span class="led warn"><i></i>GPU-SLEEP</span>
+          <span class="led ok"><i></i>POLKIT</span>
+          <span class="mono" id="clock" style="font-size:12px;color:var(--fg);margin:0 8px">14:32:07</span>
+          <div class="wctl"><span>–</span><span>▢</span><span>✕</span></div>
+        </div>
+      </div>
+      <div class="body">
+        <div class="eyebrow">Mode</div>
+        <div class="card hero" style="padding:12px 14px">
+          <div><h1>BALANCED</h1><p class="mono">ppd: default · platform: balanced · fans: auto</p></div>
+          <div class="h-right"><button class="btn primary">CONFIGURE</button></div>
+        </div>
+        <div class="tiles">
+          <div class="tile"><span class="l">CPU °C <span class="ok" style="text-transform:none">▂▄▆</span></span><span class="v" data-live="61" data-unit="°">61°</span><svg viewBox="0 0 100 26" preserveAspectRatio="none"><polyline points="0,18 12,15 24,17 36,11 48,14 60,9 72,13 84,10 100,12" fill="none" stroke="#f0b429" stroke-width="1.5"/></svg></div>
+          <div class="tile"><span class="l">GPU °C</span><span class="v" data-live="55" data-unit="°">55°</span><svg viewBox="0 0 100 26" preserveAspectRatio="none"><polyline points="0,14 12,16 24,12 36,15 48,11 60,14 72,10 84,13 100,11" fill="none" stroke="#f0b429" stroke-width="1.5"/></svg></div>
+          <div class="tile"><span class="l">FAN RPM</span><span class="v" data-live="3100" data-unit="">3100</span><svg viewBox="0 0 100 26" preserveAspectRatio="none"><polyline points="0,20 14,18 28,16 42,17 56,13 70,12 84,14 100,13" fill="none" stroke="#f0b429" stroke-width="1.5"/></svg></div>
+          <div class="tile"><span class="l">BATT %</span><span class="v" data-live="82" data-unit="%">82%</span><svg viewBox="0 0 100 26" preserveAspectRatio="none"><polyline points="0,8 16,9 32,10 48,11 64,12 80,13 100,15" fill="none" stroke="#3fb950" stroke-width="1.5"/></svg></div>
+        </div>
+        <div class="cols3">
+          <div class="card">
+            <div class="card-h"><span class="eyebrow">Power</span></div>
+            <div class="row"><div class="t"><b>Fan curve</b></div><div class="slider"><i></i></div></div>
+            <div class="row"><div class="t"><b>USB charge</b></div><div class="sw on"></div></div>
+            <div class="row"><div class="t"><b>Care 80%</b></div><div class="sw on"></div></div>
+            <div class="row"><div class="t"><b>Boot sound</b></div><div class="sw"></div></div>
+          </div>
+          <div class="card">
+            <div class="card-h"><span class="eyebrow">Diagnostics</span></div>
+            <div class="row"><div class="t"><b>Kernel</b></div><span class="val">6.12.cachyos</span></div>
+            <div class="row"><div class="t"><b>openrazer</b></div><span class="val ok">running</span></div>
+            <div class="row"><div class="t"><b>elevation</b></div><span class="val ok">ready</span></div>
+            <div class="row"><div class="t"><b>session</b></div><span class="val">wayland</span></div>
+            <div class="row"><div class="t"><b>uptime</b></div><span class="val" data-live="4" data-unit="h 12m">4h 12m</span></div>
+          </div>
+          <div class="card">
+            <div class="card-h"><span class="eyebrow">GPU</span></div>
+            <div class="row"><div class="t"><b>dGPU</b></div><span class="val warn">sleep pending</span></div>
+            <div class="row"><div class="t"><b>AQ_DRM_DEVICES</b></div><span class="val">next login</span></div>
+            <div class="row"><div class="t"><b>VRAM</b></div><span class="val" data-live="1.2" data-unit=" GiB">1.2 GiB</span></div>
+            <div class="row"><div class="t"><b>decode ops</b></div><span class="val ok">granted</span></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-h"><span class="eyebrow">Lighting</span>
+            <div class="spacer"></div>
+            <div class="chips"><span class="chip sel">OCEAN</span><span class="chip">GREEN</span><span class="chip add">+ NEW</span></div>
+          </div>
+          <div class="kb kb3"></div>
+          <div class="kb-foot">
+            <button class="btn ghost">BRUSH</button><button class="btn ghost">FILL</button>
+            <span class="hint">frame → keyboard</span>
+            <button class="btn primary">APPLY</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div></div>
+</section>
+
+<!-- ══════════════════════ 04 · ENTERPRISE ══════════════════════ -->
+<section class="t" id="t4">
+  <header class="th">
+    <div class="tnum">04</div>
+    <div>
+      <h2>Enterprise <span class="tag">airy Nordic · blue · grouped settings</span></h2>
+      <p>The most conventional-professional direction, like a modern system-settings suite: airy light surfaces,
+         one corporate blue, large grouped cards, segmented mode control and a persistent status bar.</p>
+      <ul class="traits"><li>Grouped nav sections</li><li>Segmented mode control</li><li>Big 11px-radius cards</li><li>Right-aligned controls</li><li>Status footer bar</li></ul>
+    </div>
+  </header>
+  <div class="desk"><div class="win t4" style="flex-direction:column">
+    <div style="display:flex;flex:1;min-height:0">
+      <aside class="side">
+        <div class="brand"><span class="logo"></span>Razer Command Center</div>
+        <nav class="nav">
+          <div class="grp">Device</div>
+          <a><svg viewBox="0 0 24 24"><rect x="3" y="8" width="16" height="9" rx="1.5"/><path d="M21 11v3"/></svg>Power</a>
+          <a><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></svg>GPU</a>
+          <a class="on"><svg viewBox="0 0 24 24"><path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-4 10.5c.7.6 1 1.4 1 2.5h6c0-1.1.3-1.9 1-2.5A6 6 0 0 0 12 3z"/></svg>Lighting</a>
+          <div class="grp">System</div>
+          <a><svg viewBox="0 0 24 24"><path d="M12 4a8 8 0 1 0 8 8"/><path d="M12 12l4-4"/></svg>Overview</a>
+          <a><svg viewBox="0 0 24 24"><path d="M3 12h4l2-6 4 12 2-6h6"/></svg>Diagnostics</a>
+        </nav>
+        <div class="side-foot">
+          <div class="mini"><span>Battery</span><b data-live="82" data-unit="%">82%</b></div>
+          <div class="bar"><i style="width:82%"></i></div>
+        </div>
+      </aside>
+      <div class="main">
+        <div class="top">
+          <span class="crumb">Lighting</span>
+          <div class="top-right">
+            <span class="pill ok"><i class="dot"></i>Daemon active</span>
+            <div class="wctl"><span>–</span><span>▢</span><span>✕</span></div>
+          </div>
+        </div>
+        <div class="body">
+          <div>
+            <h1>Lighting</h1>
+            <p style="font-size:13px;color:var(--muted);margin-top:4px">Per-key RGB profiles for the built-in keyboard. Changes apply when you press Apply.</p>
+          </div>
+          <div class="card">
+            <div class="card-h"><span class="eyebrow">Profiles</span><div class="spacer"></div>
+              <div class="seg"><span>Ocean</span><span class="on">Razer green</span><span>+ New</span></div>
+            </div>
+            <div class="kb kb4"></div>
+            <div class="kb-foot">
+              <span class="chip">Brush</span><span class="chip">Eraser</span><span class="chip">Fill all</span>
+              <span class="hint">2 profiles · login re-apply on</span>
+              <button class="btn primary">Apply to keyboard</button>
+            </div>
+          </div>
+          <div class="cols">
+            <div class="card">
+              <div class="card-h"><span class="eyebrow">Behaviour</span></div>
+              <div class="row"><div class="t"><b>Re-apply at every login</b><span>Custom frames are volatile</span></div><div class="sw on"></div></div>
+              <div class="row"><div class="t"><b>Daylight dimming</b><span>08:00 – 19:00 · cap 15%</span></div><div class="sw on"></div></div>
+              <div class="row"><div class="t"><b>Brightness</b><span>Keyboard backlight</span></div><div class="slider"><i></i></div></div>
+            </div>
+            <div class="card">
+              <div class="card-h"><span class="eyebrow">Live status</span></div>
+              <div class="row"><div class="t"><b>CPU temperature</b></div><span class="val" data-live="61" data-unit=" °C">61 °C</span></div>
+              <div class="row"><div class="t"><b>GPU temperature</b></div><span class="val" data-live="55" data-unit=" °C">55 °C</span></div>
+              <div class="row"><div class="t"><b>Fan speed</b></div><span class="val" data-live="3100" data-unit=" rpm">3100 rpm</span></div>
+              <div class="row"><div class="t"><b>Performance mode</b></div><span class="val">Balanced</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="statbar">
+      <span><b>Balanced</b> · power-profiles-daemon</span><span>Chroma daemon <b>active</b></span>
+      <span>Battery <b data-live="82" data-unit="%">82%</b></span>
+      <span style="margin-left:auto">polkit <b>ready</b></span><span>GPU sleep <b>pending reboot</b></span>
+    </div>
+  </div></div>
+</section>
+
+<p style="text-align:center;color:#6b7480;font-size:12px">
+  All four previews contain the same real content — navigation, power modes, live telemetry, settings rows,
+  diagnostics, lighting profiles and the per-key editor — so you are choosing structure and tone, not just colors.
+</p>
+
+<script>
+  // per-key keyboard previews — one hue family per template
+  function kb(sel, hue, glow){
+    document.querySelectorAll(sel).forEach(el=>{
+      for(let r=0;r<6;r++){
+        const row=document.createElement('div'); row.className='krow';
+        for(let c=0;c<16;c++){
+          const k=document.createElement('i');
+          const on=((r*7+c*5)%11)>1;
+          if(on){
+            const h=(hue+r*9+c*11)%360;
+            k.style.background=`hsl(${h} 68% 55%)`;
+            if(glow) k.style.boxShadow=`0 0 6px hsl(${h} 68% 55% / .45)`;
+          } else {
+            k.style.background='rgba(127,127,127,.10)';
+          }
+          row.appendChild(k);
+        }
+        el.appendChild(row);
+      }
+    });
+  }
+  kb('.kb1',168,true);   // teal ocean wave
+  kb('.kb2',205,false);  // restrained blue, no glow (light theme)
+  kb('.kb3',38,true);    // amber tactical
+  kb('.kb4',222,false);  // corporate blue
+
+  // gentle live jitter so the previews feel alive
+  setInterval(()=>{
+    document.querySelectorAll('[data-live]').forEach(el=>{
+      const b=parseFloat(el.dataset.live); if(isNaN(b))return;
+      const amp=b>100?120:(b>20?2:0.6);
+      const v=b+(Math.random()-0.5)*amp;
+      const dec=b<10&&b%1!==0?1:0;
+      el.textContent=v.toFixed(dec)+el.dataset.unit;
+    });
+  },2000);
+
+  // template 03 clock
+  setInterval(()=>{
+    const c=document.getElementById('clock');
+    if(c) c.textContent=new Date().toLocaleTimeString('de-DE');
+  },1000);
+</script>
+</body>
+</html>

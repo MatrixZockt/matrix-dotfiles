@@ -1,0 +1,3482 @@
+#!/usr/bin/env python3
+"""ii Music — the desktop app for the shell's music system.
+
+The headless mpv daemon (ii-music-mpd.service, JSON IPC at
+$XDG_RUNTIME_DIR/ii-music-ipc) is the single source of truth for playback;
+this app is just another client of the same socket, like the left sidebar's
+Music tab and the MPRIS bridge. Start a song here, the sidebar follows; start
+one there, this app follows. State cannot drift, because there is one player.
+
+LIBRARY  ~/Music/Spotify/<playlist>/*.mp3, "Artist - Title.mp3" naming — the
+exact scan the sidebar uses (services/MusicPlayer.qml).
+
+ONLINE
+------
+The same search field also queries a real online catalogue (Audius), so one
+box covers "everything I own" and "everything anyone has published". Local
+matches come first, online rows underneath, clearly labelled, each with the
+two things you can do with a result you have found but do not own yet: save
+it offline on its own, or save it straight into one of your playlists.
+
+Paging is deliberate: the endpoint returns 10 rows with no parameters at all
+and honours limit/offset, so results ACCUMULATE across pages behind a "Load
+more" row instead of being cut at whatever the first page held.
+
+Both this app and the shell's Music tab read the same saved settings out of
+~/.local/state/quickshell/states.json, so they search under the same
+app_name (one shared rate-limit budget, not two competing ones) and save into
+the same folder.
+
+CLOSING THE WINDOW DOES NOT QUIT
+--------------------------------
+Playback lives in the daemon, not here, so this app has no reason to die when
+its window closes. The window is a FACE of the daemon, and the shell's
+background-apps tray is the app's home: closing the window just hides it, the
+process stays, the song keeps playing, and the tray entry brings the window
+back. Quitting is a separate, explicit act (the Quit button, or the tray).
+
+That is why the app is a Gio.Application with a stable application_id: the
+session bus makes it single-instance, so launching it again while the window
+is hidden re-presents the existing window instead of starting a rival second
+copy that would fight over the same socket.
+
+WHILE THE WINDOW IS HIDDEN
+--------------------------
+It still registers itself with the shell's background-apps registry
+(quickshell-bgapp-music in XDG_RUNTIME_DIR) and still mirrors what it knows
+onto the MPRIS bridge, so the top bar keeps showing the track no matter which
+surface started it.
+
+UI
+--
+Material 3 on libadwaita, on a NEUTRAL dark-grey surface ramp (no green tint,
+no warm cast in the greys — the greys are the same family every other app on
+the system sits on) with a single muted amber accent for the things that are
+actually actionable: the play button, the seek bar, the selected playlist and
+the row that is playing right now. Everything else is grey.
+
+Layout, top to bottom: a window header with the title and the explicit quit;
+a now-playing card (cover, title/artist, transport, seek); one settings strip
+(shuffle, repeat, output device, volume — the config the sidebar has no room
+for); then the library as two columns, the playlists on the left and the
+tracks on the right, with a search field above them. Search filters across
+EVERY playlist at once, the same predicate the sidebar's Music tab uses, and
+while it is active the right column shows matches with their playlist named.
+
+Keyboard: Space, arrows, n/p, Ctrl+F (search), Escape (leave search).
+"""
+
+import hashlib
+import json
+import math
+import os
+import queue
+import re
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+gi.require_version("Gio", "2.0")
+gi.require_version("GdkPixbuf", "2.0")   # ffmpeg writes the art; GTK loads it
+os.environ.setdefault("GSK_RENDERER", "cairo")
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk  # noqa: E402
+
+APP_ID = "io.github.matrix.IiMusic"
+HOME = os.path.expanduser("~")
+MUSIC_DIR = os.path.join(HOME, "Music", "Spotify")
+RUNTIME = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+SOCK = os.path.join(RUNTIME, "ii-music-ipc")
+# The shell's background-apps registry entry (see services/BackgroundApps.qml).
+PRESENCE = os.path.join(RUNTIME, "quickshell-bgapp-music")
+CONFIG_DIR = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config")),
+    "ii-music")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+
+# ── palette ────────────────────────────────────────────────────────────────
+# A Material 3 dark surface ramp, neutral: R=G=B in the greys, so the app
+# sits in the same family as every other window on the system instead of
+# reading as its own tinted thing. Only the accent carries colour, and it is
+# a muted amber — the Music tab's accent, desaturated and pulled down a stop
+# so it marks the actionable things without shouting over the greys.
+BG = "#141414"          # window / surface
+LAYER1 = "#1c1c1c"      # card, container low
+LAYER2 = "#232323"      # container, hover
+LAYER3 = "#2c2c2c"      # container high
+OUTLINE = "#313131"     # hairline
+OUTLINE2 = "#444444"    # hairline, hovered
+TEXT = "#e6e4e3"        # on-surface
+SUB = "#a3a0a0"         # on-surface-variant
+ACCENT = "#c9a25c"      # muted amber: play, seek, selection, now playing
+ACCENT_HOVER = "#d6b06b"
+ACCENT_DIM = "#6d5a34"  # accent used as a border, not as a fill
+ON_ACCENT = "#201a10"   # text on an amber fill
+PLACEHOLDER = "#3a3a3a"
+
+# ── the hero's sizes ───────────────────────────────────────────────────────
+# The card uses 64px of cover and a 34px disc. Both are dialled UP here, on
+# request: that card is 920x580 and mostly list, so its hero is one narrow
+# band, whereas in this window the hero is the whole "now playing" statement
+# and 64px read as a thumbnail pressed against the title. The list below still
+# gets every pixel that is left, which is what the card's own comment is
+# about -- the hero gets spacious, the list gets the rest.
+#
+# 96. The card this is copied from uses 64, and 64 read as a thumbnail
+# pressed against the title rather than as the cover of the thing you are
+# listening to. The earlier 72 was chosen to buy title width, but it bought
+# it the wrong way: shrinking the cover made the whole hero read as a
+# compact strip, and the title was never actually the constraint (the row
+# has ~590px to give and the longest real title needs ~200 of it). So the
+# cover is sized for how it reads, and the window's minimum width is sized
+# to keep the words whole -- see `MusicWindow.__init__`.
+HERO_COVER = 96
+# There is no HERO_DISC any more. The play mark is the bar's own 25px, like
+# every other transport mark: `Mark` draws them, and a mark that is bigger
+# than its neighbours is not a bigger play button, it is a different design.
+# The panel's 34px existed because that transport was 28/32/28 and play had to
+# win; against 25/25/25 it does not.
+# ONE gap for the whole hero row. It had three different values (14 to the
+# text, 10 between the transport buttons, and whatever the flex left over),
+# which is why the row did not read as a single object. 18, because the row
+# is now big enough that 16 read as the cover and the title being one object.
+HERO_GAP = 18
+# ONE number for the hero's vertical air: same value above the row, between
+# the row and the bar, and below the bar. It used to be 22 (14 + a nested 8),
+# 18 (a 12 spacing plus the bar's own 6) and 10 -- three rhythms for one
+# block, which is why the hero read as a stack of unrelated pieces rather
+# than as a single "now playing" statement. 16, not 12: at 12 the hero was
+# one tight band against the list, and the point of a hero is air.
+HERO_AIR = 16
+
+
+
+
+def clock(s):
+    """M:SS. The panel's own clock(), and the only time format on the card."""
+    t = max(0, int(s or 0))
+    return f"{t // 60}:{t % 60:02d}"
+
+
+def rgba(hex_colour, alpha=1.0):
+    """#rrggbb (or #rgb) -> Cairo's float quadruple."""
+    h = hex_colour.lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    return (int(h[0:2], 16) / 255.0, int(h[2:4], 16) / 255.0,
+            int(h[4:6], 16) / 255.0, alpha)
+
+
+def kids(widget):
+    """Every child of a box, in order.
+
+    Gtk.Box has no `get_children()` in this binding (and no `get_child()`
+    either, on a Box): the only portable way is to walk the sibling chain.
+    """
+    out, c = [], widget.get_first_child()
+    while c is not None:
+        out.append(c)
+        c = c.get_next_sibling()
+    return out
+
+
+def run(*cmd):
+    try:
+        p = subprocess.run(cmd, capture_output=True, timeout=10)
+        return p.stdout
+    except Exception:
+        return b""
+
+
+# ── settings: the "more config" the sidebar has no room for ────────────────
+#
+# Persisted next to the shell's own config rather than in the app, so the
+# values survive a reinstall of the app and the daemon can be told about them
+# at startup. Only options mpv can actually honour are here — a setting that
+# silently does nothing is worse than no setting at all.
+
+DEFAULTS = {
+    "volume": 80,
+    "shuffle": False,
+    "repeat": False,      # loop the playlist
+    "outputDevice": "",   # empty = mpv's default sink
+    "restoreOnLaunch": True,
+}
+
+
+def load_config():
+    cfg = dict(DEFAULTS)
+    try:
+        with open(CONFIG_FILE) as fh:
+            cfg.update(json.load(fh))
+    except (OSError, ValueError):
+        pass
+    return cfg
+
+
+def save_config(cfg):
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(CONFIG_FILE, "w") as fh:
+            json.dump(cfg, fh, indent=2)
+    except OSError:
+        pass
+
+
+# ── library scan: the sidebar's exact rule ─────────────────────────────────
+
+def scan_library():
+    groups = {}
+    root_len = len(MUSIC_DIR) + 1
+    for dirpath, _dirs, files in os.walk(MUSIC_DIR):
+        for f in sorted(files):
+            if not f.lower().endswith(".mp3"):
+                continue
+            p = os.path.join(dirpath, f)
+            rel = p[root_len:]
+            slash = rel.find("/")
+            folder = "Music" if slash == -1 else rel[:slash]
+            base = rel[slash + 1:-4] if slash != -1 else rel[:-4]
+            dash = base.find(" - ")
+            groups.setdefault(folder, []).append({
+                "path": p,
+                "title": base[dash + 3:] if dash != -1 else base,
+                "artist": base[:dash] if dash != -1 else "",
+            })
+    return [{"name": k, "tracks": groups[k]} for k in sorted(groups)]
+
+
+def matches(track, playlist, query):
+    """The sidebar's predicate: every word must appear somewhere in the row.
+
+    Searching is over title, artist AND playlist name, so one query can find
+    a track without remembering which playlist it was filed under — and so a
+    query like "phonk" returns the PHONK playlist's contents by name too.
+    """
+    hay = f"{track['title']} {track['artist']} {playlist}".lower()
+    return all(word in hay for word in query.split())
+
+
+# ── the online catalogue ────────────────────────────────────────────────────
+#
+# Audius is artist-owned: the people making the music decide whether a track
+# is streamable and whether it may be downloaded, and the API exposes both.
+# The honest limitation is that it is an independent catalogue, not the
+# mainstream one, so expect community uploads and remixes rather than label
+# masters. What it is good for is exactly what the library cannot do: hearing
+# about a song you do not have.
+#
+# Why the settings come out of the SHELL's state file: the two surfaces are
+# one feature split across two programs, and two different download folders or
+# two different app_names (which is the rate-limit identity) would be a bug
+# wearing a disguise. The shell is the one that owns those settings.
+
+STATES_FILE = os.path.join(
+    os.environ.get("XDG_STATE_HOME", os.path.join(HOME, ".local", "state")),
+    "quickshell", "states.json")
+AUDIUS_API = "https://discoveryprovider.audius.co/v1"
+AUDIUS_PAGE = 50
+FALLBACK_DOWNLOAD_DIR = "Music/Spotify/Audius"
+FALLBACK_APP_NAME = "hyprland-music"
+
+
+def shell_music_settings():
+    """The shell's persisted music settings, or the shell's own defaults.
+
+    Read on every call rather than cached at import: the shell may write the
+    file after this process started, and a stale download folder would put
+    saves somewhere the user cannot see them.
+    """
+    out = {"downloadFolder": FALLBACK_DOWNLOAD_DIR,
+           "onlineAppName": FALLBACK_APP_NAME,
+           "rescanAfterDownload": True}
+    try:
+        with open(STATES_FILE) as fh:
+            music = json.load(fh).get("music") or {}
+        for k in out:
+            if k in music:
+                out[k] = music[k]
+    except (OSError, ValueError, AttributeError):
+        pass  # no shell state yet: the defaults are the shell's defaults
+    return out
+
+
+def sanitize_filename(s):
+    """Filesystem-safe text. The library's naming rule is Artist - Title."""
+    return re.sub(r"\s+", " ", re.sub(r'[/\\?%*:|"<>]', "-", str(s or ""))).strip()
+
+
+def target_dir(folder=""):
+    """Where a save lands.
+
+    An empty folder is the STANDALONE bucket: saved offline, deliberately in
+    none of the user's playlists. The library is folder-per-playlist, so a
+    file has to live somewhere, and this is the somewhere that means "just
+    keep it". A name is a playlist, created by the download itself.
+    """
+    name = sanitize_filename(folder)
+    if not name:
+        return os.path.join(HOME, shell_music_settings()["downloadFolder"])
+    return os.path.join(MUSIC_DIR, name)
+
+
+def http_error_text(exc):
+    """A message worth showing a person, for the three failures that happen."""
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code == 429:
+            return "Audius is rate-limiting us — try again in a moment"
+        if exc.code == 403:
+            return "Audius refused the request (403)"
+        return f"Audius returned HTTP {exc.code}"
+    if isinstance(exc, urllib.error.URLError):
+        return "No network — the online catalogue needs a connection"
+    return str(exc) or "The online search failed"
+
+
+class Audius:
+    """Search the online catalogue, off the GTK thread, across pages.
+
+    Nothing here touches a widget. A search runs on its own thread and calls
+    back through GLib.idle_add, because widgets may only be touched from the
+    main loop and a 20-second HTTP call on that loop freezes the window solid.
+
+    `generation` exists so a slow response for an old query cannot overwrite a
+    newer one: type "ph", then "phonk" quickly, and the "ph" answer lands
+    last and would otherwise repopulate the list with the wrong tracks.
+    """
+
+    def __init__(self, app_name=None, api=AUDIUS_API):
+        self.api = api
+        self._app_name = app_name
+        self.lock = threading.Lock()
+        self.results = []
+        self.offset = 0
+        self.has_more = False
+        self.busy = False
+        self.error = ""
+        self.query = ""
+        self.generation = 0
+
+    @property
+    def app_name(self):
+        return self._app_name or shell_music_settings()["onlineAppName"]
+
+    def url(self, query, offset):
+        return (f"{self.api}/tracks/search"
+                f"?query={urllib.parse.quote(query)}"
+                f"&limit={AUDIUS_PAGE}&offset={offset}"
+                f"&app_name={urllib.parse.quote(self.app_name)}")
+
+    def clear(self, cb=None):
+        with self.lock:
+            self.generation += 1
+            self.results = []
+            self.offset = 0
+            self.has_more = False
+            self.busy = False
+            self.error = ""
+            self.query = ""
+        if cb:
+            GLib.idle_add(cb)
+
+    def search(self, query, append=False, cb=None):
+        """(Re)search, or add the next page. cb() runs on the GTK thread."""
+        q = (query or "").strip()
+        with self.lock:
+            if len(q) < 2:
+                # Reset inline rather than by calling clear(): that would
+                # re-enter this very lock, and threading.Lock is not
+                # reentrant, so the window would hang on its own search.
+                self.generation += 1
+                self.results = []
+                self.offset = 0
+                self.has_more = False
+                self.busy = False
+                self.error = ""
+                self.query = ""
+                if cb:
+                    GLib.idle_add(cb)
+                return
+            if not append:
+                self.results = []
+                self.offset = 0
+                self.generation += 1
+            self.query = q
+            self.busy = True
+            self.error = ""
+            gen = self.generation
+            offset = self.offset if append else 0
+        threading.Thread(target=self._work, args=(q, offset, gen, cb),
+                         daemon=True).start()
+
+    def load_more(self, cb=None):
+        """Next page of the current query, if there is one."""
+        with self.lock:
+            if self.busy or not self.has_more or len(self.query) < 2:
+                return
+            gen = self.generation
+            q = self.query
+            offset = self.offset
+        threading.Thread(target=self._work, args=(q, offset, gen, cb),
+                         daemon=True).start()
+
+    def _work(self, query, offset, gen, cb):
+        try:
+            req = urllib.request.Request(
+                self.url(query, offset),
+                headers={"User-Agent": "ii-music-app/1.0",
+                         "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                data = json.load(resp).get("data") or []
+        except Exception as exc:                    # noqa: BLE001 - reported
+            with self.lock:
+                if gen != self.generation:           # a newer search won
+                    return
+                self.busy = False
+                self.has_more = False
+                self.error = http_error_text(exc)
+            if cb:
+                GLib.idle_add(cb)
+            return
+
+        rows = [self._map(t, self.app_name) for t in data]
+        rows = [r for r in rows if r["id"]]
+        with self.lock:
+            if gen != self.generation:               # a newer search won
+                return
+            seen = {r["id"] for r in self.results}
+            # Two pages of a shifting index can overlap; the same row twice is
+            # worse than one row missing.
+            self.results.extend([r for r in rows if r["id"] not in seen])
+            self.offset += len(data)
+            # A short page is the last page: the endpoint simply stops
+            # returning rows, so "fewer than we asked for" is the only
+            # end-of-results signal there is.
+            self.has_more = len(data) >= AUDIUS_PAGE
+            self.busy = False
+            self.error = ""
+        if cb:
+            GLib.idle_add(cb)
+
+    @staticmethod
+    def _map(t, app_name):
+        """One API track -> the same shape the library rows use, so the row
+        builder and the play queue do not need a second code path.
+
+        `path` is the STREAM url, not a file: mpv streams it directly, which
+        is why playing an online row needs no download at all. Audius leaves
+        `stream_url` null in search results, so it is always built from the id.
+        """
+        art = t.get("artwork") or {}
+        user = t.get("user") or {}
+        access = t.get("access") or {}
+        tid = t.get("id") or ""
+        return {
+            "id": tid,
+            "online": True,
+            "path": (f"{AUDIUS_API}/tracks/{tid}/stream"
+                     f"?app_name={urllib.parse.quote(app_name)}") if tid else "",
+            "title": t.get("title") or "Unknown",
+            "artist": user.get("name") or "Unknown artist",
+            "art": art.get("480x480") or art.get("150x150") or "",
+            # The artist decides whether a track may be saved. Showing the
+            # save button anyway would be offering something that cannot work.
+            "downloadable": access.get("download") is True,
+            "duration": t.get("duration") or 0,
+            "plays": t.get("favorite_count") or 0,
+        }
+
+
+AUDIUS = Audius()
+
+
+def download_track(track, path):
+    """Fetch one online track to `path`. Returns "" or a reason it failed.
+
+    curl because the stream endpoint 302s to the CDN and nothing else in the
+    box follows that redirect by default. --fail so an HTML error page is
+    never written out as a song, and --remove-on-error so a failure leaves no
+    empty mp3 behind for the library scan to pick up.
+    """
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except OSError as exc:
+        return str(exc)
+    try:
+        p = subprocess.run(
+            ["curl", "-L", "--fail", "--remove-on-error", "--silent",
+             "--show-error", "--max-time", "300",
+             "-A", "ii-music-app/1.0", "-o", path, track["path"]],
+            capture_output=True, timeout=320)
+    except subprocess.TimeoutExpired:
+        return "The download timed out"
+    except OSError as exc:
+        return str(exc)
+    if p.returncode != 0:
+        err = p.stderr.decode(errors="ignore").strip().split("\n")[-1]
+        # Not a bug in the URL: Audius indexes a handful of tracks whose file
+        # no longer resolves ("track not found"). Say that in words.
+        if "404" in err:
+            return "This track can no longer be downloaded"
+        return err or "The download failed"
+    return ""
+
+
+def read_duration(path):
+    """Running time in seconds, or 0.0 when it cannot be read.
+
+    ffprobe rather than mutagen because there is nothing to install here and
+    ffmpeg is already a dependency of the artwork path.
+    """
+    out = run("ffprobe", "-v", "error", "-show_entries", "format=duration",
+              "-of", "default=nw=1:nk=1", path)
+    try:
+        return float(out.decode().strip())
+    except (ValueError, AttributeError):
+        return 0.0
+
+
+def cover_for(path):
+    """Extract embedded cover art (APIC frame) as PNG bytes, or None."""
+    if not path or not os.path.isfile(path):
+        return None
+    out = run("ffmpeg", "-loglevel", "error", "-i", path,
+              "-an", "-vf", "scale=320:-1", "-frames:v", "1",
+              "-f", "image2pipe", "-vcodec", "png", "-")
+    if out and out.startswith(b"\x89PNG"):
+        return out
+    return None
+
+
+# ── artwork ────────────────────────────────────────────────────────────────
+#
+# Every image in this app comes out of the mp3s themselves: the library has
+# no jpegs in it, only APIC frames. That is a slow way to get a picture --
+# one ffmpeg process per track, ~125 of them -- and it cannot happen on the
+# GTK thread or the window would freeze solid while the playlist draws. So:
+#
+#   * each file is extracted ONCE into ~/.cache/ii-music/covers/, keyed by
+#     path + mtime + size, so a re-downloaded track gets fresh art and a
+#     rename of the library costs nothing;
+#   * extraction happens on a small worker pool, and the result is handed
+#     back through GLib.idle_add, because widgets may only be touched from
+#     the main loop;
+#   * a row never waits. It shows a placeholder and swaps in the art when it
+#     lands, so the UI is complete and usable before a single decode.
+#
+# The queue is FIFO on purpose: rows are built top to bottom, and the track
+# list starts scrolled to the top, so what the user is looking at is what is
+# being decoded first.
+COVER_CACHE = os.path.join(
+    os.environ.get("XDG_CACHE_HOME", os.path.join(HOME, ".cache")),
+    "ii-music", "covers")
+
+
+class Covers:
+    """Embedded art, extracted once, cached on disk, delivered off-thread."""
+
+    def __init__(self, workers=4):
+        self.workers = workers
+        self.queue = queue.Queue()
+        self.mem = {}
+        self.lock = threading.Lock()
+        for i in range(workers):
+            threading.Thread(target=self._run, daemon=True).start()
+
+    @staticmethod
+    def key(path):
+        """Cache filename for a track: its identity includes mtime and size,
+        so replacing a file replaces its art instead of showing the old one."""
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        h = hashlib.sha1(
+            f"{path}|{st.st_mtime_ns}|{st.st_size}".encode()
+        ).hexdigest()[:20]
+        return os.path.join(COVER_CACHE, h + ".png")
+
+    def peek(self, path):
+        """Cache file for a track's art if it is already extracted, else None.
+
+        Never extracts. Returns a PATH, not bytes: the widget loads the file
+        itself, so a 320px cover never becomes a decoded pixbuf held by Python.
+        """
+        if not path:
+            return None
+        with self.lock:
+            if path in self.mem:
+                return self.mem[path] or None
+        k = self.key(path)
+        if not k or not os.path.exists(k):
+            return None
+        with self.lock:
+            self.mem[path] = k
+        return k
+
+    def store(self, path, data):
+        """Write art bytes to the cache. Returns the file, or None."""
+        k = self.key(path)
+        with self.lock:
+            self.mem[path] = k if data else ""
+        if not k or not data:
+            return None
+        try:
+            os.makedirs(COVER_CACHE, exist_ok=True)
+            tmp = f"{k}.{os.getpid()}.tmp"
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, k)          # atomic: never a half-written png
+        except OSError:
+            return None
+        return k
+
+    def request(self, path, cb):
+        """Ask for a track's art. cb(cache_path_or_None) on the GTK thread."""
+        cached = self.peek(path)
+        if cached is not None:
+            GLib.idle_add(cb, cached)
+            return
+        self.queue.put((path, cb))
+
+    # ── online artwork ────────────────────────────────────────────────
+    #
+    # Same cache, same contract (the widget gets a FILE), different source:
+    # an online row's cover is a URL, not an mp3 with an APIC frame. Keyed by
+    # the URL alone, because a remote image has no mtime or size to hash --
+    # and that is the one honest difference from the local rule, not a second
+    # cache directory to keep in step with the first.
+    @staticmethod
+    def url_key(url):
+        if not url:
+            return None
+        h = hashlib.sha1(f"url|{url}".encode()).hexdigest()[:20]
+        return os.path.join(COVER_CACHE, h + ".png")
+
+    def peek_url(self, url):
+        k = self.url_key(url)
+        return k if k and os.path.exists(k) else None
+
+    def store_url(self, url, data):
+        k = self.url_key(url)
+        if not k or not data:
+            return None
+        try:
+            os.makedirs(COVER_CACHE, exist_ok=True)
+            tmp = f"{k}.{os.getpid()}.tmp"
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, k)          # atomic, as above
+        except OSError:
+            return None
+        return k
+
+    def request_url(self, url, cb):
+        """Ask for a remote cover. cb(cache_path_or_None) on the GTK thread."""
+        if not url:
+            GLib.idle_add(cb, None)
+            return
+        cached = self.peek_url(url)
+        if cached:
+            GLib.idle_add(cb, cached)
+            return
+        self.queue.put((("url", url), cb))
+
+    def _run(self):
+        while True:
+            item, cb = self.queue.get()
+            if isinstance(item, tuple):          # remote cover
+                _kind, url = item
+                try:
+                    req = urllib.request.Request(
+                        url, headers={"User-Agent": "ii-music-app/1.0"})
+                    with urllib.request.urlopen(req, timeout=20) as resp:
+                        data = resp.read(2 << 20)   # a cover is never huge
+                except Exception:                  # noqa: BLE001 - no art
+                    data = b""
+                GLib.idle_add(cb, self.store_url(url, data))
+            else:
+                k = self.store(item, cover_for(item))
+                GLib.idle_add(cb, k)
+
+
+COVERS = Covers()
+
+
+def set_cover_image(img, fallback, art_path):
+    """Show a cover file, or the placeholder when there is none.
+
+    By FILE, not by pixbuf or texture: Gtk.Image.set_from_pixbuf and
+    Gdk.Texture.new_for_pixbuf are both deprecated since GTK 4.10, while
+    set_from_file is current and lets GTK stream the image instead of holding
+    a decoded copy on the Python side.
+
+    The Gtk.Picture branch is kept for any caller that still wants cover-fit
+    cropping; it is not on the hero's path any more, because a Picture's
+    natural size is the artwork's own pixel size and a size request only sets
+    a minimum (see the hero cover's comment).
+    """
+    if isinstance(img, Gtk.Picture):
+        # Gtk.Picture's setter is `set_paintable`; a NULL path clears it.
+        img.set_paintable(
+            Gdk.Texture.new_from_filename(art_path) if art_path else None)
+    else:
+        img.set_from_file(art_path)      # a NULL path clears the image
+    if fallback is not None:
+        fallback.set_visible(not art_path)
+    return bool(art_path)
+
+
+# ── the sound bar: one object that is the spectrum, the seek bar, the clock
+#    and the volume ──────────────────────────────────────────────────────────
+#
+# This is a port of the shell's SpectrumSeekBar (modules/common/widgets/
+# SpectrumSeekBar.qml), used by the middle island's Music view. The geometry
+# below is that component's, deliberately and number for number, because the
+# whole point of this window is to BE that card:
+#
+#   * one pill per ~12px, 3px between them, minimum 3px wide
+#   * the pills STAND ON the seek line, not float above it: the line is 4px
+#     tall at the very bottom of the bars zone and the pills' feet are its top
+#     edge. Rounding their tops only -- a dome turns a row of bars into a row
+#     of lozenges, which is a different object.
+#   * a pill is LIT up to the playhead and dim ahead of it. That split IS the
+#     progress; there is no second line that could disagree with it.
+#   * VOLUME is the ceiling on a pill's height, so at half volume the bars
+#     cannot reach the top. One line, two readings, no legend.
+#   * elapsed left, total right, total dimmer, below the bars.
+#
+# The only thing that is genuinely different is the source of the bands: the
+# shell has a service holding them in memory and this app cannot read that,
+# so it runs its own cava against the SAME config file.
+
+CAVA_CONFIG = os.path.join(HOME, ".config", "quickshell", "ii",
+                           "scripts", "cava", "raw_output_config.txt")
+
+
+class Spectrum:
+    """cava's band list, kept off the GTK thread.
+
+    Restarting matters more than it looks: cava dies with a sink that goes
+    away, and a dead visualiser that stays dead is worse than none, because
+    the bar is supposed to be an instrument.
+    """
+
+    def __init__(self, config=CAVA_CONFIG):
+        self.config = config
+        self.lock = threading.Lock()
+        self.points = []
+        self.alive = False
+        self._stop = False
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        while not self._stop:
+            proc = None
+            try:
+                proc = subprocess.Popen(
+                    ["cava", "-p", self.config], stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, bufsize=0)
+                with self.lock:
+                    self.alive = True
+                # readline() in a loop, NOT `for line in proc.stdout`.
+                # Iterating a pipe's file object uses an internal read-ahead
+                # that does not hand back the first line until its buffer
+                # fills or the pipe closes -- so the reader sits there
+                # "connected", cava is streaming real bands into a full pipe,
+                # and the app shows a flat spectrum with no error anywhere.
+                # readline() returns each line the moment it is written.
+                while not self._stop:
+                    raw = proc.stdout.readline()
+                    if not raw:
+                        break
+                    # cava's raw format is `;`-separated ascii, one line per
+                    # frame -- the same string the shell splits in two.
+                    #
+                    # Parsed FIELD BY FIELD, and never as one big list
+                    # comprehension. A single stray character anywhere in the
+                    # frame (a sign, a blank, a locale decimal mark) made the
+                    # whole frame raise, the whole frame was skipped, and the
+                    # bar sat flat with no error anywhere -- the visible
+                    # symptom of a parser that is all-or-nothing where it
+                    # should be per field.
+                    vals = []
+                    for chunk in raw.decode("ascii", "ignore").split(";"):
+                        chunk = chunk.strip()
+                        if not chunk:
+                            continue
+                        try:
+                            vals.append(float(chunk))
+                        except ValueError:
+                            continue
+                    if vals:
+                        with self.lock:
+                            self.points = vals
+            except Exception:                     # noqa: BLE001 - keep going
+                pass
+            finally:
+                if proc is not None:
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=2)
+                    except Exception:             # noqa: BLE001
+                        pass
+            with self.lock:
+                self.alive = False
+                self.points = []
+            if not self._stop:
+                time.sleep(1.0)
+
+    def snapshot(self):
+        with self.lock:
+            return list(self.points)
+
+    def stop(self):
+        self._stop = True
+
+
+SPECTRUM = Spectrum()
+
+
+def band_shape(points, i, count):
+    """The shell's scaling: raw band -> 0..1, so both instruments agree."""
+    if not points or len(points) < 3 or count < 2:
+        return 0.0
+    idx = int(round(i / (count - 1) * (len(points) - 1)))
+    idx = max(0, min(len(points) - 1, idx))
+    return min(1.0, points[idx] / 700.0) ** 0.7
+
+
+def cairo_round_rect(cr, x, y, w, h, r):
+    """rounded_rectangle(), which pycairo does not have."""
+    r = max(0.0, min(r, w / 2.0, h / 2.0))
+    cr.new_sub_path()
+    cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+    cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+    cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+    cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
+    cr.close_path()
+
+
+def cairo_round_top(cr, x, y, w, h, r):
+    """`border-radius: 2px 2px 0 0` -- square feet, eased top corners."""
+    r = max(0.0, min(r, w / 2.0, h))
+    cr.new_sub_path()
+    cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+    cr.line_to(x + w, y + h)
+    cr.line_to(x, y + h)
+    cr.line_to(x, y + r)
+    cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
+    cr.close_path()
+
+
+class Mark(Gtk.DrawingArea):
+    """The island's TransportMark, drawn.
+
+    A port of `modules/common/widgets/TransportMark.qml`, because the buttons
+    the owner kept pointing at were the top bar's, and GTK's stock
+    `media-playback-pause-symbolic` is not them:
+
+      * 25x25 for EVERY mark. The app had 32px skips and a 36px play disc,
+        which is the old NowBarPanel transport (28/32/28), and the reason the
+        app's row read heavier than the bar's.
+      * The skips carry NO pad -- the bar's arrows are bare marks. A padded
+        arrow "reads heavier than the song title they flanks".
+      * Pause is TWO ROUNDED BARS, drawn, not a font glyph. The bar's own
+        comment says the font's pause is the wrong shape, and it is: the
+        symbolic icon is two hard rectangles. At 5x13 with a 2.5 radius and a
+        1.7 border it is the bar's mark.
+      * Hover is a 1px accent RING and nothing else. No growth (a control that
+        grows moves the thing you were reaching for) and no fill swell.
+      * Play/pause additionally carries the bar's faint 0.32 wash, because it
+        is the control people press first.
+
+    The drawing area is explicitly 25x25: a bare `Gtk.DrawingArea` measures to
+    ZERO, which is the same trap that made the sound bar draw nothing.
+    """
+
+    BOX = 25
+    RADIUS = 6               # the shell's `rounding.small`
+    BAR_W = 5
+    BAR_H = 13
+    BAR_R = 2.5
+    STROKE = 1.7
+
+    # Gtk.DrawingArea has NO signals of its own -- `signal_list_names` on it
+    # returns an empty tuple -- so a custom one has to be registered before it
+    # can be connected or emitted. The alternative, making Mark a Gtk.Button
+    # with a DrawingArea inside, would bring back the button's padding,
+    # min-height and background that made the app's transport read heavy.
+    __gsignals__ = {"clicked": (GObject.SignalFlags.RUN_FIRST, None, ())}
+
+    def __init__(self, kind, tip, playing=False):
+        """kind: "prev" | "play" | "next"."""
+        super().__init__()
+        self.kind = kind
+        self.playing = playing
+        self._hover = False
+        self._down = False
+        self.set_size_request(self.BOX, self.BOX)
+        self.set_tooltip_text(tip)
+        self.add_css_class("mark")
+        self.set_draw_func(self._on_draw)
+        self.add_controller(self._click())
+        self.add_controller(self._hover_ctl())
+        # The bar's marks are all pointing hands. This has to be done on the
+        # widget: GTK4's css parser has no `cursor` property at all.
+        self.set_cursor(Gdk.Cursor.new_from_name("pointer", None))
+        if kind != "play":
+            self.add_css_class("markskip")
+
+    def set_playing(self, playing):
+        if bool(playing) != bool(self.playing):
+            self.playing = bool(playing)
+            self.queue_draw()
+
+    def _click(self):
+        g = Gtk.GestureClick()
+        g.set_button(1)
+        g.connect("pressed", lambda *_: setattr(self, "_down", True) or
+                  self.queue_draw())
+        g.connect("released", self._on_release)
+        return g
+
+    def _hover_ctl(self):
+        g = Gtk.EventControllerMotion()
+
+        def on_motion(_ctl, x, y):
+            inside = 0 <= x <= self.BOX and 0 <= y <= self.BOX
+            if inside != self._hover:
+                self._hover = inside
+                self.queue_draw()
+
+        g.connect("motion", on_motion)
+        g.connect("leave", lambda *_: (setattr(self, "_hover", False),
+                                       self.queue_draw()))
+        return g
+
+    def _on_release(self, _g, n_press, x, y):
+        was = self._down
+        self._down = False
+        self.queue_draw()
+        if was and 0 <= x <= self.BOX and 0 <= y <= self.BOX:
+            self.emit("clicked")
+
+    # ── the drawing ──────────────────────────────────────────────────
+    def _on_draw(self, _area, cr, w, h):
+        solid = self._hover or self._down
+        cx, cy = w / 2.0, h / 2.0
+
+        # the faint pad, play/pause only
+        if self.kind == "play":
+            cairo_round_rect(cr, 0.5, 0.5, w - 1, h - 1, self.RADIUS)
+            cr.set_source_rgba(*rgba(LAYER3, 0.32 if not self._down else 1.0))
+            cr.fill()
+
+        # the ring is the ONLY hover tell
+        ring_op = 0.0 if self.kind != "play" else 0.28
+        if self._down:
+            ring_op = 0.8
+        elif self._hover:
+            ring_op = 0.7 if self.kind == "play" else 0.55
+        if ring_op > 0:
+            cairo_round_rect(cr, 0.5, 0.5, w - 1, h - 1, self.RADIUS)
+            cr.set_source_rgba(*rgba(ACCENT, ring_op))
+            cr.set_line_width(1.0)
+            cr.stroke()
+
+        col = rgba(ACCENT if solid else TEXT)
+
+        if self.kind == "play":
+            if self.playing:
+                self._pause(cr, cx, cy, col, solid)
+            else:
+                self._triangle(cr, cx, cy, col, solid)
+        else:
+            self._skip(cr, cx, cy, col, solid)
+
+    def _triangle(self, cr, cx, cy, col, solid):
+        """`play_arrow`: an OUTLINE triangle at rest, solid on hover."""
+        h = 6.5
+        w = 6.0
+        x0, x1 = cx - w / 2.0, cx + w / 2.0
+        cr.move_to(x0, cy - h)
+        cr.line_to(x1, cy)
+        cr.line_to(x0, cy + h)
+        cr.close_path()
+        cr.set_source_rgba(*col)
+        if solid:
+            cr.fill()
+        else:
+            # An outlined triangle is two edges plus a stem: the stock GTK
+            # "media-playback-start-symbolic" glyph IS filled, and the
+            # difference is the whole point of the bar's fill axis.
+            cr.set_line_width(1.7)
+            cr.set_line_join(0)          # cairo.LINE_JOIN_MITER
+            cr.stroke()
+            cr.rectangle(x0 - 1.7, cy - h, 1.7, h * 2)
+            cr.fill()
+
+    def _pause(self, cr, cx, cy, col, solid):
+        """Two rounded bars: 5x13, radius 2.5, 1.7 border. Drawn, not a glyph."""
+        bw, bh, br = self.BAR_W, self.BAR_H, self.BAR_R
+        gap = 3.0
+        total = bw * 2 + gap
+        left = cx - total / 2.0
+        for i in range(2):
+            x = left + i * (bw + gap)
+            y = cy - bh / 2.0
+            cairo_round_rect(cr, x, y, bw, bh, br)
+            if solid:
+                cr.set_source_rgba(*col)
+                cr.fill()
+            else:
+                cr.set_source_rgba(*rgba(TEXT, 0.0))
+                cr.fill()
+                cairo_round_rect(cr, x + self.STROKE / 2.0,
+                                 y + self.STROKE / 2.0,
+                                 bw - self.STROKE, bh - self.STROKE,
+                                 max(0.0, br - self.STROKE / 2.0))
+                cr.set_source_rgba(*col)
+                cr.set_line_width(self.STROKE)
+                cr.stroke()
+
+    def _skip(self, cr, cx, cy, col, solid):
+        """`skip_previous` / `skip_next` as the bar draws them: a stem and a
+        triangle, mirrored, both outlined at rest.
+
+        FILL is PINNED on these two: the ring is the hover tell, and a glyph
+        that also filled on hover read as a weird transition rather than as a
+        hover. The bar's glyph is one `skip_next`/`skip_previous` ligature
+        rather than a bar with a triangle stuck on the front, because the
+        two-piece version's bar is 9px against the triangle's 15px of ink and
+        it reads as a lowercase k. Here both halves are drawn from the same
+        height, which is the same correction.
+        """
+        h = 6.5          # half the mark's height: 13px of ink, as the bar's
+        # The triangle is as WIDE as it is tall, not narrower. It was 6 wide
+        # against 13 of height and read as a thorn rather than an arrowhead;
+        # the bar's glyph is a squat triangle, which is what makes it a mark
+        # rather than a spike.
+        tri = 8.5
+        stem = 1.8
+        gap = 1.5
+        total = stem + gap + tri
+        left = cx - total / 2.0
+
+        # "prev": stem on the left, triangle pointing LEFT at it.
+        # "next": triangle on the left pointing RIGHT, stem on the right.
+        if self.kind == "next":
+            stem_x = left + tri + gap
+            apex_x, base_x = stem_x, left
+        else:
+            stem_x = left
+            apex_x, base_x = left + total, left + stem + gap
+
+        cr.set_source_rgba(*col)
+        cr.rectangle(stem_x, cy - h, stem, h * 2)
+        cr.fill()
+
+        cr.move_to(apex_x, cy - h)
+        cr.line_to(base_x, cy)
+        cr.line_to(apex_x, cy + h)
+        cr.close_path()
+        if solid:
+            cr.fill()
+        else:
+            # Outlined at rest. The path is INSET by half the stroke so the
+            # triangle's ink finishes at the same 13px the stem's does instead
+            # of overshooting it by the stroke's own width -- and so the
+            # centred stroke never eats the apex, which is what turned the
+            # triangle into an invisible sliver at 1.7px.
+            inset = self.STROKE / 2.0
+            ih = h - inset
+            iw = tri - inset
+            cr.move_to(apex_x - (inset if self.kind == "next" else -inset), cy - ih)
+            cr.line_to(base_x, cy)
+            cr.line_to(apex_x - (inset if self.kind == "next" else -inset), cy + ih)
+            cr.close_path()
+            cr.set_line_width(self.STROKE)
+            cr.set_line_join(0)      # cairo.LINE_JOIN_MITER
+            cr.stroke()
+
+
+class SoundBar(Gtk.Box):
+    """The merged spectrum + seek + clock + volume, as one widget."""
+
+    PAD = 4                # the panel passes pad: 4
+    BARS_HEIGHT = 28
+    GAP = 4                # bars -> times
+    TIMES_HEIGHT = 13
+    LINE_HEIGHT = 4
+    BAR_STEP = 12          # one pill per ~12px
+    BAR_GAP = 3
+    MIN_PILL = 3
+
+    @property
+    def HEIGHT(self):
+        """The widget's natural height, in one place.
+
+        Drawing and hit-testing both read these, so a bar that measured 28px
+        and a bar drawn for 28px could not drift apart.
+        """
+        return 2 * self.PAD + self.BARS_HEIGHT + self.GAP + self.TIMES_HEIGHT
+
+    def __init__(self):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL)
+        self.set_valign(Gtk.Align.CENTER)
+        self.add_css_class("soundbar")
+
+        # --- the drawing surface: the line and the pills -----------------
+        self._area = Gtk.DrawingArea()
+        self._area.set_hexpand(True)
+        # The bar's height is EXPLICIT. A DrawingArea measures to nothing on
+        # its own, so without this the whole widget laid out at 0px and drew
+        # nothing at all -- no line, no pills, no spectrum, no error. The
+        # number is the component's own: pad*2 + bars + gap + times.
+        self._area.set_size_request(-1, self.HEIGHT)
+        self._area.set_draw_func(self._draw)
+        self._area.add_css_class("soundcanvas")
+
+        # The hover bubble. A Gtk.Label rather than drawn text, so it picks up
+        # the same font stack as every other label in the window.
+        self._bubble = Gtk.Label(label="")
+        self._bubble.add_css_class("bubble")
+        self._bubble.set_visible(False)
+
+        self._overlay = Gtk.Overlay()
+        self._overlay.set_child(self._area)
+        self._overlay.add_overlay(self._bubble)
+        self.append(self._overlay)
+
+        # --- the two stamps ----------------------------------------------
+        times = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        self._elapsed = Gtk.Label(label="0:00")
+        self._elapsed.add_css_class("stamp")
+        self._elapsed.set_halign(Gtk.Align.START)
+        self._total = Gtk.Label(label="0:00")
+        self._total.add_css_class("stamp")
+        self._total.add_css_class("total")
+        self._total.set_halign(Gtk.Align.END)
+        # The spacer between the stamps HAS to expand. An empty Box does not:
+        # it asks for zero width, so both stamps were packed against the left
+        # edge and read as one number -- "1:211:28".
+        spacer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        spacer.set_hexpand(True)
+        times.append(self._elapsed)
+        times.append(spacer)
+        times.append(self._total)
+        self.append(times)
+
+        # --- state --------------------------------------------------------
+        self.position = 0.0
+        self.duration = 0.0
+        self.volume = 1.0
+        self.active = False          # can it be seeked at all
+        self.show_spectrum = False   # only while something is playing
+        self.spectrum = []
+        self._hover_at = None
+        self._scrubbing = False
+        self._scrub_at = None
+        self.on_seek = None          # cb(fraction)
+        self.on_volume = None        # cb(level 0..100)
+
+        self._install_gestures()
+
+    # ── geometry ─────────────────────────────────────────────────────
+    def _metrics(self, w, h):
+        """Everything the drawing needs, in one place so the drawing cannot
+        disagree with the hit-testing."""
+        inner_w = w - 2 * self.PAD
+        zone_h = self.BARS_HEIGHT
+        times_y = zone_h + self.GAP
+        line_y = zone_h - self.LINE_HEIGHT        # line sits at the BOTTOM
+        bars_h = zone_h - self.LINE_HEIGHT        # pills stand on the line
+        count = max(12, int(inner_w // self.BAR_STEP))
+        pill_w = max(self.MIN_PILL,
+                     (inner_w - self.BAR_GAP * (count - 1)) / count)
+        return {
+            "inner_w": inner_w, "zone_h": zone_h, "times_y": times_y,
+            "line_y": line_y, "bars_h": bars_h, "count": count,
+            "pill_w": pill_w, "h": h,
+        }
+
+    @property
+    def fraction(self):
+        return (self.position / self.duration) if self.duration > 0 else 0.0
+
+    def _x_to_fraction(self, x, width):
+        inner = width - 2 * self.PAD
+        if inner <= 0:
+            return 0.0
+        return max(0.0, min(1.0, (x - self.PAD) / inner))
+
+    def set_spectrum(self, points):
+        self.spectrum = points
+        self._area.queue_draw()
+
+    def set_state(self, position=None, duration=None, volume=None,
+                  active=None, show_spectrum=None):
+        if position is not None:
+            self.position = position
+        if duration is not None:
+            self.duration = duration
+        if volume is not None:
+            self.volume = max(0.0, min(1.0, volume / 100.0))
+        if active is not None:
+            self.active = active
+        if show_spectrum is not None:
+            self.show_spectrum = show_spectrum
+        self._elapsed.set_text(clock(self.position))
+        self._total.set_text(clock(self.duration))
+        self._area.queue_draw()
+
+    # ── drawing ──────────────────────────────────────────────────────
+    def _draw(self, area, cr, w, h):
+        m = self._metrics(w, h)
+        frac = self.fraction
+
+        # the line first, so the pills' feet land on top of it
+        cr.set_source_rgba(*rgba(LAYER3))
+        cairo_round_rect(cr, self.PAD, m["line_y"], m["inner_w"],
+                         self.LINE_HEIGHT, self.LINE_HEIGHT / 2)
+        cr.fill()
+        if frac > 0:
+            cr.set_source_rgba(*rgba(ACCENT))
+            cairo_round_rect(cr, self.PAD, m["line_y"],
+                             m["inner_w"] * min(1.0, frac),
+                             self.LINE_HEIGHT, self.LINE_HEIGHT / 2)
+            cr.fill()
+
+        count, pill_w = m["count"], m["pill_w"]
+        bars_h, line_y = m["bars_h"], m["line_y"]
+        # PAUSED MUST STILL SHOW A BAR.
+        #
+        # This used to be `sink = 1.0 if show_spectrum else 0.0`, multiplied
+        # into every pill's height. The intent was "hide the spectrum when
+        # nothing is playing"; what it actually did was multiply the height to
+        # ZERO, and the `hgt <= 0.4: continue` below then skipped every single
+        # pill. So pausing replaced the whole instrument with a bare 4px line
+        # -- which reads as "the audio bar is not shown", and it is exactly
+        # what the user reported. Silence is not absence: a paused bar rests,
+        # it does not vanish.
+        #
+        # So an idle spectrum is synthesised instead. It is a flat-ish row of
+        # short pills with a gentle arc, which is what a visualiser looks like
+        # between notes, and it keeps the widget's silhouette identical in
+        # both states so nothing appears or disappears on pause.
+        idle = None
+        if not self.show_spectrum:
+            idle = [0.30 + 0.16 * ((i % 7) / 6.0) for i in range(count)]
+        for i in range(count):
+            at = i / (count - 1) if count > 1 else 0.0
+            # VOLUME is the ceiling on a real spectrum. The idle row is NOT
+            # scaled by volume: it represents no sound, so it must not claim
+            # to be a quiet one -- and a user who muted to zero should still
+            # see the bar it belongs to.
+            if idle is not None:
+                hgt = idle[i] * bars_h
+            else:
+                hgt = max(2.0, band_shape(self.spectrum, i, count)
+                          * self.volume * bars_h)
+            if hgt <= 0.4:
+                continue
+            x = self.PAD + i * (pill_w + self.BAR_GAP)
+            if idle is not None:
+                # The idle row is drawn in the DIM accent: present, legible,
+                # and visibly not live.
+                cr.set_source_rgba(*rgba(ACCENT_DIM, 0.55))
+            else:
+                cr.set_source_rgba(*rgba(ACCENT if at <= frac else ACCENT_DIM,
+                                         1.0 if at <= frac else 0.26))
+            cairo_round_top(cr, x, line_y - hgt, pill_w, hgt, 2)
+            cr.fill()
+
+        # the hover mark: a thin rule down the bars, plus its time bubble
+        hover = self._scrub_at if self._scrubbing else self._hover_at
+        if hover is not None and self.active:
+            x = self.PAD + hover * m["inner_w"]
+            cr.set_source_rgba(*rgba(ACCENT, 0.9))
+            cairo_round_rect(cr, x - 1, 0, 2, line_y + self.LINE_HEIGHT, 1)
+            cr.fill()
+            self._place_bubble(x, self._scrubbing)
+        else:
+            self._bubble.set_visible(False)
+
+    def _place_bubble(self, x, filled):
+        w = self._area.get_width() or 1
+        self._bubble.set_text(clock(self._hover_seconds(x / w)))
+        self._bubble.set_visible(True)
+        bw = self._bubble.measure(Gtk.Orientation.HORIZONTAL, -1)[1] + 10
+        # keep it inside the canvas rather than letting it hang off the end
+        bx = max(0.0, min(x - bw / 2, w - bw))
+        self._bubble.set_halign(Gtk.Align.START)
+        self._bubble.set_margin_start(int(bx))
+        self._bubble.set_margin_top(-26)
+
+    def _hover_seconds(self, frac):
+        return max(0.0, min(1.0, frac)) * self.duration
+
+    # ── input ────────────────────────────────────────────────────────
+    def _install_gestures(self):
+        motion = Gtk.EventControllerMotion()
+        motion.connect("enter", self._on_enter)
+        motion.connect("leave", self._on_leave)
+        motion.connect("motion", self._on_motion)
+        self._area.add_controller(motion)
+
+        click = Gtk.GestureClick()
+        click.set_button(1)
+        click.connect("pressed", self._on_press)
+        click.connect("released", self._on_release)
+        self._area.add_controller(click)
+
+        drag = Gtk.GestureDrag()
+        drag.connect("begin", self._on_drag_begin)
+        drag.connect("update", self._on_drag_update)
+        drag.connect("end", self._on_drag_end)
+        self._area.add_controller(drag)
+
+        scroll = Gtk.EventControllerScroll()
+        scroll.set_flags(Gtk.EventControllerScrollFlags.DISCRETE)
+        scroll.connect("scroll", self._on_scroll)
+        self._area.add_controller(scroll)
+
+    def _pos_to_frac(self, x):
+        return self._x_to_fraction(x, self._area.get_width() or 1)
+
+    def _on_enter(self, _c, x, _y):
+        if self.active:
+            self._hover_at = self._pos_to_frac(x)
+            self._area.queue_draw()
+
+    def _on_motion(self, _c, x, _y):
+        if self.active:
+            self._hover_at = self._pos_to_frac(x)
+            self._area.queue_draw()
+        if self._scrubbing:
+            self._scrub_at = self._pos_to_frac(x)
+            self._area.queue_draw()
+
+    def _on_leave(self, *_):
+        self._hover_at = None
+        self._area.queue_draw()
+
+    def _on_press(self, _c, n, x, _y):
+        if not self.active or self.duration <= 0 or n != 1:
+            return
+        # Seek on release, not on press: a click is a gesture, and dragging
+        # across the bar must not fire a seek per motion event.
+        self._scrub_at = self._pos_to_frac(x)
+        self._scrubbing = True
+        self._area.queue_draw()
+
+    def _on_release(self, _c, _n, _x, _y):
+        # A plain click: the gesture never became a drag, so this is the only
+        # place the seek for it gets sent. Without it a click scrubs the bar
+        # and then silently puts it back.
+        self._commit_scrub()
+
+    def _on_drag_begin(self, _c, _x, _y):
+        if not self.active or self.duration <= 0:
+            return
+        self._scrubbing = True
+
+    def _on_drag_update(self, _c, dx, _y):
+        if not self._scrubbing:
+            return
+        w = self._area.get_width() or 1
+        self._hover_at = self._scrub_at = max(
+            0.0, min(1.0, self._scrub_at + dx / w))
+        self._area.queue_draw()
+
+    def _on_drag_end(self, _c, _dx, _y):
+        self._commit_scrub()
+
+    def _commit_scrub(self):
+        if not self._scrubbing:
+            return
+        f = self._scrub_at
+        self._scrubbing = False
+        self._scrub_at = None
+        if self.on_seek and self.duration > 0:
+            self.on_seek(f)
+        self._area.queue_draw()
+
+    def _on_scroll(self, _c, _dx, dy):
+        # Volume, the same gesture the panel's bar takes.
+        if not self.on_volume:
+            return False
+        step = -5 if dy > 0 else 5
+        base = self.volume * 100
+        self.on_volume(max(0, min(100, int(base) + step)))
+        return True
+
+
+# ── mpv IPC client (same socket as the sidebar) ──────────────────────────────
+
+class Mpv:
+    def __init__(self):
+        self.sock = None
+        self.lock = threading.Lock()
+        self.pending = {}
+        self.handlers = []
+        self.daemon_up = False
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _connect(self):
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(2)              # the timeout is for CONNECTING only
+            s.connect(SOCK)
+            # ...and is then removed, because the read timeout is the single
+            # worst thing that can sit on this socket.
+            #
+            # `socket.timeout` IS an `OSError`, so a 2s read timeout means
+            # every two seconds of silence -- i.e. whenever nothing on the
+            # player is changing, which is most of the time -- raises
+            # TimeoutError, lands in the `except OSError` below, tears the
+            # socket down and tells every handler the daemon DIED. That is why
+            # the window said "Daemon offline / starting ii-music-mpd..." while
+            # the bar said it was playing the same track: both were right, one
+            # was lying about the other, and it flapped forever.
+            #
+            # A read timeout cannot distinguish "nothing yet" from "gone"
+            # anyway. Death is `recv` returning b"" or a real OSError, and both
+            # are handled below.
+            s.settimeout(None)          # block forever on recv
+            self.sock = s
+            self.daemon_up = True
+            for cb in self.handlers:
+                GLib.idle_add(cb, True)
+            for name in ["pause", "time-pos", "duration",
+                         "media-title", "metadata", "path", "volume",
+                         "playlist-count", "playlist-pos",
+                         "idle-active", "loop-file"]:
+                self.send(["observe_property", name])
+            return True
+        except OSError:
+            self.daemon_up = False
+            return False
+
+    def _loop(self):
+        buf = b""
+        while True:
+            if self.sock is None:
+                self._connect()
+                time.sleep(2)
+                continue
+            try:
+                chunk = self.sock.recv(65536)
+                if not chunk:
+                    raise OSError("closed")
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    try:
+                        d = json.loads(line)
+                    except ValueError:
+                        continue
+                    rid = d.get("request_id")
+                    if rid is not None and rid in self.pending:
+                        cb = self.pending.pop(rid)
+                        if d.get("error") == "success":
+                            GLib.idle_add(cb, d.get("data"))
+                    elif d.get("event") == "property-change":
+                        for cb in list(self.handlers):
+                            GLib.idle_add(cb, d)
+            except socket.timeout:
+                # Belt and braces: a timeout is NOT a disconnection, whatever
+                # this socket's timeout happens to be set to.
+                continue
+            except OSError:
+                self.sock = None
+                self.daemon_up = False
+                for cb in self.handlers:
+                    GLib.idle_add(cb, False)
+                time.sleep(2)
+
+    def send(self, command, cb=None):
+        if self.sock is None:
+            if cb:
+                GLib.idle_add(cb, None)
+            return
+        with self.lock:
+            try:
+                msg = {"command": command}
+                if cb:
+                    self._next_id = getattr(self, "_next_id", 0) + 1
+                    msg["request_id"] = self._next_id
+                    self.pending[self._next_id] = cb
+                self.sock.sendall((json.dumps(msg) + "\n").encode())
+            except OSError:
+                self.sock = None
+                self.daemon_up = False
+
+
+# ── the window ───────────────────────────────────────────────────────────────
+
+def publish_presence():
+    """Tell the shell this app is alive, even with no window up.
+
+    The shell's background-apps tray reads this file, so a hidden app is
+    still listed and still clickable. Written at STARTUP rather than when a
+    window appears, because the state the tray cares about is "the process
+    exists", not "a window is mapped" -- and the whole point of the model is
+    that the window can be closed while the app keeps running. Removed only
+    on a real quit.
+    """
+    try:
+        with open(PRESENCE, "w") as fh:
+            fh.write(f"{os.getpid()}\n")
+    except OSError:
+        pass
+
+
+def clear_presence():
+    try:
+        os.unlink(PRESENCE)
+    except OSError:
+        pass
+
+
+class MusicWindow(Adw.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app)
+        self.set_title("Music")
+        self.set_default_size(1120, 780)
+        # A minimum width, and it is a real one rather than a guess.
+        #
+        # Nothing set one, and a tiling compositor will happily hand a window
+        # less than its content needs. Squeezed below the layout's own
+        # minimum, GTK does not shrink the transport -- it CLIPS it, and the
+        # next mark disappears off the right edge with no ellipsis and no
+        # error. That is the "the buttons are not the same as the top bar's"
+        # complaint reproduced at the wrong width.
+        #
+        # The sum it has to cover: 210 rail + 1 separator + 44 hero margins +
+        # 96 cover + 2*18 of gaps + 91 transport + room for a long title.
+        # `tmp/test-ii-music-ui.py` measures the real figure rather than
+        # trusting this arithmetic, and asserts the window is wide enough.
+        #
+        # Height is left alone: the list below the hero is a scroller and
+        # wants to be short.
+        self.set_size_request(700, -1)
+        self._sel_playlist = None
+        self._sel_track = None
+        self._seeking = False
+        self._query = ""
+        self._raw_query = ""
+        # Online state. AUDIUS owns the results (it is the thing that knows
+        # about paging); the window owns what the user has done with them.
+        self._online_saved = {}     # track id -> file it was saved to
+        self._downloading = ""      # id of the download in flight
+        self._search_timer = None   # debounce handle
+        self._status = ""
+        self._visible = []          # [(track, playlist name)] as listed
+        self._rows = []             # row widgets, index-aligned with _visible
+        self._play_row = None
+        self._state = {"paused": True, "title": "", "artist": "",
+                       "album": "", "pos": 0.0, "dur": 0.0, "qpos": -1,
+                       "volume": 0.0, "filename": "", "pos_at": 0.0,
+                       "metadata": {}}
+        self._cover_key = None
+        self._last_seek_touch = 0.0
+        self._daemon = False
+        self._durations = {}
+        self._last_playlist = None
+        self._last_playing_path = ""
+        self._measured_playlist = None
+        self._spectrum = []
+        self.cfg = load_config()
+
+        self.mpv = Mpv()
+        self.mpv.handlers.append(self._on_mpv)
+
+        self.build()
+        self._init_hide_on_close()
+        self.apply_config()
+        self.refresh_library()
+        # The poll drives the bar, the spectrum and the row meter, so it runs
+        # on a fraction of a second while something is playing rather than on
+        # the five-second cadence that left the scrubber frozen.
+        GLib.timeout_add(250, self._poll)
+        # cava's bands, copied onto the GTK thread and handed to the bar.
+        GLib.timeout_add(60, self._tick_spectrum)
+
+    # ── close hides, it does not quit ─────────────────────────────────
+    # The whole point of the background-app model: the window is a face of
+    # the daemon, so closing it must not stop the music. The app stays in the
+    # shell's tray and the window comes back from there. Quitting is a
+    # deliberate action (Quit button / tray), and even then playback survives,
+    # because the daemon is a separate service.
+    #
+    # Gtk.Window's own `hide-on-close` does exactly this, so it is used
+    # rather than a close-request override: no vfunc to chain up, and the
+    # window is merely unmapped instead of destroyed.
+    def _init_hide_on_close(self):
+        self.set_hide_on_close(True)
+
+    def _publish_presence(self):
+        publish_presence()
+
+    # ── css ──────────────────────────────────────────────────────────────
+    # One provider, one ramp. Every surface in the app is one of LAYER1..3,
+    # every edge OUTLINE (OUTLINE2 when hovered), every secondary text SUB,
+    # and ACCENT appears only where something is actionable or selected.
+    def _css(self):
+        prov = Gtk.CssProvider()
+        prov.load_from_data(f"""
+window, .background {{ background: {BG}; color: {TEXT}; }}
+
+/* surfaces */
+.card {{
+  background: {LAYER1}; border: 1px solid {OUTLINE}; border-radius: 18px;
+}}
+.opts {{
+  background: {LAYER1}; border: 1px solid {OUTLINE};
+  border-radius: 14px; padding: 7px 10px;
+}}
+.cover {{
+  background: {LAYER2}; border: 1px solid {OUTLINE}; border-radius: 14px;
+}}
+.coverimage {{ border-radius: 13px; }}
+.coverph {{ color: {PLACEHOLDER}; }}
+/* every piece of artwork in a list: playlist mosaic and track cover alike */
+.tile {{
+  background: {LAYER2}; border: 1px solid {OUTLINE}; border-radius: 8px;
+}}
+.tile image {{ border-radius: 7px; }}
+.tileph {{ color: {PLACEHOLDER}; }}
+.rowmarker {{
+  background-color: rgba(0, 0, 0, 0.66); color: {ACCENT};
+  border-radius: 9999px; padding: 3px; margin: 2px;
+}}
+
+/* type */
+.tlabel {{ color: {TEXT}; font-size: 22px; font-weight: 800; }}
+.alabel {{ color: {SUB}; font-size: 13px; }}
+.sub {{ color: {SUB}; }}
+.mono {{ font-family: monospace; font-size: 12px; }}
+.headtitle {{ color: {TEXT}; font-size: 19px; font-weight: 800; }}
+.rule {{ color: {SUB}; font-size: 11px; font-weight: 700; letter-spacing: 1px; }}
+.quitbtn {{ color: {SUB}; }}
+.quitbtn:hover {{ color: {TEXT}; }}
+.empty {{ color: {SUB}; font-size: 13px; }}
+.status {{ color: {SUB}; font-size: 12px; }}
+.status.error {{ color: {ACCENT}; }}
+
+/* online rows: the same surface as a local row, with one hairline of amber
+   on the leading edge so the provenance is readable at a glance. */
+.row-online {{ background: rgba(201, 162, 92, 0.05); }}
+.row-online .rownum {{ color: {ACCENT}; }}
+.rowbtn {{
+  background: {LAYER2}; border: 1px solid {OUTLINE}; color: {SUB};
+  min-width: 30px; min-height: 30px; padding: 0; border-radius: 8px;
+}}
+.rowbtn:hover {{ background: {LAYER3}; border-color: {OUTLINE2};
+                 color: {TEXT}; }}
+.rowbtn:disabled {{ color: {PLACEHOLDER}; border-color: {OUTLINE}; }}
+.rowbtn.saved {{ color: {ACCENT}; border-color: {ACCENT_DIM}; }}
+.loadmore {{
+  background: {LAYER1}; border: 1px dashed {OUTLINE2}; color: {SUB};
+  font-weight: 600; margin: 4px 0;
+}}
+.loadmore:hover {{ background: {LAYER2}; color: {TEXT}; }}
+
+/* buttons */
+button {{ border-radius: 9999px; min-height: 36px; }}
+.pbtn {{
+  background: {LAYER2}; border: 1px solid {OUTLINE}; color: {TEXT};
+  font-weight: 500; padding: 0 14px;
+}}
+.pbtn:hover {{ background: {LAYER3}; border-color: {OUTLINE2}; }}
+.pbtn.on {{ background: {ACCENT}; border-color: {ACCENT}; color: {ON_ACCENT}; }}
+.playbtn {{
+  background: {ACCENT}; color: {ON_ACCENT}; font-weight: 700; padding: 0 20px;
+}}
+.playbtn:hover {{ background: {ACCENT_HOVER}; }}
+.iconbtn {{
+  background: transparent; border: none; color: {SUB};
+  min-width: 42px; min-height: 42px; padding: 0;
+}}
+.iconbtn:hover {{ background: {LAYER2}; color: {TEXT}; }}
+.iconbtn:disabled {{ color: {PLACEHOLDER}; }}
+
+/* sliders */
+.seek trough {{ min-height: 5px; border-radius: 3px; background: {LAYER3}; }}
+.seek highlight {{ min-height: 5px; border-radius: 3px; background: {ACCENT}; }}
+.seek slider {{
+  min-width: 14px; min-height: 14px; border-radius: 7px;
+  background: {TEXT}; margin: -5px;
+}}
+.vol trough {{ min-height: 4px; border-radius: 2px; background: {LAYER3}; }}
+.vol highlight {{ min-height: 4px; border-radius: 2px; background: {ACCENT}; }}
+.vol slider {{
+  min-width: 12px; min-height: 12px; border-radius: 6px;
+  background: {SUB}; margin: -5px;
+}}
+
+/* ── the hero ────────────────────────────────────────────────────────
+   A lot thinner than the old now-playing card, on purpose: the cover is the
+   least informative thing up here (the same art is on every row of the list
+   underneath, smaller), and the transport is a control you touch once and
+   then stop looking at. */
+.herocover {{
+  background: {LAYER2}; border: 1px solid {OUTLINE}; border-radius: 10px;
+}}
+.coverimage {{ border-radius: 9px; }}
+.coverph {{ color: {PLACEHOLDER}; }}
+/* The title is the primary label on this screen, so it is the heaviest thing
+   here. 22px/700: it was 18px, which was sized down to protect the words from
+   an ellipsis -- but the words were never that tight (the row has ~590px and
+   the longest real title needs ~200 of it), so the smaller title bought an
+   ellipsis that never happened at the cost of a hero that read as a caption.
+   The sub-line keeps the card's own ratio of roughly 0.7 to the title. */
+.herotitle {{ color: {TEXT}; font-size: 22px; font-weight: 700; }}
+.subline {{ color: {SUB}; font-size: 15px; }}
+
+/* The transport marks are DRAWN by `Mark` -- 25px, the bar's own geometry,
+   the ring as the only hover tell. There is deliberately NO css here: GTK4's
+   theme parser has no `cursor` property (it logs "No property named cursor"
+   and drops the rule), and a Mark is a DrawingArea, so it does not pick up
+   the button treatment anyway. The pointing hand is set in code, on the
+   widget, with `set_cursor`. */
+
+/* ── the merged sound + music bar ────────────────────────────────────
+   NO plate. The bar used to draw its own surface, which on a card that
+   already has one read as a box inside a box. */
+.stamp {{ color: {SUB}; font-size: 14px; font-family: monospace; }}
+.stamp.total {{ opacity: 0.7; }}
+.bubble {{
+  background: {ACCENT}; color: {ON_ACCENT};
+  font-size: 11px; font-weight: 700; font-family: monospace;
+  border-radius: 9999px; padding: 2px 7px;
+}}
+
+/* ── the list ───────────────────────────────────────────────────────
+   56px rows with 7px of air between them. The gap is not decoration: rows
+   butted together read as one striped block, and the only thing separating
+   "now" from "next" is the accent rule on the current row. */
+.row {{
+  border-radius: 8px; padding: 0 10px;
+}}
+.row:hover {{ background: {LAYER1}; }}
+/* The current row is marked three ways at once on purpose: colour alone
+   fails for anyone who cannot separate the accent from the background, and
+   a single left border is easy to lose in a long list. */
+.row.current {{ background: rgba(201, 162, 92, 0.12); }}
+.currentrule {{
+  background: transparent; border-radius: 2px;
+  min-width: 3px; min-height: 22px; margin-right: 5px;
+}}
+.row.current .currentrule {{ background: {ACCENT}; }}
+.rowonline {{ background: rgba(201, 162, 92, 0.05); }}
+.rowart {{ border-radius: 6px; }}
+.rownum {{ color: {PLACEHOLDER}; font-size: 14px; font-family: monospace; }}
+.rowtitle {{ color: {SUB}; font-size: 16px; }}
+.rowtitle.rowtitlecur {{ color: {TEXT}; font-weight: 700; }}
+.rowartist {{ color: {PLACEHOLDER}; font-size: 14px; }}
+.rowtime {{ color: {PLACEHOLDER}; font-size: 14px; font-family: monospace; }}
+.meter {{ min-width: 26px; }}
+.band {{ background: {ACCENT}; border-radius: 2px; }}
+.colhead {{ padding: 0 10px; }}
+.coltitle {{ color: {SUB}; font-size: 11px; font-weight: 700; }}
+.loadmore {{
+  background: {LAYER1}; border: 1px dashed {OUTLINE2}; color: {SUB};
+  font-weight: 600; margin: 4px 10px;
+}}
+.loadmore:hover {{ background: {LAYER2}; color: {TEXT}; }}
+
+/* the playlist rail: a filing cabinet next to the instrument */
+.rail {{ padding: 12px 10px; }}
+
+/* library */
+.search {{
+  background: {LAYER1}; border: 1px solid {OUTLINE}; border-radius: 9999px;
+  color: {TEXT}; padding: 7px 14px;
+}}
+.search:focus {{ border-color: {ACCENT_DIM}; background: {LAYER2}; }}
+.plistrow {{
+  background: {LAYER1}; border: 1px solid {OUTLINE};
+  border-radius: 12px; padding: 9px 12px;
+}}
+.plistrow:hover {{ background: {LAYER2}; }}
+.plistrow image {{ color: {SUB}; }}
+.plistrow.sel {{ background: {LAYER2}; border-color: {ACCENT_DIM}; }}
+.plistrow.sel image, .plistrow.sel .plname {{ color: {ACCENT}; }}
+.plname {{ font-weight: 600; }}
+.plcount {{ color: {SUB}; font-size: 12px; }}
+.listbox {{ background: transparent; }}
+.row-track {{ padding: 7px 10px; border-radius: 10px; }}
+.row-track:hover {{ background: {LAYER2}; }}
+.row-track.playing {{ background: {LAYER2}; }}
+.row-track .rowicon {{ color: {SUB}; }}
+.row-track.playing .rowicon {{ color: {ACCENT}; }}
+.row-track .rowtitle {{ font-weight: 500; }}
+.row-track.playing .rowtitle {{ color: {ACCENT}; }}
+.rownum {{ color: {PLACEHOLDER}; font-family: monospace; font-size: 12px; }}
+.rowtag {{ color: {SUB}; font-size: 12px; }}
+
+/* scrollbars: present but quiet */
+scrollbar {{ background: transparent; }}
+scrollbar slider {{ background: {LAYER3}; border-radius: 4px; min-width: 6px; }}
+scrollbar slider:hover {{ background: {OUTLINE2}; }}
+""", -1)
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), prov,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+    # ── artwork widgets ──────────────────────────────────────────────
+    # One tile shape for both lists, so a track's art looks the same in a
+    # row and in a playlist mosaic. A tile is an Overlay: the real cover, and
+    # on top of it whatever marker is needed (the note icon while the art is
+    # still being decoded or when the file simply has none).
+    @staticmethod
+    def _tile(size, cls="tile", marker_icon=None):
+        """(container, set_art, marker) -- set_art(bytes_or_None) fills it.
+
+        The container is an Overlay so the placeholder note sits ON TOP of the
+        cover: a track with no embedded art shows the note, and one with art
+        shows the art, with no layout change and no placeholder space to
+        collapse when the decode lands. A marker_icon adds the play/pause
+        badge on top of both, for the row that is playing.
+        """
+        img = Gtk.Image()
+        img.set_pixel_size(size)
+        img.set_size_request(size, size)
+
+        fallback = Gtk.Image.new_from_icon_name("audio-x-generic-symbolic")
+        fallback.set_pixel_size(max(14, size // 2))
+        fallback.add_css_class("tileph")
+        fallback.set_halign(Gtk.Align.CENTER)
+        fallback.set_valign(Gtk.Align.CENTER)
+
+        over = Gtk.Overlay()
+        over.set_child(img)
+        over.add_overlay(fallback)
+
+        marker = None
+        if marker_icon:
+            marker = Gtk.Image.new_from_icon_name(marker_icon)
+            marker.set_pixel_size(max(14, size // 2 - 2))
+            marker.add_css_class("rowmarker")
+            marker.set_halign(Gtk.Align.CENTER)
+            marker.set_valign(Gtk.Align.CENTER)
+            marker.set_visible(False)
+            over.add_overlay(marker)
+
+        over.set_size_request(size, size)
+        box = Gtk.Box()
+        box.add_css_class(cls)
+        box.set_size_request(size, size)
+        box.append(over)
+
+        def set_art(art_path):
+            set_cover_image(img, fallback, art_path)
+        return box, set_art, marker
+
+    def _playlist_tile(self, pl, size=46):
+        """A playlist's art: a 2x2 mosaic of the first four tracks' covers.
+
+        It is a Grid rather than one image because the four covers are four
+        separate files, and because a partly-filled mosaic still reads as
+        artwork -- the note icon shows through the squares that have none --
+        instead of as a broken image. Built empty and filled as the
+        extractions land, so the list is never waiting on ffmpeg.
+        """
+        half = (size - 1) // 2
+        grid = Gtk.Grid()
+        grid.set_row_spacing(1)
+        grid.set_column_spacing(1)
+        cells = []
+        for i in range(4):
+            cell = Gtk.Image()
+            cell.set_pixel_size(half)
+            cell.set_size_request(half, half)
+            grid.attach(cell, i % 2, i // 2, 1, 1)
+            cells.append(cell)
+
+        fallback = Gtk.Image.new_from_icon_name("audio-x-generic-symbolic")
+        fallback.set_pixel_size(size // 2)
+        fallback.add_css_class("tileph")
+        fallback.set_halign(Gtk.Align.CENTER)
+        fallback.set_valign(Gtk.Align.CENTER)
+
+        over = Gtk.Overlay()
+        over.set_child(grid)
+        over.add_overlay(fallback)
+        over.set_size_request(size, size)
+
+        tile = Gtk.Box()
+        tile.add_css_class("tile")
+        tile.add_css_class("mosaic")
+        tile.set_size_request(size, size)
+        tile.append(over)
+
+        state = {"any": False}
+
+        def take(art_path, slot):
+            if not art_path:
+                return
+            cells[slot].set_from_file(art_path)
+            if not state["any"]:
+                state["any"] = True
+                fallback.set_visible(False)
+
+        for slot, t in enumerate(pl["tracks"][:4]):
+            COVERS.request(t["path"], lambda data, s=slot: take(data, s))
+        return tile
+
+    # ── layout ───────────────────────────────────────────────────────────
+    def build(self):
+        """The middle island's Music view, rebuilt as a window.
+
+        The layout below is NowBarPanel.qml's Media view (lines ~1364-2095)
+        number for number -- 26px side margins, a 64px cover, a 34px outlined
+        play disc, the merged bar at margins 6 with `pad: 4`, and a list of
+        42px rows with a 32px header and 5px between them. The numbers are
+        copied rather than approximated because the whole request is that this
+        window BE that card.
+
+        What is added on top of it, and only this:
+          * the playlist rail, on the left -- the card has no room for one,
+            and browsing the library is a thing this window does;
+          * the search field, which covers the library AND the online
+            catalogue.
+        Everything about the music -- the hero, the bar, the rows, the
+        feedback on the playing row -- is the card's.
+        """
+        self._css()
+        self.set_content(Adw.ToolbarView())
+
+        toolbar = self.get_content()
+
+        # ── header: the title, and the explicit quit (closing only hides) ──
+        header = Adw.HeaderBar()
+        header.set_valign(Gtk.Align.CENTER)
+        ttl = Gtk.Label(label="Music")
+        ttl.set_xalign(0)
+        ttl.set_hexpand(True)
+        ttl.add_css_class("headtitle")
+        header.set_title_widget(ttl)
+        quit_btn = Gtk.Button(label="Quit app")
+        quit_btn.add_css_class("quitbtn")
+        quit_btn.set_tooltip_text(
+            "Close the app. Playback continues in the music daemon.")
+        quit_btn.connect("clicked", self._on_quit_clicked)
+        header.pack_end(quit_btn)
+        toolbar.add_top_bar(header)
+
+        body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        body.set_vexpand(True)
+
+        # ══ LEFT: the playlists, and the search that covers everything ═════
+        #
+        # The one thing this window has that the card does not. The rail is
+        # kept narrow and unadorned on purpose -- it is a filing cabinet next
+        # to the instrument, not part of it.
+        rail = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        rail.set_size_request(210, -1)
+        rail.add_css_class("rail")
+
+        self._entry = Gtk.SearchEntry()
+        self._entry.set_hexpand(True)
+        self._entry.set_placeholder_text("Search library and online")
+        self._entry.set_tooltip_text(
+            "Every playlist at once -- title, artist, playlist name -- and the "
+            "online catalogue underneath, where results can be saved offline")
+        self._entry.add_css_class("search")
+        # `changed`, NOT `search-changed`: GTK's search-changed does not fire
+        # when the text is set programmatically (setting it to a non-empty
+        # value from empty emits nothing at all), so clearing the field from
+        # a button would leave the list filtered with no query on screen.
+        self._entry.connect("changed", self._on_search)
+        rail.append(self._entry)
+
+        plrule = Gtk.Label(label="PLAYLISTS")
+        plrule.set_xalign(0)
+        plrule.add_css_class("rule")
+        rail.append(plrule)
+
+        self._pllist = Gtk.ListBox()
+        self._pllist.add_css_class("listbox")
+        self._pllist.set_selection_mode(Gtk.SelectionMode.NONE)
+        self._pllist.connect("row-activated", self._on_pl_activated)
+        plscroll = Gtk.ScrolledWindow()
+        plscroll.set_child(self._pllist)
+        plscroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        plscroll.set_vexpand(True)
+        rail.append(plscroll)
+
+        self._btn_clear = Gtk.Button(label="Clear search")
+        self._btn_clear.add_css_class("pbtn")
+        self._btn_clear.set_visible(False)
+        self._btn_clear.connect("clicked", self._clear_search)
+        rail.append(self._btn_clear)
+        body.append(rail)
+
+        railsep = Gtk.Separator()
+        railsep.set_orientation(Gtk.Orientation.VERTICAL)
+        body.append(railsep)
+
+        # ══ RIGHT: the card ═══════════════════════════════════════════════
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        card.set_hexpand(True)
+
+        # ── the hero ─────────────────────────────────────────────────────
+        #
+        # This band used to be ~300px of a 580px card -- a 132px cover, 22px
+        # gaps twice over, a 44px disc and a 46px bar -- and was then cut down
+        # to a thin strip (64px cover, 10px gaps, a 30px bar) on the theory
+        # that the list below is the part worth the pixels.
+        #
+        # That was wrong, and the user is the reason it is being undone: the
+        # "playing now" statement is what the window is opened FOR, and at
+        # strip size it read as a caption above a list rather than as the
+        # thing itself. The list is a scroller and gives up rows happily; the
+        # hero has no second place to be looked at. So the hero is sized to
+        # read (HERO_COVER, HERO_GAP, HERO_AIR) and the list takes the rest.
+        hero = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                       spacing=HERO_AIR)
+        hero.add_css_class("hero")
+        hero.set_margin_top(HERO_AIR)
+        hero.set_margin_bottom(HERO_AIR)
+
+        # The cover and the words it belongs to, side by side. These were two
+        # rows of a vertical layout once, so the title read as a caption to
+        # the picture rather than as the thing the picture is for. A track's
+        # title is the primary label on this screen; the art is secondary.
+        hrow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                      spacing=HERO_GAP)
+        # 22, not 30. The extra 8px a side went straight back to the title,
+        # which was ellipsising a fourteen-character name in a window that is
+        # 844px wide -- the width the margin was borrowing from was width the
+        # words needed.
+        hrow.set_margin_start(22)
+        hrow.set_margin_end(22)
+
+        cframe = Gtk.Box()
+        cframe.add_css_class("herocover")
+        cframe.set_size_request(HERO_COVER, HERO_COVER)
+        cframe.set_valign(Gtk.Align.CENTER)
+        # Gtk.Image WITH `set_pixel_size`, which is the only combination that
+        # both fills the frame and stays the size it is told to be.
+        #
+        # Gtk.Picture looked like the better tool -- it has `content-fit`, so
+        # it crops to a square -- and it was the cause of a bug worth writing
+        # down. `set_size_request` sets a MINIMUM, and a Picture's natural
+        # size is the artwork's own pixel size: the covers are 320x320, so an
+        # "88px" frame measured a natural of 320 and the row handed the
+        # picture every pixel the title had not already claimed. Measured on
+        # this machine, the frame allocated 318x318, not 88x88 -- which is why
+        # the title was ellipsised while the "88px" cover looked enormous.
+        # Wrapping it in a size request cannot fix that; the widget has to
+        # agree about its natural size.
+        #
+        # Gtk.Image with a pixel size does: measured natural is exactly the
+        # size asked for, and it fills the frame. (An Image WITHOUT a pixel
+        # size renders at the file's natural size in the corner -- the other
+        # half of this same bug.)
+        self._cover = Gtk.Image()
+        self._cover.set_pixel_size(HERO_COVER)
+        self._cover.set_size_request(HERO_COVER, HERO_COVER)
+        self._cover.add_css_class("coverimage")
+        self._coverph = Gtk.Image.new_from_icon_name("audio-x-generic-symbolic")
+        self._coverph.set_pixel_size(int(HERO_COVER * 0.45))
+        self._coverph.add_css_class("coverph")
+        cover_ov = Gtk.Overlay()
+        cover_ov.set_child(self._cover)
+        cover_ov.add_overlay(self._coverph)
+        cframe.append(cover_ov)
+        hrow.append(cframe)
+
+        # Title and sub-line, one block, one rhythm.
+        #
+        # `set_lines(1)` ON THE TITLE TOO. It was only on the sub-line, so a
+        # name long enough to wrap grew the identity block to two lines and
+        # pushed the cover's vertical centre out of alignment with the text --
+        # the hero changed height depending on what was playing.
+        htext = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        htext.set_hexpand(True)
+        htext.set_valign(Gtk.Align.CENTER)
+        self._lbl_title = Gtk.Label(label="Nothing playing")
+        self._lbl_title.set_xalign(0)
+        self._lbl_title.set_ellipsize(3)
+        self._lbl_title.set_lines(1)
+        self._lbl_title.add_css_class("herotitle")
+        self._lbl_artist = Gtk.Label(label="")
+        self._lbl_artist.set_xalign(0)
+        self._lbl_artist.set_ellipsize(3)
+        self._lbl_artist.set_lines(1)
+        self._lbl_artist.add_css_class("subline")
+        htext.append(self._lbl_title)
+        htext.append(self._lbl_artist)
+        hrow.append(htext)
+
+        # ── transport, grouped at the right ─────────────────────────────
+        #
+        # All THREE marks on the title row. The skips used to flank the seek
+        # bar, which cost that bar 66px of its length for two arrows that are
+        # about the SONG rather than about where you are in it.
+        #
+        # 8px between them, and 8 is not `HERO_GAP - 9`: it is the number the
+        # bar's own transport uses, and now that all three marks are the same
+        # 25px there is no outline to keep clear of a neighbour, so the reason
+        # for the odd subtraction is gone.
+        tr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        tr.set_valign(Gtk.Align.CENTER)
+
+        self._btn_prev = self._mark("prev", "Previous")
+        self._btn_play = self._mark("play", "Play or pause")
+        self._playpause_btn = self._btn_play
+        self._btn_next = self._mark("next", "Next")
+        tr.append(self._btn_prev)
+        tr.append(self._btn_play)
+        tr.append(self._btn_next)
+        hrow.append(tr)
+        hero.append(hrow)
+
+        # ── the merged sound + music bar ─────────────────────────────────
+        #
+        # ONE object where there were two, and now the widest thing on the
+        # card. No plate: the bar used to draw its own surface, which on a
+        # card that already has one read as a box inside a box.
+        self._bar = SoundBar()
+        self._bar.set_margin_start(6)
+        self._bar.set_margin_end(6)
+        self._bar.on_seek = self._seek_to_fraction
+        self._bar.on_volume = self._on_volume_from_bar
+        hero.append(self._bar)
+        card.append(hero)
+
+        # ── the playlist ─────────────────────────────────────────────────
+        listbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        listbox.set_vexpand(True)
+
+        # The column header, ABOVE the list and not inside it: a
+        # delegate-positioned header sits inside the view's clip, so the one
+        # row that explains what the columns mean is the one row you cannot
+        # read.
+        head = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        head.add_css_class("colhead")
+        headrow = Gtk.Overlay()
+        self._lbl_plname = Gtk.Label(label="SELECT A PLAYLIST")
+        self._lbl_plname.set_halign(Gtk.Align.START)
+        self._lbl_plname.set_ellipsize(3)
+        self._lbl_plname.add_css_class("coltitle")
+        headrow.set_child(self._lbl_plname)
+        head.append(headrow)
+
+        self._lbl_empty = Gtk.Label(label="Nothing in this playlist")
+        self._lbl_empty.add_css_class("empty")
+        self._lbl_empty.set_visible(False)
+        listbox.append(self._lbl_empty)
+
+        self._lbl_status = Gtk.Label(label="")
+        self._lbl_status.set_xalign(0)
+        self._lbl_status.set_ellipsize(3)
+        self._lbl_status.add_css_class("status")
+        self._lbl_status.set_visible(False)
+        listbox.append(self._lbl_status)
+
+        self._tracklist = Gtk.ListBox()
+        self._tracklist.add_css_class("tracklist")
+        self._tracklist.set_selection_mode(Gtk.SelectionMode.NONE)
+        self._tracklist.connect("row-activated", self._on_track_activated)
+        trscroll = Gtk.ScrolledWindow()
+        trscroll.set_child(self._tracklist)
+        trscroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        trscroll.set_vexpand(True)
+        listbox.append(trscroll)
+        card.append(listbox)
+
+        body.append(card)
+        toolbar.set_content(body)
+
+        # keyboard
+        keyc = Gtk.EventControllerKey()
+        keyc.connect("key-pressed", self._on_key)
+        self.add_controller(keyc)
+
+    def _mark(self, kind, tip):
+        """One transport mark, drawn by `Mark` (the island's TransportMark).
+
+        It replaces a Gtk.Button carrying a stock symbolic icon, which is what
+        the app had: a 32px skip and a 36px play disc using GTK's
+        `media-playback-*` glyphs. Those are the OLD panel transport, not the
+        bar's -- heavier, the wrong pause shape, and a background that
+        appeared only on hover. See `Mark` for the port and the reasoning
+        behind each number.
+        """
+        m = Mark(kind, tip)
+        m.connect("clicked", self._on_mark_clicked, kind)
+        return m
+
+    def _on_mark_clicked(self, btn, icon):
+        if icon == "prev":
+            self._prev()
+        elif icon == "next":
+            self._next()
+        else:
+            self._playpause()
+
+    @staticmethod
+    def _sinks():
+        out = run("pactl", "list", "short", "sinks")
+        names = []
+        for line in out.decode(errors="ignore").splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                names.append(parts[1].strip())
+        return names
+
+    # ── config ──────────────────────────────────────────────────────────
+    def apply_config(self):
+        """Push the persisted settings into the daemon.
+
+        The daemon outlives the app, so settings are re-applied on every
+        launch instead of being set once at daemon start: an app closed for
+        a day and reopened must still be the thing that decides the volume.
+        """
+        self.mpv.send(["set_property", "volume", int(self.cfg["volume"])])
+        self.mpv.send(["set_property", "loop-file", bool(self.cfg["repeat"])])
+        if self.cfg.get("outputDevice"):
+            self.mpv.send(["set_property", "audio-device",
+                           self.cfg["outputDevice"]])
+
+    def _persist(self):
+        save_config(self.cfg)
+
+    def _on_shuffle(self, btn):
+        self.cfg["shuffle"] = btn.get_active()
+        if btn.get_active():
+            btn.add_css_class("on")
+        else:
+            btn.remove_css_class("on")
+        self._persist()
+
+    def _on_repeat(self, btn):
+        self.cfg["repeat"] = btn.get_active()
+        if btn.get_active():
+            btn.add_css_class("on")
+        else:
+            btn.remove_css_class("on")
+        self.mpv.send(["set_property", "loop-file", bool(self.cfg["repeat"])])
+        self._persist()
+
+    def _on_device(self, _dd, _pspec):
+        idx = self._dev.get_selected()
+        names = getattr(self, "_sinks_cache", self._sinks())
+        self.cfg["outputDevice"] = names[idx - 1] if idx > 0 else ""
+        if self.cfg["outputDevice"]:
+            self.mpv.send(["set_property", "audio-device",
+                           self.cfg["outputDevice"]])
+        else:
+            self.mpv.send(["set_property", "audio-device", "auto"])
+        self._persist()
+
+    def _on_quit_clicked(self, *_):
+        self.get_application().quit()
+
+    # ── search ──────────────────────────────────────────────────────────
+    # One field for both halves. Empty query = the selected playlist, exactly
+    # as before; a query switches the right column to matches from every
+    # playlist, tagged with where each one came from, and — once there are at
+    # least two characters — to the online catalogue underneath.
+    #
+    # The local filter is instant and the online half is DEBOUNCED, because
+    # Audius rate-limits by app_name and this app shares that identity with
+    # the shell's Music tab: one keystroke, one request would spend the budget
+    # on a prefix nobody wanted.
+    ONLINE_DEBOUNCE_MS = 450
+
+    def _on_search(self, entry):
+        raw = entry.get_text().strip()
+        self._raw_query = raw
+        self._query = raw.lower()
+        self._btn_clear.set_visible(bool(raw))
+        self._rebuild_tracks()          # local matches: no waiting
+        if self._search_timer is not None:
+            GLib.source_remove(self._search_timer)
+            self._search_timer = None
+        if len(raw) >= 2:
+            self._search_timer = GLib.timeout_add(
+                self.ONLINE_DEBOUNCE_MS, self._online_search_fire)
+        else:
+            # Nothing to search online for, so drop the old results outright:
+            # leaving them loaded means the next two-letter query briefly shows
+            # the previous answer's tracks, and burns rate limit re-fetching
+            # what is already in hand.
+            AUDIUS.clear()
+            self._set_status("")
+
+    def _online_search_fire(self):
+        """The debounce timer, kept separate from the action itself so that
+        firing the action directly (a test, or a future "refresh" affordance)
+        does not leave the armed timeout behind to fire a second request."""
+        self._search_timer = None
+        self._online_search()
+        return False
+
+    def _online_search(self, raw=None):
+        if self._search_timer is not None:
+            GLib.source_remove(self._search_timer)
+            self._search_timer = None
+        q = self._raw_query if raw is None else raw
+        AUDIUS.search(q, False, self._online_search_done)
+
+    def _online_search_done(self):
+        """A page (or a failure) arrived. Everything is read off AUDIUS, which
+        is the only thing that knows what actually came back."""
+        if AUDIUS.busy:
+            self._set_status(f"Searching Audius for “{self._raw_query}”…")
+        elif AUDIUS.error:
+            self._set_status(AUDIUS.error)
+        elif self._raw_query and len(AUDIUS.results) > 0:
+            self._set_status(
+                f"{len(AUDIUS.results)} from the online catalogue"
+                + (" — more available" if AUDIUS.has_more else ""))
+        else:
+            self._set_status("")
+        self._rebuild_tracks()
+
+    def _load_more(self, *_):
+        AUDIUS.load_more(self._online_search_done)
+
+    def _clear_search(self, *_):
+        self._entry.set_text("")
+        self._entry.grab_focus()
+
+    def _set_status(self, text):
+        self._status = text or ""
+        self._lbl_status.set_text(self._status)
+        self._lbl_status.set_visible(bool(self._status))
+
+    def _rows_source(self):
+        """The list the right column is showing: matches, then online, then a
+        paging row — or, with no query, just the selected playlist."""
+        out = []
+        if self._query:
+            for pl in self._library:
+                for t in pl["tracks"]:
+                    if matches(t, pl["name"], self._query):
+                        out.append((t, pl["name"]))
+        else:
+            pl = next((p for p in self._library
+                       if p["name"] == self._sel_playlist), None)
+            out = [(t, pl["name"]) for t in pl["tracks"]] if pl else []
+        # Online rows only belong to a search: browsing a playlist must not
+        # quietly turn into "this playlist plus 150 strangers".
+        if self._query:
+            for t in AUDIUS.results:
+                out.append((t, "Audius"))
+            if AUDIUS.has_more:
+                out.append(({"load_more": True}, ""))
+        return out
+
+    def _tick_spectrum(self):
+        """Copy cava's bands onto the GTK thread and push them into the bar.
+
+        cava writes from its own thread; widgets may only be touched from the
+        main loop, so the values are read under the spectrum's own lock and
+        then handed over. 60Hz is the config's own frame rate, so nothing is
+        thrown away and nothing is invented.
+        """
+        pts = SPECTRUM.snapshot()
+        self._spectrum = pts
+        self._bar.set_spectrum(pts)
+        row = self._play_row
+        if row is not None and not self._query:
+            self._update_meter(row)
+        return True
+
+    @property
+    def _playing_path(self):
+        """The file that is actually playing.
+
+        mpv's `filename`, not the queue index: the queue can be shuffled,
+        filtered to one track, or hold tracks from several folders, so an
+        index into it says nothing about which playlist is on screen. This is
+        the card's `playingPath`, and the join key for everything below it.
+        """
+        return self._state.get("filename", "")
+
+    # ── the current playlist, exactly as the card derives it ─────────────
+    #
+    # The file that is actually playing is the join key for everything below,
+    # and it is deliberately NOT the queue index: the queue can be shuffled,
+    # filtered to one track, or hold tracks from several folders, so an index
+    # into it says nothing about which playlist is on screen.
+    def _derive_playlist(self):
+        """Which scanned folder the playing file lives in, and the last one we
+        saw.
+
+        A path is in at most one folder, so the first match is the only match.
+
+        `lastPlaylist` is a REFERENCE, not a copy of its tracks: the library
+        is rebuilt from scratch on every scan, so a copied array would freeze
+        the rows -- and their covers -- at whatever the scan knew when the
+        music stopped, and would then disagree with the rail.
+        """
+        path = self._playing_path
+        found = None
+        if path:
+            for pl in self._library:
+                for t in pl["tracks"]:
+                    if t["path"] == path:
+                        found = pl
+                        break
+                if found:
+                    break
+        if found is not None:
+            self._last_playlist = found
+            self._last_playing_path = path
+        return found or self._last_playlist
+
+    @property
+    def shown_playlist(self):
+        return self._derive_playlist()
+
+    @property
+    def marked_path(self):
+        return self._playing_path or self._last_playing_path
+
+    def _shown_tracks(self):
+        """The rows the list renders.
+
+        Durations are attached HERE, at read time, rather than stored on the
+        track: the library is rebuilt on every scan and a duration written onto
+        the track at parse time would be lost every time the cache grew.
+        """
+        pl = self._derive_playlist()
+        if not pl:
+            return []
+        out = []
+        for t in pl["tracks"]:
+            out.append({
+                "path": t["path"],
+                "title": t["title"],
+                "artist": t["artist"],
+                "album": t.get("album", ""),
+                "duration": self._duration_of(t["path"]),
+            })
+        return out
+
+    def _subline(self, playlist_name, album):
+        """Playlist and album on one line -- and NOT the same word twice.
+
+        The playlist is the more important of the two (it is the only thing on
+        this screen that answers "why is the next track that one"), and on a
+        local library the folder is called "My Breakcore" and the files inside
+        carry ALBUM=My Breakcore, so `playlist . album` printed it twice and
+        the line read as noise. Compared case-insensitively, because folder and
+        tag disagree on case often enough that an exact test lets "my breakcore"
+        through beside "My Breakcore" and reintroduces the same thing.
+        """
+        pl = (playlist_name or "").strip()
+        al = (album or "").strip()
+        # The MPRIS bridge substitutes "Unknown Album" for a tag that is not
+        # there. Fine for a log, terrible for a card: it reads as a real album.
+        if al.lower() == "unknown album":
+            al = ""
+        if pl == "":
+            return al
+        if al == "":
+            return pl
+        if al.lower() == pl.lower():
+            return pl
+        return f"{pl}  ·  {al}"
+
+    def _duration_of(self, path):
+        return self._durations.get(path, 0.0)
+
+    def _ensure_durations(self, pl):
+        """Fill in the running times for the playlist on screen.
+
+        ffprobe, one process per track, on a worker thread -- the library has
+        no duration cache of its own and spawning 125 of them on the GTK
+        thread would freeze the window. Only the playlist being shown is
+        measured, and only the ones not already known, so opening a playlist
+        costs one pass and reopening it costs nothing.
+        """
+        if not pl:
+            return
+        want = [t["path"] for t in pl["tracks"]
+                if t["path"] not in self._durations]
+        if not want:
+            return
+
+        def worker():
+            found = {p: read_duration(p) for p in want}
+            GLib.idle_add(self._merge_durations, found)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _merge_durations(self, found):
+        self._durations.update(found)
+        # The list is only rebuilt when NOT searching: a search shows matches
+        # from every playlist and rebuilding per keystroke would fight the
+        # debounce for no gain.
+        if not self._query:
+            self._rebuild_tracks()
+
+    # ── library UI ───────────────────────────────────────────────────────
+    def refresh_library(self):
+        self._library = scan_library()
+        child = self._pllist.get_first_child()
+        while child:
+            nxt = child.get_next_sibling()
+            self._pllist.remove(child)
+            child = nxt
+        for pl in self._library:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            row.add_css_class("plistrow")
+            tile = self._playlist_tile(pl)
+            tile.set_valign(Gtk.Align.CENTER)
+            row.append(tile)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+            box.set_hexpand(True)
+            name = Gtk.Label(label=pl["name"])
+            name.set_xalign(0)
+            name.set_ellipsize(3)
+            name.add_css_class("plname")
+            n = Gtk.Label(label=f"{len(pl['tracks'])} tracks")
+            n.set_xalign(0)
+            n.add_css_class("plcount")
+            box.append(name)
+            box.append(n)
+            row.append(box)
+            self._pllist.append(row)
+            row._pl_name = pl["name"]
+        # auto-select the first playlist with tracks
+        if self._sel_playlist is None and self._library:
+            self._select_playlist(self._library[0]["name"])
+        else:
+            self._rebuild_tracks()
+        if not self._query:
+            self._ensure_durations(self._derive_playlist())
+
+    def _select_playlist(self, name):
+        self._sel_playlist = name
+        child = self._pllist.get_first_child()
+        while child:
+            card = child.get_child()
+            if card:
+                if getattr(card, "_pl_name", None) == name:
+                    card.add_css_class("sel")
+                else:
+                    card.remove_css_class("sel")
+            child = child.get_next_sibling()
+        self._rebuild_tracks()
+
+    # ── the rows ─────────────────────────────────────────────────────────
+    ROW_H = 56            # the card's row height. 42 was the number that made
+                          # the list read as a dense index rather than as
+                          # songs: a 24px thumbnail with a 15px title inside a
+                          # 42px row leaves the art smaller than the text it
+                          # sits beside. The row is sized off the ART now, so
+                          # the two cannot disagree again.
+    ROW_GAP = 7           # air between rows: without it a list of 56px rows
+                          # butted together reads as one striped block, and
+                          # the only thing separating "now" from "next" is
+                          # the accent rule on the current row
+    ART = 36              # was 24: too small to recognise a cover at, and
+                          # smaller than the row's own title text
+
+    def _rebuild_tracks(self):
+        """Redraw the list, and keep the header honest about what it shows.
+
+        There are three different lists and only one of them is "the queue":
+        browsing a playlist, searching (local hits, then online, then the
+        paging row), and the card's own list, which is whatever playlist is
+        playing. Search wins when it is on, because a query is a question and
+        it has to be answered by the thing the user typed.
+        """
+        child = self._tracklist.get_first_child()
+        while child:
+            nxt = child.get_next_sibling()
+            self._tracklist.remove(child)
+            child = nxt
+        self._rows = []
+
+        searching = bool(self._query)
+        rows = self._rows_source()
+
+        n_local = sum(1 for t, _ in rows if not t.get("online")
+                      and not t.get("load_more"))
+        n_online = sum(1 for t, _ in rows if t.get("online"))
+        if searching:
+            if n_online:
+                head = (f"{n_local} LOCAL MATCH{'ES' if n_local != 1 else ''}"
+                        f"  ·  {n_online} ONLINE")
+            else:
+                head = (f"{n_local} MATCH{'ES' if n_local != 1 else ''} FOR "
+                        f"“{self._raw_query}”")
+        else:
+            head = (self._sel_playlist or "SELECT A PLAYLIST").upper()
+        self._lbl_plname.set_text(head)
+
+        self._visible = rows
+        for idx, (t, plname) in enumerate(rows):
+            if t.get("load_more"):
+                self._append_load_more_row(idx)
+                continue
+            row = self._build_row(t, plname, idx, searching)
+            self._tracklist.append(row)
+            row._vis_idx = idx
+            self._rows.append(row)
+
+        self._lbl_empty.set_visible(not self._visible)
+        if self._lbl_empty.get_visible():
+            self._lbl_empty.set_text(
+                "Nothing matches that search" if searching
+                else ("No playlist playing" if not rows else ""))
+        self._mark_playing()
+
+    def _build_row(self, t, plname, idx, searching):
+        """One row, in the card's geometry.
+
+        The columns are PLACED BY HAND, not by a layout: a fillWidth title
+        takes everything left AFTER the fixed columns, and in practice the
+        artist and time columns collapsed to nothing and were simply not on
+        screen. Absolute offsets are also the only way the header and the rows
+        can be guaranteed to line up.
+        """
+        is_cur = (not searching) and t.get("path") == self.marked_path
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        row.add_css_class("row")
+        if is_cur:
+            row.add_css_class("current")
+        if t.get("online"):
+            row.add_css_class("rowonline")
+
+        # The current row is marked THREE ways at once on purpose: colour
+        # alone fails for anyone who cannot separate the accent from the
+        # background, and a single left border is easy to lose in a long list.
+        # The accent rule is on EVERY row and only VISIBLE on the current one.
+        # Gtk.Box has no `insert` and no `prepend`-that-preserves-order in this
+        # binding, and a rule that appeared on marking would shove every
+        # column 8px sideways at the exact moment the user clicked something.
+        # A rule that is always there and only changes colour does neither.
+        rule = Gtk.Box()
+        rule.add_css_class("currentrule")
+        rule.set_size_request(3, -1)
+        row.append(rule)
+
+        # every row gets art, because the list is SCANNED rather than read and
+        # a picture is how you find the track you half-remember
+        art, set_art, marker = self._tile(self.ART,
+                                          marker_icon="media-playback-start-symbolic")
+        row._marker = marker
+        row._set_art = set_art
+        art.add_css_class("rowart")
+        art.set_size_request(self.ART, self.ART)
+        row.append(art)
+        if t.get("online"):
+            COVERS.request_url(t.get("art"), set_art)
+        else:
+            COVERS.request(t["path"], set_art)
+
+        # The number slot is a container holding EITHER the row number or the
+        # live meter, never both. A row is built before it is known to be the
+        # playing one, so the swap happens when it becomes current -- which is
+        # why the slot has to exist first: Gtk.Box has no `replace()` and no
+        # `insert()` in this binding, so "swap it later" means the new widget
+        # has somewhere to go before it is needed.
+        numslot = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        numslot.add_css_class("numslot")
+        numslot.set_size_request(30, -1)
+        row._numslot = numslot
+        if t.get("online"):
+            first = Gtk.Label(label="☁")
+            first.add_css_class("rownum")
+            numslot.append(first)
+        elif is_cur:
+            numslot.append(self._meter())
+        else:
+            first = Gtk.Label(label=f"{idx + 1}")
+            first.add_css_class("rownum")
+            numslot.append(first)
+        row.append(numslot)
+
+        # The row is a FIXED height. A Box of labels sizes itself to the
+        # tallest child, so without this the rows grew and shrank with their
+        # text and the list stopped being a list.
+        row.set_size_request(-1, self.ROW_H)
+
+        ti = Gtk.Label(label=t["title"])
+        ti.set_xalign(0)
+        ti.set_ellipsize(3)
+        ti.add_css_class("rowtitle")
+        # The only column that flexes. Everything else has a width, so no two
+        # of them can ever be drawn on top of each other.
+        ti.set_hexpand(True)
+        if is_cur:
+            ti.add_css_class("rowtitlecur")
+        row.append(ti)
+
+        # in search mode the artist line carries where the track lives,
+        # because the match may have come from any playlist
+        sub = f"{t['artist'] or '—'}  ·  {plname}" if searching \
+            else (t["artist"] or "—")
+        ar = Gtk.Label(label=sub)
+        ar.set_xalign(1)
+        ar.set_ellipsize(3)
+        ar.add_css_class("rowartist")
+        ar.set_width_chars(18)       # the card's artist column, roughly
+        row.append(ar)
+
+        dur = t.get("duration") or 0
+        tm = Gtk.Label(label=clock(dur) if dur else "")
+        tm.set_xalign(1)
+        tm.add_css_class("rowtime")
+        tm.set_width_chars(5)        # M:SS never needs more
+        row.append(tm)
+
+        if t.get("online"):
+            row.append(self._online_buttons(t))
+        return row
+
+    def _meter(self):
+        """The playing row's live meter, in the number column.
+
+        It used to be three bars whose heights were constants picked by
+        isPlaying -- it flipped once and then sat there, looking like an
+        equaliser while listening to nothing at all. This reads real bands off
+        the spectrum instead, so it moves because the music is moving. Three
+        bands spread across the spectrum, low/mid/high, so the row wiggles the
+        way a spectrum should instead of pulsing in unison.
+        """
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        box.add_css_class("meter")
+        box.set_halign(Gtk.Align.CENTER)
+        box._bands = []
+        for frac in (0.06, 0.30, 0.72):
+            b = Gtk.Box()
+            b.add_css_class("band")
+            b.set_halign(Gtk.Align.END)
+            b.set_valign(Gtk.Align.CENTER)
+            b.set_size_request(3, 2)
+            box.append(b)
+            box._bands.append((frac, b))
+        return box
+
+    def _update_meter(self, row):
+        """Animate the current row's meter from the live spectrum."""
+        meter = None
+        for child in kids(row):
+            if "meter" in child.get_css_classes():
+                meter = child
+                break
+        if meter is None:
+            return
+        for frac, b in meter._bands:
+            shape = band_shape(self._spectrum, int(frac * 40), 40)
+            b.set_size_request(3, max(2, int(2 + min(1.0, shape) * 12)))
+
+
+    def _append_load_more_row(self, idx):
+        """The paging control, in the list rather than above it: the point of
+        it is that there are MORE results BELOW, and a row is the only way to
+        say that without pushing the list around while it is being read."""
+        row = Gtk.Button()
+        row.add_css_class("loadmore")
+        row.set_label("Load more results" if not AUDIUS.busy
+                      else "Loading…")
+        row.set_sensitive(not AUDIUS.busy)
+        row.set_tooltip_text(
+            f"Fetch the next {AUDIUS_PAGE} results for “{self._raw_query}”")
+        row.connect("clicked", self._load_more)
+        self._tracklist.append(row)
+        row._vis_idx = idx
+        row._load_more_row = True
+        self._rows.append(row)
+
+    def _online_buttons(self, track):
+        """The two things you can do with a result you do not own yet.
+
+        Save (arrow into a tray) puts it in the standalone bucket; the folder
+        button opens the playlists and saves into one of them. Both are
+        disabled while a download runs, so a second click cannot start a
+        second curl writing to the same path.
+        """
+        wrap = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        wrap.set_valign(Gtk.Align.CENTER)
+        saved = track["id"] in self._online_saved
+
+        save = Gtk.Button()
+        save.set_icon_name("document-save-symbolic"
+                           if not saved else "object-select-symbolic")
+        save.add_css_class("rowbtn")
+        busy = self._downloading == track["id"]
+        if saved:
+            save.set_tooltip_text(f"Saved offline to "
+                                  f"{os.path.dirname(self._online_saved[track['id']])}")
+            save.add_css_class("saved")
+        elif not track.get("downloadable"):
+            save.set_sensitive(False)
+            save.set_tooltip_text(
+                "The artist does not allow this track to be downloaded")
+        else:
+            save.set_tooltip_text("Save offline on its own, outside every "
+                                  "playlist")
+        save.set_sensitive(save.get_sensitive() and not busy and not saved)
+        save.connect("clicked", lambda *_b: self._save_online(track, ""))
+        wrap.append(save)
+
+        add = Gtk.MenuButton()
+        add.set_icon_name("list-add-symbolic")
+        add.set_always_show_arrow(False)
+        add.add_css_class("rowbtn")
+        add.set_sensitive(not busy)
+        add.set_tooltip_text("Save offline into one of your playlists")
+        # Gtk.MenuButton, not Gtk.Button: in this binding only MenuButton
+        # carries the `popover` property, and that property is what makes the
+        # widget OPEN the picker on click. Gtk.Button has no set_popover here
+        # at all, so the obvious choice raises at the first click.
+        self._attach_playlist_picker(add, track)
+        wrap.append(add)
+        return wrap
+
+    def _attach_playlist_picker(self, button, track):
+        """A popover listing the playlists, plus a box to name a new one.
+
+        Built with a ListBox rather than a menu model because the entries are
+        the library's own names, which change when a save lands — a menu
+        model built once would go stale and quietly drop the new playlist.
+        """
+        pop = Gtk.Popover()
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_margin_top(10)
+        box.set_margin_bottom(10)
+        box.set_margin_start(10)
+        box.set_margin_end(10)
+        box.set_size_request(240, -1)
+
+        head = Gtk.Label(label="SAVE INTO")
+        head.set_xalign(0)
+        head.add_css_class("rule")
+        box.append(head)
+
+        lb = Gtk.ListBox()
+        lb.add_css_class("listbox")
+        lb.set_selection_mode(Gtk.SelectionMode.NONE)
+        for pl in self._library:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            nm = Gtk.Label(label=pl["name"])
+            nm.set_xalign(0)
+            nm.set_hexpand(True)
+            nm.set_ellipsize(3)
+            nm.add_css_class("plname")
+            ct = Gtk.Label(label=f"{len(pl['tracks'])}")
+            ct.add_css_class("plcount")
+            row.append(nm)
+            row.append(ct)
+            lb.append(row)
+            row._pl_name = pl["name"]
+        # One handler on the list, not one per row: row-activated delivers the
+        # Gtk.ListBoxRow, and the name is read off its child. A per-row
+        # "activate" handler is not even connectable here — Gtk.Box has no
+        # such signal, and connecting one raises at runtime, not at import.
+        lb.connect("row-activated", self._on_playlist_picked, track, pop)
+        sw = Gtk.ScrolledWindow()
+        sw.set_child(lb)
+        sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sw.set_max_content_height(190)
+        box.append(sw)
+
+        sep = Gtk.Separator()
+        box.append(sep)
+
+        # A playlist that does not exist yet is a normal thing to want, so it
+        # is one line away rather than a dialog and a round trip through a
+        # separate settings window.
+        newrow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        ent = Gtk.Entry()
+        ent.set_hexpand(True)
+        ent.set_placeholder_text("New playlist name")
+        addb = Gtk.Button(label="Add")
+        addb.add_css_class("pbtn")
+        addb.connect("clicked",
+                     lambda _b: self._on_new_playlist(track, ent.get_text(), pop))
+        ent.connect("activate", lambda _e: self._on_new_playlist(
+            track, ent.get_text(), pop))
+        newrow.append(ent)
+        newrow.append(addb)
+        box.append(newrow)
+
+        pop.set_child(box)
+        button.set_popover(pop)
+        return pop
+
+    def _on_playlist_picked(self, _lb, row, track, pop):
+        name = getattr(row.get_child(), "_pl_name", "")
+        if name:
+            self._save_online(track, name)
+            pop.popdown()
+
+    def _on_new_playlist(self, track, name, pop):
+        name = (name or "").strip()
+        if not name:
+            self._set_status("A playlist needs a name")
+            return
+        # The folder is created by the download itself, so nothing has to
+        # exist on disk for this name to be valid yet.
+        self._save_online(track, name)
+        pop.popdown()
+
+    # ── actions ──────────────────────────────────────────────────────────
+    def _play_visible_index(self, idx):
+        """Play from row `idx`.
+
+        Online rows are NOT queued behind the local ones. Queueing fifty
+        remote streams behind a click on a local track would open fifty
+        network connections the user did not ask for, and mpv would start
+        pre-buffering all of them. So the queue is the local rows, plus the
+        one online row that was clicked — which also means the queue index
+        has to be recomputed, not reused.
+        """
+        if not (0 <= idx < len(self._visible)):
+            return
+        clicked, _pl = self._visible[idx]
+        self.mpv.send(["playlist-clear"])
+        local, pos, online = [], 0, None
+        for i, (t, _pl) in enumerate(self._visible):
+            if t.get("load_more"):
+                continue
+            if t.get("online"):
+                if i == idx:
+                    online = t
+                continue
+            if i < idx:
+                pos += 1
+            local.append(t["path"])
+        for p in local:
+            self.mpv.send(["loadfile", p, "append-play"])
+        if online is not None:
+            self.mpv.send(["loadfile", online["path"], "append-play"])
+            pos = len(local)
+        self.mpv.send(["playlist-play-index", pos])
+        self.mpv.send(["set_property", "pause", False])
+
+    # ── saving an online track ──────────────────────────────────────
+    def _save_online(self, track, folder=""):
+        """Put a found track on the disk, offline.
+
+        `folder` is optional and that is the whole point: omitted means the
+        standalone bucket (saved, in no playlist), a name means that playlist,
+        created by the download itself. Either way the file lands inside the
+        library root, so the next scan makes it an ordinary local track.
+        """
+        if self._downloading:
+            self._set_status("A download is already running")
+            return None
+        if track.get("load_more"):
+            return None
+        dest = target_dir(folder)
+        name = (f"{sanitize_filename(track.get('artist'))} - "
+                f"{sanitize_filename(track.get('title'))}.mp3")
+        path = os.path.join(dest, name)
+        if self._online_saved.get(track["id"]) == path:
+            # Already on disk, exactly there. Refusing is right here: a second
+            # curl would rewrite the same bytes over the same file.
+            self._set_status(f"Already saved to {os.path.dirname(path)}")
+            return path
+        # A DIFFERENT destination is a real request and gets a real download:
+        # "save it offline" and "put it in this playlist" are two answers to
+        # two different questions, and having the first silently cancel the
+        # second would be the wrong one.
+
+        self._downloading = track["id"]
+        label = os.path.basename(dest) if folder else "Downloads"
+        self._set_status(f"Saving “{track['title']}” to {label}…")
+        self._rebuild_tracks()          # so the row's buttons go disabled now
+
+        def worker():
+            err = download_track(track, path)
+            GLib.idle_add(self._save_done, track, path, err)
+
+        threading.Thread(target=worker, daemon=True).start()
+        return path
+
+    def _save_done(self, track, path, err):
+        self._downloading = ""
+        if err:
+            self._set_status(err)
+        else:
+            self._online_saved[track["id"]] = path
+            self._set_status(f"Saved to {os.path.dirname(path)}")
+            # Re-scan so the new file is a real library entry immediately,
+            # and so the playlist it landed in shows the new count.
+            self.refresh_library()
+        self._rebuild_tracks()
+
+    def _playpause(self, *_):
+        self.mpv.send(["cycle", "pause"])
+
+    def _next(self, *_):
+        self.mpv.send(["playlist-next", "weak"])
+
+    def _prev(self, *_):
+        self.mpv.send(["playlist-prev", "weak"])
+
+    def _on_play_playlist(self, *_):
+        self._play_visible_index(0)
+
+    def _on_pl_activated(self, _lb, row):
+        name = getattr(row.get_child(), "_pl_name", None)
+        if name:
+            # clicking a playlist while searching drops back to browsing it:
+            # the search covers every playlist, so a card click means "show me
+            # this one".
+            if self._query:
+                self._entry.set_text("")
+            self._select_playlist(name)
+
+    def _on_track_activated(self, _lb, row):
+        child = row.get_child()
+        # The paging row is a plain Gtk.Button, not a track row, and clicking
+        # it must page rather than try to play a "song" that has no path.
+        if getattr(child, "_load_more_row", False):
+            self._load_more()
+            return
+        idx = getattr(child, "_vis_idx", -1)
+        self._play_visible_index(idx)
+
+    # `key-pressed` delivers (controller, keyval, keycode, state) -- the
+    # modifier mask is the FOURTH argument and the keycode the third, which
+    # is the wrong way round to guess at. Naming them apart from each other
+    # is the point: binding "keystate" to the keycode silently makes every
+    # Ctrl shortcut unreachable, because a keycode never has Ctrl bits in it.
+    def _on_key(self, _controller, keyval, _keycode, state):
+        kv = Gdk.keyval_name(keyval)
+        ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        if ctrl and kv in ("f", "F"):
+            self._entry.grab_focus()
+            return True
+        if kv == "Escape":
+            # Escape clears a search that has something to clear, and is
+            # otherwise left to GTK, which blurs the entry and gives the
+            # key back to whatever had focus before it.
+            if self._query:
+                self._entry.set_text("")
+                return True
+        if kv == "space":
+            self._playpause()
+            return True
+        if kv in ("Right", "Left") and self._state["dur"] > 0:
+            d = 10 if kv == "Right" else -10
+            self.mpv.send(["seek", d, "relative"])
+            return True
+        if kv in ("Up", "Down"):
+            v = int(max(0, min(100, self._state["volume"]
+                               + (5 if kv == "Up" else -5))))
+            self._on_volume_from_bar(v)
+            return True
+        if kv == "n":
+            self._next()
+            return True
+        if kv == "p":
+            self._prev()
+            return True
+        return False
+
+    # ── state from mpv ───────────────────────────────────────────────────
+    def _on_mpv(self, d):
+        if isinstance(d, bool):  # connection state
+            if d:
+                # Reconnected: pull the truth immediately rather than waiting
+                # for the next poll, and say so. Reporting "offline" and then
+                # never reporting "back" is how a window ends up lying about a
+                # daemon that never stopped.
+                self._set_daemon(True)
+                self._poll()
+            else:
+                self._set_daemon(False)
+            return
+        if d.get("event") != "property-change":
+            return
+        name, data = d.get("name"), d.get("data")
+        st = self._state
+        if name == "pause":
+            st["paused"] = bool(data) if data is not None else True
+        elif name == "time-pos":
+            st["pos"] = float(data or 0)
+            st["pos_at"] = time.time()
+        elif name == "duration":
+            st["dur"] = float(data or 0)
+        elif name == "media-title":
+            st["title"] = str(data or "")
+        elif name == "metadata":
+            m = data or {}
+            st["artist"] = str(m.get("artist") or m.get("ARTIST") or "")
+            al = str(m.get("album") or m.get("ALBUM") or "")
+            # The bridge substitutes "Unknown Album" for a track that carries
+            # no album tag. Fine for a log, terrible for a card: it reads as
+            # a real album called "Unknown Album".
+            st["album"] = "" if al.lower() == "unknown album" else al
+            t = str(m.get("title") or m.get("TITLE") or "")
+            if t:
+                st["title"] = t
+        elif name == "playlist-pos":
+            st["qpos"] = data if data is not None else -1
+        elif name == "volume":
+            st["volume"] = float(data or 0)
+        elif name in ("filename", "path"):
+            # `filename` is mpv's BASENAME and `path` is the absolute one.
+            # The library is scanned as absolute paths, so joining on
+            # `filename` finds nothing and the playing row is never marked --
+            # which is why the whole playlist said "no playlist playing"
+            # while a track from it was playing. `path` is the join key.
+            v = str(data or "")
+            if name == "path" or (v and "/" in v):
+                st["filename"] = v
+        elif name == "idle-active":
+            if data:
+                st.update(title="", artist="", album="", pos=0.0, dur=0.0,
+                          qpos=-1, paused=True, volume=0.0, filename="")
+        self._render()
+
+    def _set_daemon(self, up):
+        """Track the daemon, and say NOTHING about it in the hero.
+
+        It used to write "Daemon offline" into the title and "starting
+        ii-music-mpd…" into the sub-line, so a daemon restart replaced what
+        you were listening to with a status message. The hero is for music
+        and only music; a daemon that is briefly down leaves an inert player
+        and an unseekable bar, which is exactly what it is. The status line
+        is kept for things the user did -- a search, a save.
+        """
+        # Idempotent, because this is polled.
+        if up == self._daemon:
+            return
+        self._daemon = up
+        if not up:
+            self._bar.set_state(active=False, show_spectrum=False)
+        for m in (self._btn_prev, self._btn_play, self._btn_next):
+            # A `Mark` is a DrawingArea, so it has no `set_sensitive`. The
+            # island's answer to "cannot do this yet" is a DIMMED mark rather
+            # than a hidden one, which here is a CSS class.
+            m.set_opacity(1.0 if up else 0.4)
+            m.set_sensitive(up)
+
+    # ── position: interpolated, not read ──────────────────────────────────
+    #
+    # mpv only reports `time-pos` when it changes, so reading it leaves the
+    # scrubber frozen between reports -- which is exactly the "the bar does
+    # not fill up" complaint. The value on screen is therefore the last thing
+    # mpv actually said plus the wall time since, re-anchored from mpv on
+    # every poll, so the worst case is one poll of drift rather than a whole
+    # track.
+    def _display_position(self):
+        st = self._state
+        if st["paused"] or st["dur"] <= 0:
+            return st["pos"]
+        drift = time.time() - st.get("pos_at", 0)
+        # Only extrapolate across a short, trustworthy interval. If the stamp
+        # is old the poll was not running and adding all that time in one go
+        # is a guess.
+        if drift > 1.5:
+            return st["pos"]
+        # never past the end: a missing or wrong duration would let the bar
+        # run off the right-hand edge
+        return min(st["dur"], st["pos"] + drift)
+
+    def _seek_to_fraction(self, f):
+        """Seek to a fraction of the track, sent once per gesture.
+
+        Nothing is sent while the pointer is down: a drag across the bar must
+        not fire a seek per motion event, which makes the player stutter and
+        queue dozens of seeks behind the gesture.
+        """
+        st = self._state
+        if st["dur"] <= 0:
+            return
+        target = max(0.0, min(1.0, f)) * st["dur"]
+        self._last_seek_touch = time.time()
+        self.mpv.send(["seek", round(target, 2), "absolute"])
+        st["pos"] = target
+        st["pos_at"] = time.time()
+        self._render()
+
+    def _on_volume_from_bar(self, level):
+        self.cfg["volume"] = level
+        self.mpv.send(["set_property", "volume", level])
+        self._persist()
+
+    def _poll(self):
+        """Ask mpv for everything the card draws.
+
+        250ms while something is playing, 1s when it is not: the bar has to
+        move smoothly, and a five-second poll is the other half of why it did
+        not.
+
+        The connection flag is read from `send`'s own truth rather than from
+        the push notification. The notification is missed entirely when the
+        socket is ALREADY up at startup -- `_connect()` notifies `handlers`,
+        and the window appends its handler after the reader thread is already
+        running, so the one "we are connected" message can be delivered to
+        nobody and the hero then says "Daemon offline" forever against a
+        daemon that never stopped.
+        """
+        self._set_daemon(self.mpv.daemon_up)
+        def gp(prop, key, conv, default=None):
+            def cb(data):
+                if data is None:
+                    return
+                st = self._state
+                st[key] = conv(data)
+                if key == "pos":
+                    st["pos_at"] = time.time()
+            self.mpv.send(["get_property", prop], cb)
+
+        gp("pause", "paused", bool, True)
+        gp("time-pos", "pos", float, 0.0)
+        gp("duration", "dur", float, 0.0)
+        gp("media-title", "title", str, "")
+        gp("playlist-pos", "qpos", int, -1)
+        gp("volume", "volume", float, 0.0)
+        gp("path", "filename", str, "")
+
+        def on_meta(data):
+            m = data or {}
+            if m:
+                self._on_mpv({"event": "property-change",
+                              "name": "metadata", "data": m})
+        self.mpv.send(["get_property", "metadata"], on_meta)
+
+        self._render()
+        return True
+
+    def _mark_playing(self):
+        """Exactly one row carries the accent, and only while the marked path
+        still lines up with the rows on screen.
+
+        Deliberately NOT driven by the queue index: the queue can be shuffled,
+        filtered, or hold tracks from several folders, so an index into it
+        says nothing about which row of WHICH playlist is playing. The join is
+        the file path, which is what the card uses too.
+        """
+        marked = self.marked_path
+        target = None
+        if marked and not self._query:
+            for row, (t, _pl) in zip(self._rows, self._visible):
+                if getattr(row, "_load_more_row", False):
+                    continue
+                if t.get("path") == marked:
+                    target = row
+                    break
+        if target is self._play_row:
+            self._paint_marker()
+            return
+        if self._play_row is not None:
+            self._play_row.remove_css_class("current")
+            marker = getattr(self._play_row, "_marker", None)
+            if marker is not None:
+                marker.set_visible(False)
+            slot = getattr(self._play_row, "_numslot", None)
+            if slot is not None:
+                meter = [c for c in kids(slot) if "meter" in c.get_css_classes()]
+                if meter:
+                    slot.remove(meter[0])
+                    n = Gtk.Label(label=f"{self._play_row._vis_idx + 1}")
+                    n.add_css_class("rownum")
+                    slot.append(n)
+        self._play_row = None
+        if target is not None:
+            target.add_css_class("current")
+            marker = getattr(target, "_marker", None)
+            if marker is not None:
+                marker.set_visible(True)
+            # The meter takes the number's place rather than being drawn over
+            # it: a row is either numbered or metered, never both, which is
+            # what the card does too.
+            slot = getattr(target, "_numslot", None)
+            if slot is not None:
+                metered = [c for c in kids(slot)
+                           if "meter" in c.get_css_classes()]
+                if not metered:
+                    for c in kids(slot):
+                        slot.remove(c)
+                    slot.append(self._meter())
+            self._play_row = target
+        self._paint_marker()
+
+    @staticmethod
+    def _plain_num(idx):
+        n = Gtk.Label(label=f"{idx + 1}")
+        n.add_css_class("rownum")
+        return n
+
+    def _paint_marker(self):
+        """The play/pause badge laid over the playing row's cover."""
+        row = self._play_row
+        marker = getattr(row, "_marker", None) if row is not None else None
+        if marker is None:
+            return
+        # Gtk.Image has no set_icon_name in this binding -- the setter is
+        # set_from_icon_name. (Gtk.Button does have set_icon_name, which is
+        # why the transport marks get away with it.)
+        marker.set_from_icon_name(
+            "media-playback-pause-symbolic" if not self._state["paused"]
+            else "media-playback-start-symbolic")
+
+    def _render(self):
+        st = self._state
+        playing = self._daemon and st["dur"] > 0 and not st["paused"] \
+            and st["title"] != ""
+        self._btn_play.set_playing(not st["paused"])
+
+        # The title line. "Nothing playing" rather than a blank, because a
+        # blank hero reads as a broken one.
+        self._lbl_title.set_text(st["title"] or "Nothing playing")
+
+        # The playlist, and the album when it says anything new. This is the
+        # only thing on the screen that answers "why is the next track that
+        # one", so it is worth the line -- and it is hidden rather than
+        # filled with a placeholder when there is nothing to say.
+        pl = self._derive_playlist()
+        sub = self._subline(pl["name"] if pl else "", st.get("album", ""))
+        if sub == "":
+            sub = st.get("artist", "")
+        self._lbl_artist.set_text(sub)
+        self._lbl_artist.set_visible(sub != "")
+
+        # the bar
+        self._bar.set_state(
+            position=self._display_position(),
+            duration=st["dur"],
+            volume=st["volume"],
+            active=self._daemon and st["dur"] > 0,
+            show_spectrum=playing)
+
+        # Durations for whatever playlist just became the one on screen. Only
+        # when it CHANGES: this runs four times a second, and measuring 45
+        # tracks every time would be absurd.
+        pl = self._derive_playlist()
+        if pl is not None and pl is not self._measured_playlist:
+            self._measured_playlist = pl
+            self._ensure_durations(pl)
+
+        # cover art: the file that is playing, through the shared cache
+        fn = st.get("filename", "")
+        if fn != self._cover_key:
+            self._cover_key = fn
+            self._cover_current(fn)
+        self._mark_playing()
+
+    def _cover_current(self, fn):
+        if not fn:
+            set_cover_image(self._cover, self._coverph, None)
+            return
+        COVERS.request(fn, self._apply_cover)
+
+    def _apply_cover(self, art_path):
+        set_cover_image(self._cover, self._coverph, art_path)
+
+
+# One time format, one function. An alias rather than a second implementation
+# so the now-playing stamps and the bar's stamps cannot drift apart.
+fmt_time = clock
+
+
+class MusicApp(Adw.Application):
+    """Single-instance app whose window can hide without the app dying.
+
+    The application_id puts it on the session bus, which is what makes the
+    second launch reuse this process instead of starting a rival: activate is
+    then delivered to the running instance, which just re-presents its window.
+    """
+
+    def __init__(self):
+        super().__init__(application_id=APP_ID,
+                         flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
+
+    def do_command_line(self, cmdline):
+        # Every launch ends here, including the remote one that a second
+        # `ii-music-app` produces: bring the existing window back rather than
+        # letting the new invocation start its own.
+        self.activate()
+        win = self.props.active_window
+        if win is not None:
+            win.present()
+        return 0
+
+    def do_startup(self, *args):
+        # Register with the shell's background-apps tray before any window
+        # exists, so the entry is there from the moment the app is running.
+        Adw.Application.do_startup(self, *args)
+        # The palette is a fixed dark ramp, so the app is dark regardless of
+        # the system's light/dark preference — the same choice every other
+        # app in the tray makes.
+        Adw.StyleManager.get_default().set_color_scheme(
+            Adw.ColorScheme.FORCE_DARK)
+        publish_presence()
+        self._install_term_handler()
+
+    def _install_term_handler(self):
+        """Clean up the registry when the app is terminated by signal.
+
+        The tray's Quit action sends SIGTERM, and a default SIGTERM just kills
+        the process: GApplication's shutdown never runs, so the presence file
+        would be left behind pointing at a dead pid. The shell's registry does
+        drop such a stale file, so this is tidiness rather than correctness --
+        but an entry that outlives its app is exactly the kind of phantom that
+        makes a "what is running?" list untrustworthy, so it is worth the three
+        lines to not create one.
+
+        Handing the cleanup to the main loop's idle queue (rather than doing it
+        inline) lets the process finish exiting first.
+        """
+        try:
+            import signal
+            from gi.repository import GLibUnix
+        except Exception:
+            # No signal support here: the registry's stale-file check is the
+            # backstop, so this is not fatal.
+            return
+
+        def on_term():
+            # Cleanup on the idle queue, so it runs as the process winds down
+            # rather than in the middle of the signal delivery.
+            GLib.idle_add(clear_presence)
+            self.quit()
+            return False
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                GLibUnix.signal_add(GLib.PRIORITY_HIGH, sig, on_term)
+            except Exception:
+                pass
+
+    def do_activate(self):
+        win = self.props.active_window
+        if win is None:
+            win = MusicWindow(self)
+        win.present()
+
+    def do_shutdown(self, *args):
+        # A real quit: leave the registry, but do NOT touch playback — the
+        # daemon is a separate service and the song must survive the UI.
+        clear_presence()
+        # Chain up: a GApplication vfunc override that does not is a
+        # GLib-GIO-CRITICAL, and the base shutdown is what actually tears the
+        # process down.
+        Adw.Application.do_shutdown(self, *args)
+
+
+def main():
+    app = MusicApp()
+    return app.run(None)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

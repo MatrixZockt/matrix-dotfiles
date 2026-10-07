@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""Print the LIVE graphical session's environment, found by probing.
+
+Why this exists
+---------------
+`systemctl --user show-environment` is NOT a reliable source for
+WAYLAND_DISPLAY on this machine. The user manager (systemd --user) is
+started once per *boot*, not per *login*. Its environment is a snapshot
+taken when it started. Every graphical login after that gets whatever
+display number the next free one turns out to be, so after a few
+logins it is permanently wrong:
+
+    systemd --user says:  WAYLAND_DISPLAY=wayland-2  (dead, connection refused)
+    the live session is:  WAYLAND_DISPLAY=wayland-1  (works)
+
+Anything that inherits that stale value and then tries to open a display
+fails at once. This is why the Razer app's unit died in 251 ms with
+`RuntimeError: Gtk couldn't be initialized` and why the shell watchdog
+relaunched `qs` hundreds of times into a compositor that was not there.
+
+`systemctl --user import-environment` only patches the symptom for the
+current login; the next login re-breaks it. So we do not read the
+environment at all -- we ASK the kernel which compositor is actually
+listening. That is the only answer that cannot go stale.
+
+How it finds the session
+-----------------------
+Two connect-probes, because neither filesystem fact alone is enough:
+
+  * WAYLAND_DISPLAY      -- /run/user/$UID/wayland-N files outlive the
+                            session that made them (wayland-2 still exists
+                            from a crashed Hyprland). Existence proves
+                            nothing, so we try to connect() to each one
+                            and keep the only socket that accepts.
+
+  * HYPRLAND_INSTANCE_SIGNATURE
+                         -- the per-instance dir under
+                            /run/user/$UID/hypr/ has the same problem: four
+                            of them, three dead. Same probe on
+                            .socket2.sock (the event socket) picks the live
+                            one, and the dir name IS the signature.
+
+A connect() that succeeds is proof a live server is behind it, which is
+exactly the property we need. No guessing from mtimes, no reliance on
+anything that can survive its own session.
+
+Usage
+-----
+    eval "$(session-env)"        # export into the current shell
+    exec env $(session-env) foo  # or hand to a single command
+    session-env --check          # exit 0 live / 1 no compositor, print why
+
+With no arguments it prints one `KEY=value` per line, shell-quoted, and
+prints nothing at all (exit 1) if there is no live compositor -- so a
+caller can safely do `eval "$(session-env)" || true` and, on a headless
+tty, end up with nothing exported rather than with garbage.
+"""
+
+from __future__ import annotations
+
+import glob
+import os
+import shlex
+import socket
+import sys
+
+RUNTIME = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+
+
+def accepts(path: str, timeout: float = 0.5) -> bool:
+    """True if a unix socket at `path` has a live server behind it.
+
+    A stale socket file from a crashed session still exists on disk but
+    nothing is bound to it, so connect() is refused. That refusal is the
+    signal we want: it is the difference between "the file is there" and
+    "there is a compositor there".
+    """
+    if not os.path.exists(path):
+        return False
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def live_wayland_display() -> str | None:
+    """The wayland-N whose socket actually accepts a connection."""
+    for path in sorted(glob.glob(os.path.join(RUNTIME, "wayland-*"))):
+        name = os.path.basename(path)
+        # Skip the .lock sidecars; only real sockets are named wayland-N.
+        if name.endswith(".lock"):
+            continue
+        if accepts(path):
+            return name
+    return None
+
+
+def live_hypr_signature() -> str | None:
+    """The instance dir whose Hyprland IPC socket is still answering.
+
+    `.socket2.sock` is the event/command socket. It is the better probe of
+    the two: it is what `hyprctl` talks to, so if it answers, Hyprland is
+    genuinely up and serving this user.
+    """
+    for path in sorted(glob.glob(os.path.join(RUNTIME, "hypr", "*/.socket2.sock"))):
+        if accepts(path):
+            return os.path.basename(os.path.dirname(path))
+    return None
+
+
+def live_x_display(wayland: str | None) -> str | None:
+    """The matching X display, if this session also runs an X server.
+
+    Read out of the socket number rather than trusted blindly: wayland-1
+    belongs to Xorg's :1, but only because the two are allocated together.
+    Deriving it keeps DISPLAY and WAYLAND_DISPLAY from disagreeing, which is
+    what breaks GTK apps that fall back to X11.
+    """
+    if not wayland or not wayland.startswith("wayland-"):
+        return None
+    tail = wayland.split("-", 1)[1]
+    return f":{tail}" if tail.isdigit() else None
+
+
+def reap_stale() -> list[str]:
+    """Delete wayland-N sockets and hypr instance dirs with no server behind them.
+
+    Cleanup, deliberately NOT the thing that makes this script correct. The
+    probe already ignores dead sockets, so a stale one cannot produce a wrong
+    answer -- it just accumulates. But these files are what made the bug
+    possible in the first place: on 2026-09-28 a crashed Hyprland left
+    wayland-2 behind, the systemd user manager kept advertising it, and
+    everything it launched inherited a display that refused connections.
+
+    Removing them means the next login is not up against a field of
+    landmines, and it keeps the numbering low, which is what makes
+    "wayland-1" keep meaning the live session in the first place.
+
+    Only ever unlinks a socket we have just seen REFUSE a connection, so a
+    live compositor's socket can never be removed. Best-effort throughout: a
+    failure here must not stop us reporting the real session.
+    """
+    removed: list[str] = []
+    for path in glob.glob(os.path.join(RUNTIME, "wayland-*")):
+        name = os.path.basename(path)
+        if name.endswith(".lock") or not os.path.exists(path):
+            continue
+        if accepts(path):
+            continue  # live -- never touch it
+        for victim in (path, path + ".lock"):
+            try:
+                os.unlink(victim)
+                removed.append(os.path.basename(victim))
+            except OSError:
+                pass
+    for path in glob.glob(os.path.join(RUNTIME, "hypr", "*", ".socket2.sock")):
+        if accepts(path):
+            continue
+        instance = os.path.dirname(path)
+        try:
+            for entry in os.listdir(instance):
+                try:
+                    os.unlink(os.path.join(instance, entry))
+                except OSError:
+                    pass
+            os.rmdir(instance)
+            removed.append(f"hypr/{os.path.basename(instance)}")
+        except OSError:
+            pass
+    return removed
+
+
+def collect() -> dict[str, str]:
+    reap_stale()
+    env: dict[str, str] = {"XDG_RUNTIME_DIR": RUNTIME}
+    wayland = live_wayland_display()
+    if wayland:
+        env["WAYLAND_DISPLAY"] = wayland
+        x = live_x_display(wayland)
+        if x:
+            env["DISPLAY"] = x
+    signature = live_hypr_signature()
+    if signature:
+        env["HYPRLAND_INSTANCE_SIGNATURE"] = signature
+    # A GTK/Qt client launched with these set is unambiguously a Wayland
+    # client; without them they may negotiate against the dead X display.
+    env["QT_QPA_PLATFORM"] = "wayland"
+    env["GDK_BACKEND"] = "wayland"
+    return env
+
+
+def main() -> int:
+    env = collect()
+    if len(sys.argv) > 1 and sys.argv[1] == "--check":
+        live = "WAYLAND_DISPLAY" in env
+        print(
+            f"live: WAYLAND_DISPLAY={env.get('WAYLAND_DISPLAY', '-')} "
+            f"HYPRLAND_INSTANCE_SIGNATURE={env.get('HYPRLAND_INSTANCE_SIGNATURE', '-')[:16]}-"
+            if live
+            else "no live compositor found (checked "
+            f"{RUNTIME}/wayland-* and {RUNTIME}/hypr/*/.socket2.sock)"
+        )
+        return 0 if live else 1
+
+    if "WAYLAND_DISPLAY" not in env:
+        # Headless tty, or the compositor is not up yet. Say nothing: a
+        # caller that evals us then simply keeps its own environment.
+        return 1
+    for key, value in env.items():
+        print(f"{key}={shlex.quote(value)}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

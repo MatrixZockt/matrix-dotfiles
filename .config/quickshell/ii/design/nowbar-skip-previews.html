@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Now bar — skip arrows &amp; edge spread</title>
+<style>
+  :root {
+    --bg: #0A0A0A; --lowest: #050505; --low: #121212; --cont: #161616;
+    --high: #1E1E1E; --highest: #262626;
+    --on: #E2E2E2; --onvar: #C6C6C6; --subtext: #9E9E9E;
+    --outline: #7E7E7E; --outlinevar: #3A3A3A;
+    --primary: #F0F0F0; --primaryhover: #FFFFFF; --onprimary: #0A0A0A;
+    --warn: #E6C26A;
+    --sans: "Google Sans Flex", "Google Sans", system-ui, sans-serif;
+    --mono: "JetBrains Mono NF", monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--lowest); color: var(--on);
+    font-family: var(--sans); font-size: 13px;
+    padding: 28px 0 60px; display: flex; flex-direction: column; align-items: center; gap: 30px;
+  }
+  .intro { max-width: 720px; text-align: center; color: var(--subtext); line-height: 1.6; }
+  .intro b { color: var(--on); }
+  .intro code { font-family: var(--mono); font-size: 11.5px; color: var(--onvar); }
+  .callout {
+    max-width: 720px; background: #1a1512; border: 1px solid #4a3c26; border-left: 3px solid var(--warn);
+    border-radius: 6px; padding: 12px 16px; text-align: left; color: var(--onvar);
+    font-size: 12.5px; line-height: 1.6;
+  }
+  .callout b { color: var(--warn); }
+
+  h2.design-title { font-size: 15px; font-weight: 500; letter-spacing: .4px; }
+  p.design-note { font-size: 12px; color: var(--subtext); max-width: 720px; text-align: center; line-height: 1.5; margin-top: 4px; }
+  .sec { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+
+  .grid { display: flex; gap: 14px; flex-wrap: wrap; justify-content: center; }
+  .card { width: 300px; background: var(--cont); border: 1px solid var(--outlinevar); border-radius: 8px; padding: 14px; }
+  .card.picked { border-color: var(--primary); }
+  .card h3 { font-size: 12.5px; font-weight: 500; }
+  .card .sub { font-size: 11px; color: var(--subtext); font-family: var(--mono); margin: 2px 0 10px; }
+  .card p { font-size: 11.5px; color: var(--subtext); line-height: 1.5; margin-top: 10px; }
+
+  .mock { background: var(--low); border: 1px solid var(--outlinevar); border-radius: 10px; padding: 9px 0 11px; }
+  .mocklabel { position: absolute; left: 10px; top: -7px; font-size: 9.5px; letter-spacing: .5px;
+               text-transform: uppercase; color: var(--subtext); background: var(--cont); padding: 0 5px; border-radius: 3px; }
+  .mockwrap { position: relative; }
+
+  /* ruler: card wall -> skip button edge */
+  .ticks { position: relative; height: 8px; margin: 0 14px 2px; }
+  .ticks i { position: absolute; top: 0; height: 6px; width: 1px; background: #4a3f33; }
+  .ticks i.a { left: 0; }
+  .ticks i.b { background: var(--warn); }
+
+  /* THE FIX: three equal cells, each button centred in its own cell.
+     The outer cells' buttons are then pulled inward by `inset`. */
+  .row { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; }
+  .row.clustered { display: flex; align-items: center; justify-content: center; gap: 10px; }
+
+  .btn { display: flex; align-items: center; justify-content: center; border-radius: 999px;
+         flex: none; transition: background .16s; }
+  .btn svg { display: block; }
+  .btn.play { width: 36px; height: 36px; background: var(--primary); }
+  .btn.play.hover { background: var(--primaryhover); }
+  .btn.play.hover svg path { fill: var(--onprimary); stroke: var(--onprimary); }
+  .btn.skip { width: 32px; height: 32px; background: transparent; }
+  .btn.skip.hover.now { background: var(--highest); }
+  .btn.skip.hover.filled { background: var(--primary); }
+  .btn.skip.hover.filled svg path, .btn.skip.hover.filled svg rect { fill: var(--onprimary); stroke: var(--onprimary); }
+
+  .state { margin-top: 8px; display: flex; align-items: center; gap: 8px; }
+  .state .lbl { font-size: 9.5px; color: var(--subtext); font-family: var(--mono); width: 34px; flex: none; }
+
+  .controls { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+  button { font: inherit; font-size: 11.5px; color: var(--on); background: var(--high);
+           border: 1px solid var(--outlinevar); border-radius: 6px; padding: 4px 11px; cursor: pointer; }
+  button:hover { background: var(--highest); }
+  button.pick { border-color: var(--primary); margin-left: auto; }
+  .tag { font-size: 11px; color: var(--subtext); font-family: var(--mono); text-align: center; min-height: 15px; }
+</style>
+</head>
+<body>
+
+<div class="callout">
+  <b>The reason they are not at the edge is not the spacing.</b> The row is
+  <code>[spacer][skip][play][skip][spacer]</code> where both spacers are
+  <code>Layout.fillWidth: true</code>. Two fill-width items share ALL the leftover width
+  <i>equally</i>, so the two skips are pushed together into a cluster in the middle of the card
+  and the empty space lands <i>outside</i> them. The comment above that code says
+  &ldquo;skip back hard left, play dead centre, skip forward hard right&rdquo; &mdash; the code
+  does the opposite, and no value of <code>spacing</code> changes that. The real fix is to
+  drop the spacers and let each of the three buttons centre itself in its own third.
+</div>
+
+<div class="intro">
+  Below: <b>Card 0 is today&rsquo;s behaviour, reproduced exactly</b>, so the difference is
+  obvious. Everything after it uses the three-cell spread, and you choose
+  <b>the arrow</b> and <b>how far in from the card wall the outer buttons sit</b>.
+  Each card shows the row at rest, with a skip hovered, and with play hovered &mdash; the
+  skips today get a faint grey wash, play gets a filled accent disc, and they are visibly
+  different answers to the same question.
+</div>
+
+<div class="sec">
+  <h2 class="design-title">0 · Today</h2>
+  <p class="design-note">Two equal fill-width spacers &rarr; the three buttons cluster in the middle.</p>
+  <div class="grid" id="current"></div>
+</div>
+
+<div class="sec">
+  <h2 class="design-title">1 · Edge spread</h2>
+  <p class="design-note">Three equal cells, each button centred in its own third. Pick how far in from the card wall the outer buttons sit.</p>
+  <div class="grid" id="spaces"></div>
+</div>
+
+<div class="sec">
+  <h2 class="design-title">2 · Arrow design</h2>
+  <p class="design-note">All filled, all drawn at 21px as in the widget, so only the silhouette differs.</p>
+  <div class="grid" id="arrows"></div>
+</div>
+
+<div class="tag" id="tag"></div>
+
+<script>
+const SIZE = 21;
+const svg = (inner) => `<svg width="${SIZE}" height="${SIZE}" viewBox="0 0 24 24" fill="none"
+  stroke="#E2E2E2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
+
+const ARROWS = {
+  double: {
+    name: "A · Double triangle", sub: "fast_rewind / fast_forward — current",
+    prev: () => svg('<path d="M11 5 L11 19 L3 12 Z" fill="#E2E2E2" stroke="none"/><path d="M20 5 L20 19 L12 12 Z" fill="#E2E2E2" stroke="none"/>'),
+    next: () => svg('<path d="M13 5 L13 19 L21 12 Z" fill="#E2E2E2" stroke="none"/><path d="M4 5 L4 19 L12 12 Z" fill="#E2E2E2" stroke="none"/>'),
+    note: "What is there now, and the reason it is there: as an OUTLINE glyph the one-pixel bar of skip_previous vanished on the dark card and the row read as a lone arrow — &ldquo;back&rdquo;, not &ldquo;the song before this one&rdquo;. Two solid triangles say <i>jump</i>."
+  },
+  bartri: {
+    name: "B · Bar + triangle", sub: "skip_previous / skip_next, filled",
+    prev: () => svg('<rect x="4" y="5" width="2.6" height="14" rx="1" fill="#E2E2E2" stroke="none"/><path d="M20 5 L20 19 L9 12 Z" fill="#E2E2E2" stroke="none"/>'),
+    next: () => svg('<path d="M4 5 L4 19 L15 12 Z" fill="#E2E2E2" stroke="none"/><rect x="17.4" y="5" width="2.6" height="14" rx="1" fill="#E2E2E2" stroke="none"/>'),
+    note: "The shape most players use, and the one that was already tried and rejected here — as an OUTLINE. Filled, the bar survives at this size. The most immediately readable &ldquo;previous track&rdquo; of the four."
+  },
+  chev: {
+    name: "C · Double chevron", sub: "chevron_left / chevron_right",
+    prev: () => svg('<path d="M11 7 L5 12 L11 17"/><path d="M19 7 L13 12 L19 17"/>'),
+    next: () => svg('<path d="M5 7 L11 12 L5 17"/><path d="M13 7 L19 12 L13 17"/>'),
+    note: "The quietest, and the only one that is not a solid shape. It reads as a <i>nudge</i> rather than a <i>jump</i> — which is the one thing you do not want from a track skip, though it is the prettiest."
+  },
+  stem: {
+    name: "D · Stem + head", sub: "arrow_back / arrow_forward",
+    prev: () => svg('<path d="M20 12 H5"/><path d="M11 6 L5 12 L11 18"/>'),
+    next: () => svg('<path d="M4 12 H19"/><path d="M13 6 L19 12 L13 18"/>'),
+    note: "Unmistakably an arrow, and that is the problem: a generic &ldquo;go back&rdquo; arrow, the same shape as a browser Back button. Loses the &ldquo;previous track&rdquo; meaning entirely."
+  }
+};
+
+function el(tag, cls, html) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (html !== undefined) e.innerHTML = html;
+  return e;
+}
+
+function row(arrowKey, inset, state, clustered) {
+  const a = ARROWS[arrowKey];
+  const r = el("div", "row" + (clustered ? " clustered" : ""));
+  const skipCls = "btn skip" + (state === "skip" ? " hover " + (a.filledHover ? "filled" : "now") : "");
+  const playGlyph = svg('<path d="M8 5 L8 19 L19 12 Z" fill="#0A0A0A" stroke="none"/>');
+  const play = el("div", "btn play" + (state === "play" ? " hover" : ""), playGlyph);
+
+  if (clustered) {
+    // exactly what the QML does today: two equal fill-width spacers
+    r.append(el("div", "btn skip", a.prev()), play, el("div", "btn skip", a.next()));
+    return r;
+  }
+
+  const left = el("div", "btn skip", a.prev());
+  const right = el("div", "btn skip", a.next());
+  // each outer cell centres its button, then pulls it inward by `inset`
+  left.style.marginLeft = inset + 16 + "px";
+  right.style.marginRight = inset + 16 + "px";
+
+  const cellL = el("div"); cellL.style.cssText = "display:flex;justify-content:center"; cellL.appendChild(left);
+  const cellR = el("div"); cellR.style.cssText = "display:flex;justify-content:center"; cellR.appendChild(right);
+  r.append(cellL, play, cellR);
+  return r;
+}
+
+function mockCard(opts) {
+  ARROWS[opts.arrow].filledHover = opts.filledHover;
+  const wrap = el("div", "mockwrap");
+  wrap.appendChild(el("div", "mocklabel", opts.label || ""));
+  const mock = el("div", "mock");
+  wrap.appendChild(mock);
+
+  if (!opts.clustered) {
+    const ticks = el("div", "ticks");
+    const a = el("i", "a"); const b = el("i", "b");
+    b.style.left = (opts.inset + 16) + "px";
+    ticks.append(a, b);
+    mock.appendChild(ticks);
+  }
+  mock.appendChild(row(opts.arrow, opts.inset, "rest", opts.clustered));
+
+  const s1 = el("div", "state");
+  const r1 = row(opts.arrow, opts.inset, "skip", opts.clustered);
+  s1.append(r1, el("div", "lbl", "skip"));
+  mock.appendChild(s1);
+
+  const s2 = el("div", "state");
+  const r2 = row(opts.arrow, opts.inset, "play", opts.clustered);
+  s2.append(r2, el("div", "lbl", "play"));
+  mock.appendChild(s2);
+  return wrap;
+}
+
+function buildCard(host, opts) {
+  const card = el("div", "card");
+  card.append(el("h3", null, opts.title), el("div", "sub", opts.sub));
+  card.appendChild(mockCard(opts));
+  card.appendChild(el("p", null, opts.note));
+  const pick = el("button", "pick", "Choose this");
+  pick.onclick = () => {
+    document.querySelectorAll(".card").forEach(c => c.classList.remove("picked"));
+    card.classList.add("picked");
+    document.getElementById("tag").textContent = "chosen: " + opts.title + " — "
+      + opts.arrow + ", " + (opts.clustered ? "clustered (today)" : opts.inset + "px inset")
+      + ", " + (opts.filledHover ? "filled" : "current") + " skip hover";
+  };
+  const c = el("div", "controls"); c.appendChild(pick);
+  card.appendChild(c);
+  document.getElementById(host).appendChild(card);
+}
+
+buildCard("current", {
+  title: "Today", sub: "RowLayout { spacing: 10 } + 2 fill spacers",
+  note: "Reproduced exactly. The trio sits in the middle with a wide empty margin either side — this is the layout the comment above it claims it does not have.",
+  arrow: "double", inset: 0, clustered: true, filledHover: false
+});
+
+[0, 6, 12, 20, 32].forEach(inset => {
+  buildCard("spaces", {
+    title: inset === 0 ? "0px — flush to the cell" : inset + "px in from the wall",
+    sub: "outer buttons centred, inset " + inset + "px",
+    note: inset === 0
+      ? "The button touches its cell edge, so on a narrow card the 32px circle can crowd the card wall and the hover fill reads as bleeding off the edge."
+      : inset === 12
+      ? "A middle answer. Clearly out at the edges, still visibly inside the card rather than pinned to it."
+      : inset < 12
+      ? "Close to the wall. The pair still mirrors because both outer buttons move together."
+      : "Pulled well in. Reads as &ldquo;spread across the card&rdquo; rather than &ldquo;pinned to the edges&rdquo;.",
+    arrow: "double", inset, clustered: false, filledHover: false
+  });
+});
+
+Object.entries(ARROWS).forEach(([key, a]) => {
+  buildCard("arrows", {
+    title: a.name, sub: a.sub, note: a.note,
+    arrow: key, inset: 12, clustered: false, filledHover: false
+  });
+});
+</script>
+</body>
+</html>

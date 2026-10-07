@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Freebuff boot menu — preview</title>
+<style>
+  :root {
+    --bg: #131313;
+    --surface: #1f1f1f;
+    --outline: #474747;
+    --text: #e2e2e2;
+    --primary: #ffffff;
+    --muted: #8a8a8a;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: #000; }
+  body { display: flex; align-items: center; justify-content: center; font-family: "Noto Sans", "Segoe UI", system-ui, sans-serif; }
+
+  /* 16:9 stage, scaled to the window */
+  .stage {
+    position: relative;
+    width: min(100vw, 177.78vh);
+    aspect-ratio: 16 / 9;
+    background: var(--bg);
+    overflow: hidden;
+    container-type: size;
+  }
+  /* soft center vignette, matching background.png */
+  .stage::before {
+    content: "";
+    position: absolute; inset: 0;
+    background: radial-gradient(ellipse at center, rgba(255,255,255,0.045) 0%, rgba(255,255,255,0) 62%);
+  }
+  /* hairline frame, inset 40px (of 1920) */
+  .frame {
+    position: absolute;
+    inset: 3.7%;
+    border: 1px solid rgba(71,71,71,0.4);
+    pointer-events: none;
+  }
+
+  /* boot menu block: left 25% top 32% width 50% */
+  .menu {
+    position: absolute;
+    left: 25%; top: 32%; width: 50%;
+  }
+  .entry {
+    position: relative;
+    height: 4.815cqh; /* item_height 52 @1080 */
+    display: flex; align-items: center;
+    padding: 0 0.93cqh; /* item_padding 10 */
+    margin-bottom: 0.556cqh; /* item_spacing 6 */
+    color: var(--text);
+    font-size: 1.85cqh; /* 20px @1080 */
+    letter-spacing: 0.02em;
+  }
+  .entry .icon { width: 1.85cqh; height: 1.85cqh; margin-right: 1.3cqh; opacity: 0.85; }
+  .entry.selected {
+    background: var(--surface);
+    border: 2px solid var(--outline);
+    border-radius: 10px;
+    color: var(--primary);
+  }
+  .entry .arch {
+    position: absolute; right: 0.93cqh; top: 50%; transform: translateY(-50%);
+    font-size: 1.2cqh; color: var(--muted);
+  }
+  .entry.selected .arch { color: var(--primary); opacity: 0.6; }
+
+  /* scrollbar on the right edge of the menu column */
+  .scrollbar {
+    position: absolute;
+    left: 75.6%; top: 32%; height: 46%;
+    width: 0.52cqh; /* 10px @1920 */
+    background: rgba(71,71,71,0.25);
+    border-radius: 5px;
+  }
+  .scrollbar .thumb {
+    position: absolute; top: 0; width: 100%; height: 42%;
+    background: var(--outline); border-radius: 5px;
+  }
+
+  .brand {
+    position: absolute; left: 25%; top: 78%; width: 50%;
+    text-align: center; color: var(--text);
+    font-size: 1.85cqh; letter-spacing: 0.24em; text-transform: uppercase;
+  }
+  .brand .dot { color: var(--outline); }
+
+  /* timeout bar: left 40% top 86% width 20% height 3 */
+  .timeout {
+    position: absolute; left: 40%; top: 86%; width: 20%; height: 0.28cqh;
+    background: var(--surface);
+    border: 1px solid rgba(71,71,71,0.5);
+  }
+  .timeout .fill {
+    position: absolute; inset: 0;
+    width: 62%;
+    background: var(--outline);
+    animation: drain 10s linear infinite;
+  }
+  @keyframes drain { from { width: 100%; } to { width: 0%; } }
+
+  .hint {
+    position: absolute; left: 0; right: 0; top: 91%;
+    text-align: center; color: var(--muted); font-size: 1.3cqh;
+  }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <div class="frame"></div>
+
+    <div class="menu">
+      <div class="entry selected"><span class="icon">◆</span> Freebuff OS <span class="arch">default</span></div>
+      <div class="entry"><span class="icon">◇</span> Freebuff OS (fallback) <span class="arch">limine</span></div>
+      <div class="entry"><span class="icon">◇</span> Linux firmware updater <span class="arch">fwupd</span></div>
+    </div>
+
+    <div class="scrollbar"><div class="thumb"></div></div>
+
+    <div class="brand">Freebuff <span class="dot">·</span> OS</div>
+
+    <div class="timeout"><div class="fill"></div></div>
+    <div class="hint">↑↓ select · Enter boot · this preview matches install-limine-theme.sh output</div>
+  </div>
+</body>
+</html>

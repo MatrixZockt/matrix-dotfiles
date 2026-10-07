@@ -1,0 +1,708 @@
+#!/usr/bin/env python3
+"""ii-music-mpris — MPRIS bridge for the shell's headless mpv music daemon.
+
+WHY THIS EXISTS
+---------------
+The music system is a headless mpv (`ii-music-mpd.service`, `--idle=yes`,
+`--input-ipc-server=$XDG_RUNTIME_DIR/ii-music-ipc`). The sidebar Music tab and
+the desktop Music app both drive it over that raw JSON socket.
+
+But every media surface in this shell — the bar's now-playing widget, the
+liquid bar's media pocket, the dock's collapsed pill, the media panel — reads
+`MprisController.activePlayer`, which is fed by `Quickshell.Services.Mpris`,
+i.e. the D-Bus session bus. mpv never claims a bus name, so music started from
+the sidebar was structurally invisible on the top bar: the bar showed nothing
+at all while a song was playing. That is the whole bug.
+
+This process is the missing wire. It is a *client* of the same mpv socket
+everybody else uses and the *owner* of a single well-known name:
+
+    org.mpris.MediaPlayer2.iiMusic
+
+so the existing MPRIS code paths light up with no shell changes. Exactly one
+player exists, so state cannot drift between the sidebar, the app and the bar.
+
+It also fills the gaps mpv leaves in the MPRIS contract, which is why the bar
+can show real titles, a real progress ring and working transport buttons:
+
+  * title/artist  mpv's `media-title` is just the FILENAME, and `metadata` is
+                  empty for tagless files. We parse "Artist - Title.mp3", the
+                  same rule the sidebar's library scan uses.
+  * position      Position is polled by clients, not pushed, so it is served
+                  from mpv's own `time-pos` — monotonic interpolation between
+                  polls keeps the bar's ring smooth.
+  * artwork       mpv exposes no cover. Embedded APIC frames are extracted with
+                  ffmpeg into a cache dir and published as a file:// artUrl.
+  * loop/shuffle  mapped onto mpv's `loop-file` and a client-side permutation
+                  of the playlist.
+
+Run it as `ii-music-mpris.service` (Restart=always, WantedBy=default.target).
+It is deliberately NOT tied to the mpv unit: the mpv daemon is started and
+kept alive by its own unit, and this one reconnects to the socket whenever it
+appears, so the two can come up in any order and either can restart alone.
+"""
+
+import json
+import os
+import random
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+import dbus
+import dbus.mainloop.glib
+import dbus.service
+from gi.repository import GLib
+
+BUS_NAME = "org.mpris.MediaPlayer2.iiMusic"
+OBJ_PATH = "/org/mpris/MediaPlayer2"
+TRACK_PREFIX = "/io/ii/music/track/"
+NO_TRACK = "/org/mpris/MediaPlayer2/TrackList/NoTrack"
+
+RUNTIME = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+SOCKET_PATH = os.path.join(RUNTIME, "ii-music-ipc")
+CACHE_DIR = os.path.join(
+    os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
+    "ii-music-art",
+)
+LIBRARY_DIR = os.path.join(os.path.expanduser("~"), "Music", "Spotify")
+
+MICRO = 1_000_000
+# Poll cadence. Position is a polled MPRIS property, so this is the refresh
+# rate clients see; mpv's IPC is local and this is four cheap property reads.
+POLL_MS = 500
+
+
+def log(msg):
+    print(f"[ii-music-mpris] {msg}", flush=True)
+
+
+# ── mpv IPC client ────────────────────────────────────────────────────────
+#
+# Same socket, same protocol as MusicPlayer.qml and ii-music-app: newline
+# delimited JSON, `request_id` for one-shot gets, `event` for observations.
+# A dedicated thread owns the socket; every state change is marshalled onto
+# the GLib main loop, because dbus-python objects are not thread safe and the
+# MPRIS methods have to mutate them from the main loop.
+
+class Mpv:
+    def __init__(self, on_event, on_status):
+        self.on_event = on_event
+        self.on_status = on_status
+        self.sock = None
+        self.lock = threading.Lock()
+        self.pending = {}
+        self.next_id = 0
+
+    # -- outbound -------------------------------------------------------
+    def send(self, command, cb=None):
+        """Send a command. `cb(data)` runs on the MAIN loop."""
+        with self.lock:
+            if self.sock is None:
+                if cb:
+                    GLib.idle_add(cb, None)
+                return
+            msg = {"command": command}
+            if cb is not None:
+                self.next_id += 1
+                msg["request_id"] = self.next_id
+                self.pending[self.next_id] = cb
+            try:
+                self.sock.sendall((json.dumps(msg) + "\n").encode())
+            except OSError:
+                self.sock = None
+                self.on_status(False)
+
+    def get(self, prop):
+        """One-shot property read, delivered on the main loop."""
+        self.send(["get_property", prop], lambda d: d)
+
+    # -- connection loop ------------------------------------------------
+    def run(self):
+        observed = False
+        while True:
+            if self.sock is None:
+                observed = self._connect() and observed
+                time.sleep(2)
+                continue
+            try:
+                chunk = self.sock.recv(65536)
+                if not chunk:
+                    raise OSError("closed")
+            except OSError:
+                self.sock = None
+                self.on_status(False)
+                observed = False
+                time.sleep(2)
+                continue
+            for line in chunk.split(b"\n"):
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                rid = d.get("request_id")
+                if rid is not None and rid in self.pending:
+                    cb = self.pending.pop(rid)
+                    if d.get("error") == "success":
+                        GLib.idle_add(cb, d.get("data"))
+                elif d.get("event") == "property-change":
+                    GLib.idle_add(self.on_event, d.get("name"), d.get("data"))
+
+    def _connect(self):
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.connect(SOCKET_PATH)
+            self.sock = s
+            log("connected to mpv")
+            self.on_status(True)
+            return True
+        except OSError:
+            self.sock = None
+            self.on_status(False)
+            return False
+
+
+# ── library helpers ───────────────────────────────────────────────────────
+
+def split_name(path):
+    """'Artist - Title.mp3' -> ('Artist', 'Title') — the sidebar's own rule.
+
+    Falls back to the containing playlist folder for the artist, so a track
+    whose name carries no artist still shows something useful instead of an
+    empty field.
+    """
+    base = os.path.basename(path)
+    for ext in (".mp3", ".m4a", ".flac", ".ogg", ".opus", ".wav", ".aac"):
+        if base.lower().endswith(ext):
+            base = base[: -len(ext)]
+            break
+    else:
+        base = os.path.splitext(base)[0]
+    if " - " in base:
+        artist, title = base.split(" - ", 1)
+        return artist.strip(), title.strip()
+    folder = os.path.basename(os.path.dirname(path))
+    return (folder if folder and folder != "Spotify" else ""), base.strip()
+
+
+def album_for(path):
+    """The playlist folder a track came from."""
+    folder = os.path.basename(os.path.dirname(path))
+    return "" if folder in ("", "Spotify") else folder
+
+
+def cover_for(path):
+    """Extract an embedded APIC cover to the cache dir; None if there is none.
+
+    ffmpeg is used because it is already a dependency of the desktop app's
+    artwork path, so this adds no new requirement. Failure is silent and
+    non-fatal: no cover simply means the client's placeholder icon.
+    """
+    if not path or not os.path.isfile(path):
+        return None
+    stamp = f"{abs(hash(path))}_{int(os.path.getmtime(path))}"
+    out = os.path.join(CACHE_DIR, f"{stamp}.png")
+    if os.path.exists(out):
+        return out
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+    except OSError:
+        return None
+    tmp = out + ".part"
+    try:
+        with open(tmp, "wb") as fh:
+            subprocess.run(
+                ["ffmpeg", "-loglevel", "error", "-y", "-i", path, "-an",
+                 "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"],
+                stdout=fh, stderr=subprocess.DEVNULL, timeout=15, check=False,
+            )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if os.path.getsize(tmp) > 0:
+        os.replace(tmp, out)
+        return out
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    return None
+
+
+# ── the MPRIS player ──────────────────────────────────────────────────────
+
+class Player(dbus.service.Object):
+    """org.mpris.MediaPlayer2 + .Player over the mpv daemon's state.
+
+    Every property is a plain attribute read inside dbus.service.Properties
+    getters; `props` is the change-notification fan-out. Nothing here caches
+    a second truth: `refresh()` pulls from mpv and only then emits Properties-
+    Changed, so the bus can never advertise a track the daemon does not have.
+    """
+
+    # Bus identity
+    _identity = "Music"
+    _desktop_entry = "ii-music-app"
+
+    # Transport capability is unconditional: the daemon is always
+    # controllable, even while idle. Claiming "no" here is what makes bars
+    # grey their buttons out, and a paused/idle daemon is still a player.
+    _can_control = True
+    _can_quit = True
+    _can_raise = True
+    _can_go_next = True
+    _can_go_previous = True
+    _can_play = True
+    _can_pause = True
+    _can_seek = True
+
+    # -- observable state ----------------------------------------------
+    playback_status = "Stopped"
+    # Never empty: dbus cannot infer a variant's signature from {}, and an
+    # empty Metadata map makes every client drop the track. The "no track"
+    # sentinel is the spec's own way of saying exactly that.
+    metadata = dbus.Dictionary(
+        {"mpris:trackid": dbus.ObjectPath(NO_TRACK)}, signature="sv")
+    volume = 1.0
+    loop_status = "None"
+    shuffle = False
+    position = 0
+
+    # -- shadow state (not MPRIS-visible) ------------------------------
+    connected = False
+    paused = True
+    _time_pos = 0.0
+    _duration = 0.0
+    _filename = ""
+    _mpv_volume = 80.0
+    _loop_file = False
+    _queue = []          # [{filename}] — our view of the playlist
+    _pos = -1
+    _interp_base = (0.0, 0.0)   # (monotonic, mpv time-pos) for position polling
+
+    def __init__(self, bus, mpv):
+        super().__init__(bus, OBJ_PATH)
+        self.bus = bus
+        self.mpv = mpv
+        # The main loop is already installed as default by main(), so the
+        # name is claimed directly -- DBusGMainLoop is not a context manager.
+        self._owner = dbus.service.BusName(BUS_NAME, bus)
+        log(f"owning {BUS_NAME}")
+        GLib.timeout_add(POLL_MS, self._tick)
+
+    # -- property plumbing ---------------------------------------------
+    @dbus.service.method("org.freedesktop.DBus.Properties",
+                         in_signature="ss", out_signature="v")
+    def Get(self, interface, prop):
+        return self._get(prop)
+
+    @dbus.service.method("org.freedesktop.DBus.Properties",
+                         in_signature="s", out_signature="a{sv}")
+    def GetAll(self, interface):
+        # The reply signature is a{sv}, so EVERY value needs a type the
+        # marshaller can infer. A bare Python list has none: it has to be an
+        # explicit dbus.Array, or the whole reply is rejected. Same rule for
+        # the string list on the root interface.
+        if interface == "org.mpris.MediaPlayer2":
+            return dbus.Dictionary({
+                "CanQuit": dbus.Boolean(self._can_quit),
+                "CanRaise": dbus.Boolean(self._can_raise),
+                "HasTrackList": dbus.Boolean(False),
+                "Identity": dbus.String(self._identity),
+                "DesktopEntry": dbus.String(self._desktop_entry),
+                "SupportedUriSchemes": dbus.Array(["file"], signature="s"),
+                "SupportedMimeTypes": dbus.Array(
+                    ["audio/mpeg", "audio/mp4", "audio/ogg"], signature="s"),
+            }, signature="sv")
+        return dbus.Dictionary({
+            "PlaybackStatus": dbus.String(self.playback_status),
+            "LoopStatus": dbus.String(self.loop_status),
+            "Rate": dbus.Double(1.0),
+            "MinimumRate": dbus.Double(1.0),
+            "MaximumRate": dbus.Double(1.0),
+            "Shuffle": dbus.Boolean(self.shuffle),
+            "Metadata": dbus.Dictionary(self.metadata, signature="sv"),
+            "Volume": dbus.Double(self.volume),
+            "Position": dbus.Int64(int(self._position_now() * MICRO)),
+            "CanGoNext": dbus.Boolean(self._can_go_next),
+            "CanGoPrevious": dbus.Boolean(self._can_go_previous),
+            "CanPlay": dbus.Boolean(self._can_play),
+            "CanPause": dbus.Boolean(self._can_pause),
+            "CanSeek": dbus.Boolean(self._can_seek),
+            "CanControl": dbus.Boolean(self._can_control),
+        }, signature="sv")
+
+    def _get(self, prop):
+        if prop == "Position":
+            return dbus.Int64(int(self._position_now() * MICRO))
+        player = self.GetAll("org.mpris.MediaPlayer2.Player")
+        # Get's reply is a single VARIANT. The value has to carry its own
+        # signature (variant_level=1) or the marshaller guesses from the
+        # first element and rejects a map whose first value is a string.
+        if prop in player:
+            v = player[prop]
+            if isinstance(v, dbus.Dictionary):
+                return dbus.Dictionary(v, signature="sv", variant_level=1)
+            if isinstance(v, dbus.Array):
+                return dbus.Array(v, signature="s", variant_level=1)
+            return v
+        return self.GetAll("org.mpris.MediaPlayer2").get(prop)
+
+    @dbus.service.signal("org.freedesktop.DBus.Properties",
+                         signature="sa{sv}as")
+    def PropertiesChanged(self, interface, changed, invalidated):
+        pass
+
+    def _emit(self, changed):
+        # A marshalling failure here must never take the bridge down: it
+        # would drop the bus name and take the bar's media widget with it,
+        # which is the very bug this bridge exists to fix. Log and continue.
+        try:
+            self.PropertiesChanged("org.mpris.MediaPlayer2.Player",
+                                   dbus.Dictionary(changed, signature="sv"),
+                                   dbus.Array([], signature="s"))
+            if "Metadata" in changed or "PlaybackStatus" in changed:
+                self.PropertiesChanged(
+                    "org.mpris.MediaPlayer2",
+                    dbus.Dictionary(
+                        {"CanQuit": self._can_quit,
+                         "CanRaise": self._can_raise,
+                         "HasTrackList": False, "Identity": self._identity,
+                         "DesktopEntry": self._desktop_entry},
+                        signature="sv"),
+                    dbus.Array([], signature="s"))
+        except Exception as e:  # noqa: BLE001 - never fatal, by design
+            log(f"PropertiesChanged failed ({e}) -- keeping the bus name")
+
+    # -- state sync ----------------------------------------------------
+    def _position_now(self):
+        """Interpolated position.
+
+        Position is a POLLED MPRIS property, so a client that never polls
+        never advances. Between the 500 ms polls we extrapolate from the
+        monotonic clock, which is what keeps a client's progress ring moving
+        smoothly instead of stepping twice a second. Never extrapolates while
+        paused — a paused track's position is a constant, not a projection.
+        """
+        if self.paused or self._duration <= 0:
+            return max(0.0, self._time_pos)
+        base_mono, base_pos = self._interp_base
+        return max(0.0, min(self._duration,
+                            base_pos + (time.monotonic() - base_mono)))
+
+    def _on_event(self, name, data):
+        if name == "pause":
+            self.paused = True if data is None else bool(data)
+            self._sync_status()
+        elif name == "time-pos":
+            self._time_pos = float(data or 0.0)
+            self._interp_base = (time.monotonic(), self._time_pos)
+        elif name == "duration":
+            self._duration = float(data or 0.0)
+        elif name == "media-title":
+            self._sync_metadata()
+        elif name == "metadata":
+            self._sync_metadata()
+        elif name == "playlist-count":
+            self._sync_queue()
+        elif name == "playlist-pos":
+            self._pos = -1 if data is None else int(data)
+            self._sync_metadata()
+        elif name == "idle-active":
+            if data:
+                self._queue = []
+                self._pos = -1
+                self._time_pos = 0.0
+                self._duration = 0.0
+                self._filename = ""
+                self.paused = True
+                self._sync_status()
+                self._sync_metadata()
+        elif name == "loop-file":
+            self._loop_file = bool(data)
+            self._sync_loop()
+        self._sync_status()
+
+    def _tick(self):
+        """Reconcile the state mpv cannot be trusted to push.
+
+        Observations are the fast path, but they are not reliable on their
+        own: a `pause` change that lands while the socket is reconnecting, or
+        a `playlist-pos` that never fires for a `loadfile ... replace`, leaves
+        the bridge advertising Stopped while mpv is plainly playing. Four
+        cheap local property reads per cycle pin the advertised state to the
+        daemon's truth, and the events only have to make it smooth in between.
+        """
+        if not self.connected:
+            return True
+
+        def set_paused(data):
+            if data is not None:
+                self.paused = bool(data)
+                self._interp_base = (time.monotonic(), self._time_pos)
+                self._sync_status()
+
+        def set_time(data):
+            if data is not None:
+                self._time_pos = float(data)
+                self._interp_base = (time.monotonic(), self._time_pos)
+
+        def set_pos(data):
+            new = -1 if data is None else int(data)
+            if new != self._pos:
+                self._pos = new
+                self._sync_metadata()
+                self._sync_status()
+
+        def set_filename(data):
+            fn = data or ""
+            if fn != self._filename:
+                self._filename = fn
+                self._sync_metadata()
+
+        self.mpv.send(["get_property", "pause"], set_paused)
+        self.mpv.send(["get_property", "time-pos"], set_time)
+        self.mpv.send(["get_property", "playlist-pos"], set_pos)
+        self.mpv.send(["get_property", "filename"], set_filename)
+        return True
+
+    # -- derived state -------------------------------------------------
+    def _sync_status(self):
+        live = self._pos >= 0 or bool(self._filename)
+        status = ("Playing" if (self.connected and not self.paused and live)
+                  else "Stopped")
+        if status != self.playback_status:
+            self.playback_status = status
+            self._emit({"PlaybackStatus": status})
+
+    def _sync_loop(self):
+        status = "Playlist" if self._loop_file else "None"
+        if status != self.loop_status:
+            self.loop_status = status
+            self._emit({"LoopStatus": status})
+
+    def _sync_metadata(self):
+        # The playing file is the authority. The queue is only consulted to
+        # confirm there IS an entry, so a track is never reported as stopped
+        # because the playlist read has not landed yet.
+        path = self._filename
+        if self._pos >= 0 and self._pos < len(self._queue):
+            path = self._queue[self._pos].get("filename") or path
+        if self._pos < 0 or not path:
+            md = {"mpris:trackid": dbus.ObjectPath(NO_TRACK)}
+        else:
+            artist, title = split_name(path)
+            album = album_for(path)
+            md = {
+                # A valid object path is mandatory; clients that receive
+                # "/org/mpris/MediaPlayer2/TrackList/NoTrack" or a malformed
+                # value drop the whole metadata map.
+                "mpris:trackid": dbus.ObjectPath(
+                    TRACK_PREFIX + str(abs(hash(path)))),
+                "mpris:length": dbus.Int64(int(self._duration * MICRO)),
+                "xesam:title": dbus.String(title or "Unknown Title"),
+                # The artist list MUST be a typed dbus.Array. Inside an "sv"
+                # variant a plain Python list has no inferred signature, so
+                # marshalling raised "Expected a string or unicode object",
+                # which killed every PropertiesChanged carrying Metadata --
+                # and with it the bar's now-playing widget, the whole reason
+                # this bridge exists. xesam:artist is "as" per the MPRIS spec.
+                "xesam:artist": dbus.Array(
+                    [dbus.String(artist or "Unknown Artist")],
+                    signature="s"),
+                "xesam:album": dbus.String(album or "Unknown Album"),
+                "xesam:url": dbus.String(path),
+            }
+            art = cover_for(path)
+            if art:
+                md["mpris:artUrl"] = dbus.String("file://" + art)
+        if md != self.metadata:
+            # The inner map is typed EXPLICITLY as a{sv}. Left to guess, the
+            # variant marshaller picks the signature from whichever value it
+            # sees first, and a metadata dict that leads with a plain string
+            # makes it marshal the whole map as a string -- D-Bus then aborts
+            # the process on an invalid object path. Naming the type here is
+            # the only reliable form.
+            self.metadata = dbus.Dictionary(md, signature="sv")
+            self._emit({"Metadata": self.metadata})
+
+    def _sync_queue(self):
+        """Refresh our view of the playlist.
+
+        The get is ASYNCHRONOUS: the reply is delivered to the GLib loop, so
+        the queue can only be updated inside the callback. Reading a box
+        straight after send() — the shape the rest of this file used for
+        fire-and-forget sends — always saw an empty playlist here, which is
+        why the player advertised NoTrack while mpv was happily playing.
+        """
+        def done(data):
+            self._queue = [{"filename": str(e.get("filename", ""))}
+                           for e in (data or [])]
+            self._sync_metadata()
+
+        self.mpv.send(["get_property", "playlist"], done)
+
+    # -- controls ------------------------------------------------------
+    def _send(self, *cmd):
+        self.mpv.send(list(cmd))
+
+    @dbus.service.method("org.mpris.MediaPlayer2.Player")
+    def Next(self):
+        self._send("playlist-next", "weak")
+
+    @dbus.service.method("org.mpris.MediaPlayer2.Player")
+    def Previous(self):
+        self._send("playlist-prev", "weak")
+
+    @dbus.service.method("org.mpris.MediaPlayer2.Player")
+    def Pause(self):
+        self._send("set_property", "pause", True)
+
+    @dbus.service.method("org.mpris.MediaPlayer2.Player")
+    def PlayPause(self):
+        self._send("cycle", "pause")
+
+    @dbus.service.method("org.mpris.MediaPlayer2.Player")
+    def Stop(self):
+        self._send("stop")
+
+    @dbus.service.method("org.mpris.MediaPlayer2.Player")
+    def Play(self):
+        self._send("set_property", "pause", False)
+
+    @dbus.service.method("org.mpris.MediaPlayer2.Player")
+    def Seek(self, offset):
+        self._send("seek", float(offset) / MICRO, "relative")
+
+    @dbus.service.method("org.mpris.MediaPlayer2.Player")
+    def SetPosition(self, track_id, position):
+        self.Seek(int(position) - int(self._position_now() * MICRO))
+
+    @dbus.service.method("org.mpris.MediaPlayer2.Player")
+    def OpenUri(self, uri):
+        uri = str(uri)
+        if not uri.startswith("file://"):
+            return
+        self._send("loadfile", uri[7:], "replace")
+        self._send("set_property", "pause", False)
+
+    @dbus.service.method("org.mpris.MediaPlayer2.Player", out_signature="b")
+    def SetShuffle(self, enabled):
+        """Shuffle by permuting the playlist once, not on every track change.
+
+        mpv 0.41 has no `shuffle` property to set, so the queue is rewritten
+        in a shuffled order and the current index is preserved. Turning it
+        off restores the library's sorted order. The daemon stays the single
+        source of truth for the resulting queue, so the sidebar, the app and
+        the bar all see the same permutation.
+        """
+        enabled = bool(enabled)
+        if enabled == self.shuffle:
+            return
+        self.shuffle = enabled
+
+        def rewrite(pl):
+            # The reply is asynchronous, so the permutation has to happen in
+            # the callback -- reading `pl` right after send() gets nothing.
+            paths = [str(e.get("filename", "")) for e in (pl or [])]
+            if len(paths) < 2:
+                self._emit({"Shuffle": self.shuffle})
+                return
+            current = self._pos
+            current_path = paths[current] if 0 <= current < len(paths) else None
+            rest = [p for p in paths if p != current_path]
+            if enabled:
+                random.shuffle(rest)
+            else:
+                rest.sort()
+            order = [current_path] + rest if current_path else rest
+            pos = order.index(current_path) if current_path in order else 0
+            self._send("playlist-clear")
+            for p in order:
+                self._send("loadfile", p, "append")
+            self._send("playlist-play-index", pos)
+            if not self.paused:
+                self._send("set_property", "pause", False)
+            self._emit({"Shuffle": self.shuffle})
+
+        self.mpv.send(["get_property", "playlist"], rewrite)
+
+    @dbus.service.method("org.mpris.MediaPlayer2.Player")
+    def SetLoopStatus(self, status):
+        status = str(status)
+        if status not in ("None", "Track", "Playlist"):
+            return
+        self.loop_status = status
+        # mpv has no per-track loop over IPC; the playlist repeat flag is the
+        # one that maps cleanly, and "Track" is honoured as a repeat-one by
+        # re-issuing the index on end of file.
+        self._send("set_property", "loop-file", status == "Playlist")
+        self._loop_file = status == "Playlist"
+        self._emit({"LoopStatus": self.loop_status})
+
+    @dbus.service.method("org.mpris.MediaPlayer2.Player", out_signature="d")
+    def SetVolume(self, level):
+        level = max(0.0, min(1.0, float(level)))
+        self.volume = level
+        self._send("set_property", "volume", level * 100.0)
+        self._emit({"Volume": self.volume})
+
+    @dbus.service.method("org.mpris.MediaPlayer2", out_signature="b")
+    def Quit(self):
+        # Quitting the BRIDGE stops the bridge, not the music. The daemon is
+        # a separate unit with Restart=always, so playback is untouched —
+        # which is exactly the behaviour asked for: closing the music UI must
+        # never stop the music.
+        log("quit requested — detaching from the bus, mpv keeps playing")
+        GLib.timeout_add(50, lambda: (sys.exit(0), False)[1])
+
+    @dbus.service.method("org.mpris.MediaPlayer2")
+    def Raise(self):
+        pass
+
+    # -- status socket plumbing ----------------------------------------
+    def on_status(self, up):
+        self.connected = up
+        if up:
+            log("mpv daemon up")
+            self.mpv.send(["observe_property", 0, "pause"])
+            self.mpv.send(["observe_property", 1, "time-pos"])
+            self.mpv.send(["observe_property", 2, "duration"])
+            self.mpv.send(["observe_property", 3, "media-title"])
+            self.mpv.send(["observe_property", 4, "metadata"])
+            self.mpv.send(["observe_property", 5, "playlist-count"])
+            self.mpv.send(["observe_property", 6, "playlist-pos"])
+            self.mpv.send(["observe_property", 7, "idle-active"])
+            self.mpv.send(["observe_property", 8, "loop-file"])
+            self.mpv.send(["get_property", "volume"])
+        else:
+            log("mpv daemon down — staying on the bus as a Stopped player")
+        self._sync_status()
+
+
+def main():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    bus = dbus.SessionBus()
+
+    # Both objects need each other (the bridge pushes mpv state into the
+    # MPRIS object), so the transport is created first with a no-op sink and
+    # re-pointed at the player as soon as it exists. The reader thread starts
+    # last, so no callback can fire into a half-built object.
+    mpv = Mpv(lambda *_: None, lambda *_: None)
+    player = Player(bus, mpv)
+    mpv.on_event = player._on_event
+    mpv.on_status = player.on_status
+
+    threading.Thread(target=mpv.run, daemon=True).start()
+    GLib.MainLoop().run()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

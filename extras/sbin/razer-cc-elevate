@@ -1,0 +1,117 @@
+#!/bin/bash
+# Narrow elevation helper for Razer Command Center.
+#
+# The app calls: razer-cc-elevate <op> [args]
+#   fan <0|1>          set the firmware fan-boost switch (cooling_device1)
+#   fanlevel <0-50>    pin the fine-grained TFN1 fan device (cooling_device0)
+#   pwrlimit <pl1> <pl2> <turbo>   cap CPU package power, watts 5-250,
+#                                  turbo 1 = boost allowed, 0 = boost off
+#   nvidia <dpm> <s0ix> write /etc/modprobe.d/60-nvidia-pm.conf (RTD3)
+#   decode             remove LIBVA_DRIVER_NAME=nvidia from /etc/environment
+#
+# Each op is a FIXED command with no interpolated user strings except the
+# enumerated arguments above -- so a polkit rule can grant it passwordless
+# for the session user without opening a generic root shell. Everything
+# else this script is asked to do exits 2 and does nothing.
+
+set -euo pipefail
+
+OP="${1:-}"
+case "$OP" in
+fan)
+    STATE="${2:-}"
+    if [ "$STATE" != "0" ] && [ "$STATE" != "1" ]; then
+        echo "fan: state must be 0 or 1" >&2
+        exit 2
+    fi
+    echo "$STATE" > /sys/class/thermal/cooling_device1/cur_state
+    ;;
+fanlevel)
+    LEVEL="${2:-}"
+    case "$LEVEL" in
+        ''|*[!0-9]*) echo "fanlevel: level must be 0-50" >&2; exit 2 ;;
+    esac
+    if [ "$LEVEL" -gt 50 ]; then
+        echo "fanlevel: level must be 0-50" >&2
+        exit 2
+    fi
+    echo "$LEVEL" > /sys/class/thermal/cooling_device0/cur_state
+    ;;
+pwrlimit)
+    # Cap the CPU package so the EC's own fan curve never has to ramp.
+    #
+    # This is the lever that works. The ACPI fan level (fanlevel above) is
+    # accepted by the kernel and then ignored by the embedded controller --
+    # measured on this machine, holding level 12 vs level 45 at 10 Hz for a
+    # full minute of identical load changed the settled package temperature
+    # by 0.7 C, which is noise. The fan is firmware-owned.
+    #
+    # The package power limit is real: it is enforced in silicon (RAPL), and
+    # because the EC's fan curve responds to temperature, dropping the heat
+    # the CPU makes is what actually makes the machine quiet.
+    PL1="${2:-}"
+    PL2="${3:-}"
+    TURBO="${4:-}"
+    for v in "$PL1" "$PL2"; do
+        case "$v" in
+            ''|*[!0-9]*) echo "pwrlimit: watts must be 5-250" >&2; exit 2 ;;
+        esac
+        if [ "$v" -lt 5 ] || [ "$v" -gt 250 ]; then
+            echo "pwrlimit: watts must be 5-250" >&2
+            exit 2
+        fi
+    done
+    if [ "$PL2" -lt "$PL1" ]; then
+        echo "pwrlimit: pl2 must be >= pl1" >&2
+        exit 2
+    fi
+    case "$TURBO" in 0|1) ;; *) echo "pwrlimit: turbo must be 0 or 1" >&2; exit 2 ;; esac
+
+    RAPL=/sys/class/powercap/intel-rapl:0
+    CUR1=$(cat "$RAPL/constraint_0_power_limit_uw")
+    CUR2=$(cat "$RAPL/constraint_1_power_limit_uw")
+    NEW1=$((PL1 * 1000000))
+    NEW2=$((PL2 * 1000000))
+
+    # The kernel refuses PL2 < PL1, so order the writes: when lowering, shave
+    # PL1 first; when raising, give PL2 headroom first. Otherwise a cap that
+    # is valid overall is rejected halfway through.
+    if [ "$NEW1" -le "$CUR1" ]; then
+        echo "$NEW1" > "$RAPL/constraint_0_power_limit_uw"
+        echo "$NEW2" > "$RAPL/constraint_1_power_limit_uw"
+    else
+        echo "$NEW2" > "$RAPL/constraint_1_power_limit_uw"
+        echo "$NEW1" > "$RAPL/constraint_0_power_limit_uw"
+    fi
+
+    if [ -w /sys/devices/system/cpu/intel_pstate/no_turbo ]; then
+        # The argument is "turbo boost allowed" (1 = allowed) because that is
+        # what the caller reasons about. The sysfs knob is its inverse:
+        # no_turbo=1 means turbo is OFF. Writing the argument straight through
+        # made 1 disable turbo, which is how the first verification run left
+        # the machine with turbo off while claiming the vendor default.
+        echo "$((1 - TURBO))" > /sys/devices/system/cpu/intel_pstate/no_turbo
+    fi
+    echo "pw" "$PL1" "$PL2" "$TURBO"
+    ;;
+nvidia)
+    DPM="${2:-}"
+    S0IX="${3:-}"
+    case "$DPM" in 0|2|3) ;; *) echo "nvidia: dpm must be 0|2|3" >&2; exit 2 ;; esac
+    case "$S0IX" in 0|1) ;; *) echo "nvidia: s0ix must be 0|1" >&2; exit 2 ;; esac
+    mkdir -p /etc/modprobe.d
+    cat > /etc/modprobe.d/60-nvidia-pm.conf <<EOF
+# Managed by Razer Command Center
+options nvidia NVreg_DynamicPowerManagement=0x$DPM
+options nvidia NVreg_EnableS0ixPowerManagement=$S0IX
+EOF
+    ;;
+decode)
+    cp -n /etc/environment /etc/environment.bak-power 2>/dev/null || true
+    sed -i '/^LIBVA_DRIVER_NAME=nvidia$/d' /etc/environment
+    ;;
+*)
+    echo "usage: razer-cc-elevate fan <0|1> | fanlevel <0-50> | pwrlimit <pl1 5-250> <pl2 5-250> <turbo 0|1> | nvidia <0|2|3> <0|1> | decode" >&2
+    exit 2
+    ;;
+esac

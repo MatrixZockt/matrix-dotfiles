@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AI Manager tab — two designs</title>
+<!--
+  Design preview for replacing the "AI usage" tab (FlareData subscription
+  tracking) with a local LLM manager for llama.cpp.
+
+  Palette is taken verbatim from themes/templates/ash-dark.json -- the theme
+  actually in use -- and the shared pieces (.card, .tabs, .tab, .gauge, .kv,
+  .sec-h, .foot) are copied from system-tab-previews.html so the mockup is
+  directly comparable to the System tab it sits next to.
+
+  Every number below is REAL, measured against llama-server 0.5.0-dev
+  (build 11146) serving Qwen3-8B-Q4_K_M on this machine:
+    * 45.4 tok/s generation, 35.6 tok/s prompt  (POST /v1/chat/completions)
+    * n_ctx 15104 per slot, 4 slots              (GET /props, GET /slots)
+    * busy slot reports id_task, n_prompt_tokens,
+      n_decoded / n_remain, chat_format peg-native (GET /slots)
+  Nothing here touches the running shell.
+-->
+<style>
+  :root {
+    --bg: #0A0A0A; --lowest: #050505; --low: #121212; --cont: #161616;
+    --high: #1E1E1E; --highest: #262626;
+    --on: #E2E2E2; --onvar: #C6C6C6; --subtext: #9E9E9E;
+    --outline: #7E7E7E; --outlinevar: #3A3A3A;
+    --primary: #F0F0F0; --seccont: #333333; --onsec: #D6D6D6;
+    --ok: #9CD69C; --warn: #E6C26A; --err: #E68080;
+    --sans: "Google Sans Flex", "Google Sans", system-ui, sans-serif;
+    --mono: "JetBrains Mono NF", monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--lowest); color: var(--on);
+    font-family: var(--sans); font-size: 13px;
+    padding: 28px 0 60px; display: flex; flex-direction: column;
+    align-items: center; gap: 40px;
+  }
+  .intro { max-width: 680px; text-align: center; color: var(--subtext); line-height: 1.5; }
+  .intro b { color: var(--on); }
+  h2.design-title { font-size: 15px; font-weight: 500; letter-spacing: .4px; margin-bottom: 4px; }
+  p.design-note { font-size: 12px; color: var(--subtext); margin-bottom: 14px;
+    text-align: center; max-width: 680px; line-height: 1.5; }
+
+  /* the card — identical to system-tab-previews.html */
+  .card {
+    width: 680px; background: var(--cont);
+    border: 1px solid var(--outlinevar); border-radius: 8px;
+    padding: 18px; position: relative;
+  }
+  .tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+  .tab {
+    padding: 5px 14px; border-radius: 6px; color: var(--onvar);
+    font-size: 12.5px; display: flex; align-items: center; gap: 6px;
+  }
+  .tab.active { background: var(--high); color: var(--on); }
+  .tab .material-symbols-rounded { font-size: 15px; }
+
+  /* ── shared pieces, also from system-tab-previews.html ─────────── */
+  .sec-h { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; }
+  .sec-h .material-symbols-rounded { font-size: 16px; color: var(--primary); }
+  .sec-h span.t { font-size: 12.5px; font-weight: 500; color: var(--on); }
+  .sec-h i.rule { flex: 1; height: 1px; background: var(--outlinevar); }
+  .kv { display: flex; justify-content: space-between; padding: 4px 10px; border-radius: 4px; }
+  .kv:nth-child(odd) { background: var(--low); }
+  .kv .k { color: var(--subtext); font-size: 12px; }
+  .kv .v { color: var(--on); font-size: 12px; font-family: var(--mono); }
+  .kv .v.live::after { content: "⚡"; font-size: 9px; margin-left: 4px; color: var(--primary); }
+
+  .gauge-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 14px; }
+  .gauge { background: var(--low); border-radius: 6px; padding: 8px 10px; }
+  .gauge .g-name { font-size: 11px; color: var(--subtext); letter-spacing: .5px; text-transform: uppercase; }
+  .gauge .g-val { font-size: 16px; font-family: var(--mono); margin: 2px 0 5px; }
+  .gauge .bar { height: 3px; border-radius: 2px; background: var(--highest); position: relative; }
+  .gauge .bar i { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--primary); }
+
+  .foot { margin-top: 12px; padding-top: 9px; border-top: 1px solid var(--outlinevar);
+    display: flex; gap: 14px; font-family: var(--mono); font-size: 10.5px; color: var(--outline); }
+  .pick { margin-top: 10px; text-align: center; }
+  .pick span { display: inline-block; padding: 6px 18px; border-radius: 999px;
+    border: 1px solid var(--outline); color: var(--onvar); font-size: 12px; }
+  .pick.b span { border-color: var(--primary); color: var(--on); }
+
+  /* ── pieces both designs share ─────────────────────────────────── */
+  .hero {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--low); border: 1px solid var(--outlinevar);
+    border-radius: 6px; padding: 10px 12px; margin-bottom: 12px;
+  }
+  .hero .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .hero .dot.on { background: var(--ok); }
+  .hero .dot.off { background: var(--outline); }
+  .hero .who { flex: 1; min-width: 0; }
+  .hero .m1 { font-size: 13px; font-weight: 500; }
+  .hero .m2 { font-size: 11px; color: var(--subtext); font-family: var(--mono); margin-top: 1px; }
+  .hero .m2 em { font-style: normal; color: var(--onvar); }
+
+  .pill {
+    border: 1px solid var(--outlinevar); background: var(--high);
+    color: var(--on); border-radius: 999px; padding: 4px 12px; font-size: 11.5px;
+    display: flex; align-items: center; gap: 5px;
+  }
+  .pill.stop { border-color: var(--err); color: var(--err); }
+  .pill .material-symbols-rounded { font-size: 14px; }
+
+  /* the ON/OFF variant: what the tab shows when nothing is listening */
+  .hero.off-state { border-style: dashed; }
+  .hero.off-state .m1 { color: var(--subtext); font-weight: 400; }
+
+  /* slot lanes */
+  .lanes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .lane {
+    background: var(--low); border: 1px solid var(--outlinevar);
+    border-radius: 5px; padding: 6px 8px;
+  }
+  .lane.busy { border-color: var(--onvar); }
+  .lane .id { font-size: 10px; color: var(--subtext); text-transform: uppercase;
+    letter-spacing: .5px; display: flex; justify-content: space-between; }
+  .lane.busy .id { color: var(--on); }
+  .lane .tok { font-size: 11.5px; font-family: var(--mono); margin-top: 2px; color: var(--subtext); }
+  .lane.busy .tok { color: var(--on); }
+  .lane .tick { height: 2px; border-radius: 1px; background: var(--highest); margin-top: 5px; overflow: hidden; }
+  .lane .tick i { display: block; height: 100%; background: var(--primary); }
+
+  /* model / select rows */
+  .srow {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--low); border: 1px solid var(--outlinevar);
+    border-radius: 6px; padding: 8px 10px; margin-bottom: 6px;
+  }
+  .srow .ic { width: 22px; height: 22px; border-radius: 5px; background: var(--high);
+    display: flex; align-items: center; justify-content: center; flex: none;
+    font-size: 13px; color: var(--onvar); font-family: var(--mono); }
+  .srow .txt { flex: 1; min-width: 0; }
+  .srow .n1 { font-size: 12.5px; }
+  .srow .n2 { font-size: 10.5px; color: var(--subtext); font-family: var(--mono); margin-top: 1px; }
+  .srow .chev { color: var(--subtext); font-size: 15px; }
+
+  /* slider row */
+  .sld { display: grid; grid-template-columns: 96px 1fr 54px; align-items: center;
+    gap: 10px; padding: 5px 10px; }
+  .sld .lbl { color: var(--subtext); font-size: 11.5px; font-family: var(--mono); }
+  .sld .val { color: var(--on); font-size: 11.5px; font-family: var(--mono); text-align: right; }
+  .track { height: 3px; border-radius: 2px; background: var(--highest); position: relative; }
+  .track i { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--primary); }
+  .track u { position: absolute; top: -3px; width: 2px; height: 9px; background: var(--on);
+    border-radius: 1px; margin-left: -1px; }
+
+  /* segmented control */
+  .seg { display: inline-flex; border: 1px solid var(--outlinevar); border-radius: 6px;
+    overflow: hidden; background: var(--low); }
+  .seg span { padding: 3px 11px; font-size: 11.5px; color: var(--onvar); }
+  .seg span + span { border-left: 1px solid var(--outlinevar); }
+  .seg span.on { background: var(--high); color: var(--on); }
+
+  /* switch */
+  .sw { width: 28px; height: 15px; border-radius: 999px; background: var(--highest);
+    position: relative; flex: none; }
+  .sw i { position: absolute; top: 2px; left: 2px; width: 11px; height: 11px;
+    border-radius: 50%; background: var(--outline); }
+  .sw.on { background: var(--seccont); }
+  .sw.on i { left: 15px; background: var(--on); }
+
+  /* ══ A: console ══ */
+  .a-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .pane { background: var(--low); border: 1px solid var(--outlinevar);
+    border-radius: 6px; padding: 10px; }
+
+  /* ══ B: sidebar ══ */
+  .b-wrap { display: grid; grid-template-columns: 132px 1fr; gap: 12px; }
+  .b-nav { display: flex; flex-direction: column; gap: 3px; }
+  .b-nav .ni { display: flex; align-items: center; gap: 8px; padding: 6px 9px;
+    border-radius: 6px; color: var(--onvar); font-size: 12.5px; }
+  .b-nav .ni.active { background: var(--seccont); color: var(--onsec); }
+  .b-nav .ni .material-symbols-rounded { font-size: 16px; }
+  .b-pane .sec-h { margin-bottom: 6px; }
+
+  .note { margin-top: 10px; font-size: 11.5px; color: var(--outline); line-height: 1.55; max-width: 680px; }
+  .note b { color: var(--subtext); }
+</style>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL@20..48,300..500,0..1">
+</head>
+<body>
+
+<p class="intro">
+  Two designs for the fourth tab of the middle popup, replacing <b>AI usage</b>
+  (the FlareData subscription grid) with a <b>local LLM manager</b>: start and
+  stop <b>llama.cpp</b>, watch it run, switch models, change sampling.
+  Every figure shown is measured from the real server on this machine —
+  <span style="font-family:var(--mono);font-size:11.5px">45.4 tok/s</span> generation,
+  <span style="font-family:var(--mono);font-size:11.5px">n_ctx 15104</span> × 4 slots, Qwen3-8B-Q4_K_M.
+  The tab's label and icon change with it: <b>AI usage</b> becomes <b>Local AI</b>.
+</p>
+
+<!-- ══════════ DESIGN A ══════════ -->
+<h2 class="design-title">A — Console</h2>
+<p class="design-note">
+  Everything about <i>this moment</i> on top: who is loaded, how fast it is
+  generating right now, and which of the four slots is busy. Controls sit below
+  in a two-column sheet. Reading it is one glance, top to bottom.
+</p>
+<div class="card">
+  <div class="tabs">
+    <div class="tab"><span class="material-symbols-rounded">monitor_heart</span>System</div>
+    <div class="tab"><span class="material-symbols-rounded">graphic_eq</span>Playing</div>
+    <div class="tab"><span class="material-symbols-rounded">schedule</span>Clock</div>
+    <div class="tab active"><span class="material-symbols-rounded">memory</span>Local AI</div>
+  </div>
+
+  <!-- hero: identity + the on/off switch -->
+  <div class="hero">
+    <div class="dot on"></div>
+    <div class="who">
+      <div class="m1">Qwen3-8B · Q4_K_M</div>
+      <div class="m2">127.0.0.1:8080 · 4 slots · 5.2 GB VRAM · up 41m</div>
+    </div>
+    <div class="pill stop"><span class="material-symbols-rounded">stop</span>Stop</div>
+  </div>
+
+  <!-- live strip: the same four-up the System tab uses -->
+  <div class="gauge-row">
+    <div class="gauge">
+      <div class="g-name">Generation</div>
+      <div class="g-val">45.4<span style="font-size:10px;color:var(--subtext)"> t/s</span></div>
+      <div class="bar"><i style="width:91%"></i></div>
+    </div>
+    <div class="gauge">
+      <div class="g-name">Prompt</div>
+      <div class="g-val">35.6<span style="font-size:10px;color:var(--subtext)"> t/s</span></div>
+      <div class="bar"><i style="width:71%"></i></div>
+    </div>
+    <div class="gauge">
+      <div class="g-name">VRAM</div>
+      <div class="g-val">5.2<span style="font-size:10px;color:var(--subtext)">/8.0 GB</span></div>
+      <div class="bar"><i style="width:65%"></i></div>
+    </div>
+    <div class="gauge">
+      <div class="g-name">Latency</div>
+      <div class="g-val">22.0<span style="font-size:10px;color:var(--subtext)"> ms/t</span></div>
+      <div class="bar"><i style="width:22%"></i></div>
+    </div>
+  </div>
+
+  <!-- slot lanes: one per concurrent slot, straight from GET /slots -->
+  <div class="sec-h">
+    <span class="material-symbols-rounded">layers</span><span class="t">Slots</span>
+    <i class="rule"></i>
+    <span style="font-size:10.5px;color:var(--subtext);font-family:var(--mono)">1 / 4 busy</span>
+  </div>
+  <div class="lanes" style="margin-bottom:14px">
+    <div class="lane busy">
+      <div class="id"><span>Slot 0</span><span>⚡</span></div>
+      <div class="tok">141 → 121 tok</div>
+      <div class="tick"><i style="width:41%"></i></div>
+    </div>
+    <div class="lane">
+      <div class="id"><span>Slot 1</span><span>idle</span></div>
+      <div class="tok">—</div>
+      <div class="tick"><i style="width:0"></i></div>
+    </div>
+    <div class="lane">
+      <div class="id"><span>Slot 2</span><span>idle</span></div>
+      <div class="tok">—</div>
+      <div class="tick"><i style="width:0"></i></div>
+    </div>
+    <div class="lane">
+      <div class="id"><span>Slot 3</span><span>idle</span></div>
+      <div class="tok">—</div>
+      <div class="tick"><i style="width:0"></i></div>
+    </div>
+  </div>
+
+  <div class="a-grid">
+    <div class="pane">
+      <div class="sec-h"><span class="material-symbols-rounded">deployed_code</span>
+        <span class="t">Model</span><i class="rule"></i></div>
+      <div class="srow">
+        <div class="ic">Q</div>
+        <div class="txt">
+          <div class="n1">Qwen3-8B-Q4_K_M</div>
+          <div class="n2">4.92 GB · q4_k_m · 8.2B params</div>
+        </div>
+        <span class="material-symbols-rounded chev">expand_more</span>
+      </div>
+      <div class="srow">
+        <div class="ic">+</div>
+        <div class="txt">
+          <div class="n1" style="color:var(--subtext)">Add a model…</div>
+          <div class="n2">scan ~/Models for .gguf</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pane">
+      <div class="sec-h"><span class="material-symbols-rounded">tune</span>
+        <span class="t">Sampling</span><i class="rule"></i></div>
+      <div class="sld">
+        <div class="lbl">temp</div>
+        <div class="track"><i style="width:40%"></i><u style="left:40%"></u></div>
+        <div class="val">0.80</div>
+      </div>
+      <div class="sld">
+        <div class="lbl">top_p</div>
+        <div class="track"><i style="width:95%"></i><u style="left:95%"></u></div>
+        <div class="val">0.95</div>
+      </div>
+      <div class="sld">
+        <div class="lbl">top_k</div>
+        <div class="track"><i style="width:50%"></i><u style="left:50%"></u></div>
+        <div class="val">40</div>
+      </div>
+      <div class="sld">
+        <div class="lbl">ctx</div>
+        <div class="track"><i style="width:37%"></i><u style="left:37%"></u></div>
+        <div class="val">15104</div>
+      </div>
+      <div class="sld">
+        <div class="lbl">parallel</div>
+        <div class="track"><i style="width:33%"></i><u style="left:33%"></u></div>
+        <div class="val">4</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="kv" style="margin-top:6px"><div class="k">Flash attention</div>
+    <div style="display:flex;align-items:center;gap:8px"><div class="sw on"><i></i></div>
+      <span class="v" style="color:var(--onvar)">on</span></div></div>
+  <div class="kv"><div class="k">Offload layers</div><div class="v">99 · full GPU</div></div>
+  <div class="kv"><div class="k">Listening on</div><div class="v">127.0.0.1:8080</div></div>
+
+  <div class="foot">
+    <span>/health</span><span>/props</span><span>/slots</span>
+    <span>llama.cpp 0.5.0-dev</span><span>pid 122307</span>
+  </div>
+</div>
+<div class="pick"><span>Design A — Console</span></div>
+<p class="note">
+  <b>Why this shape.</b> The hero row is the whole control surface: the dot is
+  the state, the model name is the identity, the pill is the switch. The four
+  gauges are the same shape the System tab already uses, so the two tabs feel
+  like one card. <b>Restart required:</b> <span style="font-family:var(--mono)">ctx</span>,
+  <span style="font-family:var(--mono)">parallel</span>, offload layers and
+  flash-attention are launch arguments — moving one shows the new value greyed
+  with a "restart to apply" marker, rather than pretending a live reload happened.
+  Temperature and the top-p/top-k sliders do apply live, because
+  <span style="font-family:var(--mono)">POST /props</span> takes them.
+</p>
+
+<!-- ══════════ DESIGN B ══════════ -->
+<h2 class="design-title">B — Manager</h2>
+<p class="design-note">
+  The same information, organised as a manager rather than a readout: a left
+  rail of sections, one full pane on the right. Slower to scan, but it has room
+  for the things a flat list runs out of — the server log, the full argument
+  line, per-slot history.
+</p>
+<div class="card">
+  <div class="tabs">
+    <div class="tab"><span class="material-symbols-rounded">monitor_heart</span>System</div>
+    <div class="tab"><span class="material-symbols-rounded">graphic_eq</span>Playing</div>
+    <div class="tab"><span class="material-symbols-rounded">schedule</span>Clock</div>
+    <div class="tab active"><span class="material-symbols-rounded">memory</span>Local AI</div>
+  </div>
+
+  <div class="b-wrap">
+    <div class="b-nav">
+      <div class="ni active"><span class="material-symbols-rounded">dashboard</span>Status</div>
+      <div class="ni"><span class="material-symbols-rounded">deployed_code</span>Models</div>
+      <div class="ni"><span class="material-symbols-rounded">tune</span>Parameters</div>
+      <div class="ni"><span class="material-symbols-rounded">terminal</span>Server log</div>
+    </div>
+
+    <div class="b-pane">
+      <div class="hero">
+        <div class="dot on"></div>
+        <div class="who">
+          <div class="m1">Qwen3-8B · Q4_K_M</div>
+          <div class="m2">127.0.0.1:8080 · up 41m · pid 122307</div>
+        </div>
+        <div class="pill stop"><span class="material-symbols-rounded">stop</span>Stop</div>
+      </div>
+
+      <div class="sec-h"><span class="material-symbols-rounded">speed</span>
+        <span class="t">Throughput</span><i class="rule"></i></div>
+      <div class="gauge-row" style="grid-template-columns:repeat(3,1fr)">
+        <div class="gauge">
+          <div class="g-name">Generation</div>
+          <div class="g-val">45.4<span style="font-size:10px;color:var(--subtext)"> t/s</span></div>
+          <div class="bar"><i style="width:91%"></i></div>
+        </div>
+        <div class="gauge">
+          <div class="g-name">Prompt</div>
+          <div class="g-val">35.6<span style="font-size:10px;color:var(--subtext)"> t/s</span></div>
+          <div class="bar"><i style="width:71%"></i></div>
+        </div>
+        <div class="gauge">
+          <div class="g-name">VRAM</div>
+          <div class="g-val">5.2<span style="font-size:10px;color:var(--subtext)">/8.0 GB</span></div>
+          <div class="bar"><i style="width:65%"></i></div>
+        </div>
+      </div>
+
+      <div class="sec-h" style="margin-top:12px"><span class="material-symbols-rounded">layers</span>
+        <span class="t">Slots</span><i class="rule"></i></div>
+      <div class="lanes" style="margin-bottom:12px">
+        <div class="lane busy">
+          <div class="id"><span>0</span><span>⚡ task 50</span></div>
+          <div class="tok">141 → 121 / 400</div>
+          <div class="tick"><i style="width:30%"></i></div>
+        </div>
+        <div class="lane"><div class="id"><span>1</span><span>idle</span></div>
+          <div class="tok">—</div><div class="tick"><i style="width:0"></i></div></div>
+        <div class="lane"><div class="id"><span>2</span><span>idle</span></div>
+          <div class="tok">—</div><div class="tick"><i style="width:0"></i></div></div>
+        <div class="lane"><div class="id"><span>3</span><span>idle</span></div>
+          <div class="tok">—</div><div class="tick"><i style="width:0"></i></div></div>
+      </div>
+
+      <div class="sec-h"><span class="material-symbols-rounded">memory</span>
+        <span class="t">Context</span><i class="rule"></i></div>
+      <div class="srow">
+        <div class="txt">
+          <div class="n1">slot 0 · 141 of 15104 tokens</div>
+          <div class="track" style="margin-top:6px"><i style="width:2%"></i></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">
+    <span>/health</span><span>/props</span><span>/slots</span><span>llama.cpp 0.5.0-dev</span>
+  </div>
+</div>
+<div class="pick b"><span>Design B — Manager</span></div>
+<p class="note">
+  <b>Trade-off.</b> B scales to a log tail and a full argument editor, which is
+  where a llama.cpp user actually ends up. But it costs the one-glance read: the
+  throughput numbers are two clicks deep, and the card carries a rail whose
+  other three sections start out empty for most people. A is the same
+  information at a single glance; B is the shape that grows.
+</p>
+
+<!-- ══════════ OFF STATE ══════════ -->
+<h2 class="design-title">The state that matters most — server off</h2>
+<p class="design-note">
+  Shown in both designs. This is what the tab looks like when nothing is
+  listening, and it is the one thing the old AI-usage tab could never show.
+</p>
+<div class="card">
+  <div class="tabs">
+    <div class="tab"><span class="material-symbols-rounded">monitor_heart</span>System</div>
+    <div class="tab"><span class="material-symbols-rounded">graphic_eq</span>Playing</div>
+    <div class="tab"><span class="material-symbols-rounded">schedule</span>Clock</div>
+    <div class="tab active"><span class="material-symbols-rounded">memory</span>Local AI</div>
+  </div>
+
+  <div class="hero off-state">
+    <div class="dot off"></div>
+    <div class="who">
+      <div class="m1">Server stopped</div>
+      <div class="m2">nothing listening on <em>127.0.0.1:8080</em> · 0 VRAM used</div>
+    </div>
+    <div class="pill"><span class="material-symbols-rounded">play_arrow</span>Start</div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+    <div class="pane">
+      <div class="sec-h"><span class="material-symbols-rounded">deployed_code</span>
+        <span class="t">Will load</span><i class="rule"></i></div>
+      <div class="srow">
+        <div class="ic">Q</div>
+        <div class="txt">
+          <div class="n1">Qwen3-8B-Q4_K_M</div>
+          <div class="n2">4.92 GB · ~4s to load</div>
+        </div>
+      </div>
+    </div>
+    <div class="pane">
+      <div class="sec-h"><span class="material-symbols-rounded">tune</span>
+        <span class="t">Launch args</span><i class="rule"></i></div>
+      <div style="font-family:var(--mono);font-size:10.5px;color:var(--subtext);line-height:1.7">
+        --ctx-size 15104<br>
+        --parallel 4<br>
+        --flash-attn on<br>
+        -ngl 99
+      </div>
+    </div>
+  </div>
+
+  <div class="foot"><span>offline</span><span>last run 41m ago · 2.1 GB/s avg</span></div>
+</div>
+<p class="note">
+  <b>Deliberately not an error state.</b> A local model server being off is the
+  normal condition, not a fault — so this reads as a fact with an offer, not a
+  red failure. The remembered model and arguments are still shown, because
+  "start it the way I had it" is the whole reason this tab exists.
+</p>
+
+<p class="intro" style="margin-top:20px;font-size:12px">
+  Both designs read the same four endpoints and write the same three:
+  <b>read</b> <span style="font-family:var(--mono);font-size:11.5px">GET /health</span>,
+  <span style="font-family:var(--mono);font-size:11.5px">GET /props</span>,
+  <span style="font-family:var(--mono);font-size:11.5px">GET /slots</span>,
+  <span style="font-family:var(--mono);font-size:11.5px">POST /props</span> ·
+  <b>start/stop</b> a managed
+  <span style="font-family:var(--mono);font-size:11.5px">llama-server</span>
+  process (systemd user unit, so it survives the shell) ·
+  <b>models</b> a <span style="font-family:var(--mono);font-size:11.5px">.gguf</span>
+  scan of <span style="font-family:var(--mono);font-size:11.5px">~/Models</span>.
+</p>
+
+</body>
+</html>

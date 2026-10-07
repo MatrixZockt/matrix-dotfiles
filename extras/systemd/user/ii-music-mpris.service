@@ -1,0 +1,25 @@
+# MPRIS face of the shell's music daemon.
+#
+# The top bar's now-playing widget, the liquid bar's media pocket, the dock's
+# collapsed pill and the media panel all read the D-Bus session bus, and mpv
+# does not speak MPRIS. Without this unit, music started from the left
+# sidebar's Music tab was invisible on the bar entirely.
+#
+# Separate from ii-music-mpd.service on purpose: the mpv daemon is the
+# playback engine and must survive on its own, while this is only a mirror of
+# its state. The bridge reconnects to the socket whenever it appears, so the
+# two units can start in any order and either can restart without the other
+# noticing.
+[Unit]
+Description=ii music - MPRIS bridge so the bar can see the music daemon
+PartOf=graphical-session.target
+After=ii-music-mpd.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/ii-music-mpris
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

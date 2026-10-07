@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Network &amp; internet — four designs</title>
+<style>
+  :root {
+    /* pulled from modules/common/Appearance.qml so these mockups are the
+       shell's own palette, not an approximation of it */
+    --bg:        #141313;
+    --lowest:    #0f0e0e;
+    --low:       #1c1b1c;
+    --cont:      #201f20;
+    --high:      #2b2a2a;
+    --highest:   #363435;
+    --on:        #e6e1e1;
+    --onvar:     #cbc5ca;
+    --subtext:   #948f94;
+    --outline:   #948f94;
+    --outlinev:  #322f31;
+    --primary:   #cbc4cb;
+    --seccont:   #4d4b4d;
+    --onsec:     #e6e1e1;
+    --ok:        #a8d5a8;
+    --warn:      #e6c26a;
+    --sans: "Google Sans Flex", "Google Sans", system-ui, sans-serif;
+    --mono: "JetBrains Mono NF", "JetBrains Mono", monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--lowest); color: var(--on);
+    font-family: var(--sans); font-size: 13px;
+    padding: 30px 24px 70px;
+    display: flex; flex-direction: column; align-items: center; gap: 46px;
+  }
+  .wrap { width: 100%; max-width: 1180px; display: flex; flex-direction: column; align-items: center; gap: 46px; }
+
+  h1 { font-size: 19px; font-weight: 500; letter-spacing: .2px; }
+  .lede { max-width: 720px; text-align: center; color: var(--subtext); line-height: 1.6; font-size: 12.5px; }
+  .lede b { color: var(--onvar); font-weight: 500; }
+
+  /* ── the defects, stated once ──────────────────────────────────── */
+  .defects {
+    width: 100%; max-width: 1180px; background: var(--low);
+    border: 1px solid var(--outlinev); border-radius: 10px; padding: 18px 20px;
+  }
+  .defects h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .8px; color: var(--subtext); margin-bottom: 12px; font-weight: 500; }
+  .defects ul { list-style: none; display: grid; grid-template-columns: 1fr 1fr; gap: 8px 26px; }
+  .defects li { font-size: 12px; color: var(--onvar); line-height: 1.5; padding-left: 16px; position: relative; }
+  .defects li::before { content: "—"; position: absolute; left: 0; color: var(--subtext); }
+  .defects li b { color: var(--on); font-weight: 500; }
+
+  /* ── design block ──────────────────────────────────────────────── */
+  .design { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 14px; }
+  .dhead { width: 100%; max-width: 1180px; }
+  .dhead .tag {
+    display: inline-block; font-size: 10px; letter-spacing: 1.2px; text-transform: uppercase;
+    color: var(--primary); background: var(--seccont); border-radius: 4px; padding: 3px 8px; margin-bottom: 8px;
+  }
+  .dhead h2 { font-size: 16px; font-weight: 500; margin-bottom: 5px; }
+  .dhead p { font-size: 12.5px; color: var(--subtext); line-height: 1.6; max-width: 860px; }
+  .dhead p b { color: var(--onvar); font-weight: 500; }
+  .tradeoff { font-size: 11.5px; color: var(--subtext); margin-top: 7px; }
+  .tradeoff b { color: var(--warn); font-weight: 500; }
+
+  /* ── the app frame ─────────────────────────────────────────────── */
+  .app {
+    width: 100%; max-width: 1180px; height: 620px; background: var(--bg);
+    border: 1px solid var(--outlinev); border-radius: 12px; overflow: hidden;
+    display: grid; grid-template-columns: 64px 1fr;
+  }
+  .rail { background: var(--lowest); border-right: 1px solid var(--outlinev); padding: 12px 0; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .rail .r {
+    width: 40px; height: 40px; border-radius: 10px; display: flex; align-items: center; justify-content: center; color: var(--subtext);
+  }
+  .rail .r.on { background: var(--seccont); color: var(--on); }
+  .rail .sp { flex: 1; }
+  .main { display: flex; flex-direction: column; min-width: 0; }
+  .titlebar { height: 52px; display: flex; align-items: center; padding: 0 22px; gap: 10px; }
+  .titlebar h4 { font-size: 17px; font-weight: 500; }
+  .chip { font-size: 10.5px; color: var(--subtext); background: var(--high); border-radius: 5px; padding: 3px 7px; }
+  .titlebar .sp { flex: 1; }
+  .xbtn { width: 26px; height: 26px; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: var(--subtext); }
+  .body { flex: 1; padding: 6px 22px 22px; overflow: hidden; min-height: 0; }
+
+  /* ── shared atoms ──────────────────────────────────────────────── */
+  svg.i { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  svg.i.sm { width: 15px; height: 15px; }
+  svg.i.lg { width: 22px; height: 22px; }
+
+  .tog { width: 40px; height: 22px; border-radius: 11px; background: var(--highest); position: relative; flex: none; }
+  .tog i { position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--onvar); }
+  .tog.on { background: var(--seccont); } .tog.on i { left: 21px; background: var(--on); }
+
+  .seg { display: flex; gap: 4px; background: var(--low); border-radius: 8px; padding: 4px; }
+  .seg .s { flex: 1; padding: 7px 12px; border-radius: 6px; display: flex; align-items: center; justify-content: center; gap: 7px; color: var(--onvar); font-size: 12.5px; }
+  .seg .s.on { background: var(--seccont); color: var(--on); }
+
+  .group { background: var(--cont); border: 1px solid var(--outlinev); border-radius: 10px; overflow: hidden; }
+  .group > .gh {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: .9px; color: var(--subtext);
+    padding: 11px 14px 7px; display: flex; align-items: center; gap: 8px;
+  }
+  .group > .gh .sp { flex: 1; }
+  .row {
+    display: flex; align-items: center; gap: 12px; padding: 11px 14px;
+    border-top: 1px solid var(--outlinev);
+  }
+  .row:first-of-type { border-top: none; }
+  .row .rname { font-size: 13px; color: var(--on); }
+  .row .rsub  { font-size: 11.5px; color: var(--subtext); margin-top: 2px; }
+  .row .sp { flex: 1; }
+  .row .rval { font-family: var(--mono); font-size: 12px; color: var(--onvar); }
+  .chev { color: var(--subtext); }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--onvar);
+    background: var(--high); border: 1px solid var(--outlinev); border-radius: 7px; padding: 6px 11px;
+  }
+  .btn.prime { background: var(--seccont); color: var(--on); border-color: transparent; }
+  .btn.ghost { background: transparent; }
+
+  .pill { font-size: 10.5px; padding: 2px 7px; border-radius: 20px; display: inline-flex; align-items: center; gap: 5px; }
+  .pill.up   { background: rgba(168,213,168,.13); color: var(--ok); }
+  .pill.off  { background: var(--high); color: var(--subtext); }
+
+  .empty { padding: 26px 18px 30px; text-align: center; color: var(--subtext); font-size: 12.5px; }
+  .empty .eic { width: 34px; height: 34px; border-radius: 10px; background: var(--high); display: flex; align-items: center; justify-content: center; margin: 0 auto 10px; color: var(--subtext); }
+  .empty .ebtns { display: flex; gap: 8px; justify-content: center; margin-top: 12px; }
+
+  .bars { display: flex; align-items: flex-end; gap: 2px; height: 13px; }
+  .bars i { width: 3px; background: var(--primary); border-radius: 1px; display: block; }
+  .bars i.off { background: var(--highest); }
+
+  .note {
+    width: 100%; max-width: 1180px; font-size: 11.5px; color: var(--subtext); line-height: 1.6;
+    background: var(--low); border-left: 2px solid var(--outlinev); padding: 10px 14px; border-radius: 0 6px 6px 0;
+  }
+  .note b { color: var(--onvar); font-weight: 500; }
+  .note code { font-family: var(--mono); font-size: 11px; color: var(--primary); }
+
+  /* ══ A ══ */
+  .a-status { background: var(--cont); border: 1px solid var(--outlinev); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+  .a-status .lead { font-size: 10.5px; text-transform: uppercase; letter-spacing: .9px; color: var(--subtext); margin-bottom: 10px; }
+  .a-links { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .a-link { background: var(--low); border-radius: 8px; padding: 11px 13px; display: flex; gap: 11px; align-items: flex-start; }
+  .a-link .an { font-size: 12.5px; color: var(--on); }
+  .a-link .ad { font-family: var(--mono); font-size: 11.5px; color: var(--onvar); margin-top: 3px; }
+  .a-link .am { font-size: 10.5px; color: var(--subtext); margin-top: 3px; }
+
+  /* ══ C ══ */
+  .split { display: grid; grid-template-columns: 300px 1fr; gap: 16px; height: 100%; }
+  .master { background: var(--cont); border: 1px solid var(--outlinev); border-radius: 10px; overflow: hidden; align-self: start; }
+  .mrow { display: flex; align-items: center; gap: 11px; padding: 12px 14px; border-top: 1px solid var(--outlinev); }
+  .mrow:first-of-type { border-top: none; }
+  .mrow.on { background: var(--seccont); }
+  .mrow .mn { font-size: 13px; }
+  .mrow .ms { font-size: 11px; color: var(--subtext); margin-top: 2px; }
+  .mrow.on .ms { color: var(--onvar); }
+
+  .fact { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px; }
+  .fact .f { background: var(--low); border: 1px solid var(--outlinev); border-radius: 8px; padding: 10px 12px; }
+  .fact .fn { font-size: 10px; text-transform: uppercase; letter-spacing: .8px; color: var(--subtext); }
+  .fact .fv { font-family: var(--mono); font-size: 14px; margin-top: 4px; }
+
+  /* ══ D ══ */
+  .dense { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .dense .group .row { padding: 9px 13px; }
+  .grp-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .9px; color: var(--subtext); margin: 0 0 7px 2px; }
+  .stack2 { display: flex; flex-direction: column; gap: 16px; }
+
+  /* ── narrow viewports ───────────────────────────────────────────────
+     LAST, deliberately. A media query adds no specificity, so it only
+     wins on source order -- and `.split` / `.fact` / `.dense` are all
+     declared further up. Put this block anywhere else and the desktop
+     rules quietly keep applying at every width. */
+  @media (max-width: 1000px) {
+    .app { grid-template-columns: 48px 1fr; }
+    .split { grid-template-columns: 1fr; height: auto; }
+    .fact { grid-template-columns: 1fr 1fr; }
+    .a-links, .dense { grid-template-columns: 1fr; }
+    .defects ul { grid-template-columns: 1fr; }
+    .body { padding: 6px 14px 18px; }
+    .titlebar { padding: 0 14px; }
+  }
+  @media (max-width: 640px) {
+    .fact { grid-template-columns: 1fr; }
+    .rail { display: none; }
+    .app { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div style="text-align:center">
+    <h1>Network &amp; internet — four directions</h1>
+  </div>
+  <p class="lede">
+    Same data, same actions, four different shapes. Every mockup is driven by this machine's
+    <b>real</b> state right now: ethernet on <b>192.168.1.100</b> and Wi-Fi on
+    <b>192.168.1.101</b> simultaneously, bluetooth on with nothing paired.
+    Nothing here is invented except the two sample networks in the lists.
+  </p>
+
+  <div class="defects">
+    <h3>What is actually wrong with the page today</h3>
+    <ul>
+      <li><b>Ethernet is never mentioned.</b> The machine routes over the wire and the page has no wired section at all — the one thing you most want to confirm is the one thing it cannot tell you.</li>
+      <li><b>"Scan for devices" is a switch.</b> Scanning is an action, not a state you hold on or off, and as a 190px-wide toggle next to its own label it is the squashed thing in the screenshot.</li>
+      <li><b>Every label appears twice.</b> The section header says <i>Bluetooth</i> and the row directly beneath it says <i>Bluetooth</i> again, with the same glyph. Same for Wi-Fi.</li>
+      <li><b>The Wi-Fi tab is a void.</b> With no networks in range the tab is a header, an empty list and 500px of nothing, with no empty state and no action offered.</li>
+      <li><b>Tabs hide state.</b> You cannot see that the wire is up while you are looking at bluetooth — the page is per-radio, but the machine's connectivity is not.</li>
+      <li><b>600px of the width is unused.</b> Everything is pinned to a ~600px column on the left of a 1200px page.</li>
+      <li><b>The "Network" chip</b> beside the title duplicates the rail item you just clicked.</li>
+    </ul>
+  </div>
+
+  <!-- ══════════════════════ A ══════════════════════ -->
+  <div class="design">
+    <div class="dhead">
+      <span class="tag">Direction A</span>
+      <h2>Status rail on top, tabs underneath</h2>
+      <p>
+        The smallest honest fix. A persistent <b>live status strip</b> sits above the tabs and always
+        names every link the machine currently has — wired, wireless, whatever — no matter which tab
+        you are on. Then the existing tab structure, but with the doubled labels collapsed into one
+        header row and the scan <i>switch</i> replaced by a scan <i>button</i>.
+      </p>
+      <p class="tradeoff"><b>Trade-off:</b> keeps the tab you have, so the per-radio mental model survives. The status strip is a new thing to look at, and on a machine with one link it is one row of mostly-empty.</p>
+    </div>
+
+    <div class="app">
+      <div class="rail">
+        <div class="r"><svg class="i"><path d="M4 7h16M4 12h16M4 17h10"/></svg></div>
+        <div class="r"><svg class="i"><path d="M4 20l4-16 4 16M6 14h4M14 8l6 8-6 8V8z"/></svg></div>
+        <div class="r"><svg class="i"><rect x="3.5" y="4.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="4.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="14.5" width="7" height="5" rx="1.5"/><rect x="13.5" y="14.5" width="7" height="5" rx="1.5"/></svg></div>
+        <div class="r on"><svg class="i"><path d="M2.5 9.5a15 15 0 0119 0"/><path d="M6 13a10 10 0 0112 0"/><circle cx="12" cy="17.5" r="1.4" fill="currentColor" stroke="none"/></svg></div>
+        <div class="r"><svg class="i"><path d="M4 19l9-9M13 10l3-3 3 3-3 3"/><circle cx="6" cy="18" r="2"/></svg></div>
+        <div class="sp"></div>
+        <div class="r"><svg class="i"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8"/></svg></div>
+        <div class="r"><svg class="i"><circle cx="12" cy="12" r="8.5"/><path d="M12 8v4.5l3 1.8"/></svg></div>
+        <div class="r"><svg class="i"><path d="M6 3h12v18H6z"/><path d="M9.5 8.5h5M9.5 12h5M9.5 15.5h3"/></svg></div>
+      </div>
+      <div class="main">
+        <div class="titlebar">
+          <svg class="i lg" style="color:var(--subtext)"><path d="M2.5 9.5a15 15 0 0119 0"/><path d="M6 13a10 10 0 0112 0"/><circle cx="12" cy="17.5" r="1.4" fill="currentColor" stroke="none"/></svg>
+          <h4>Network &amp; internet</h4>
+          <div class="sp"></div>
+          <div class="xbtn"><svg class="i sm"><path d="M6 6l12 12M18 6L6 18"/></svg></div>
+        </div>
+        <div class="body">
+          <div class="a-status">
+            <div class="lead">Connected now</div>
+            <div class="a-links">
+              <div class="a-link">
+                <svg class="i lg" style="color:var(--ok)"><path d="M3 8.5h18v8H3z"/><path d="M7 16.5v2.5M17 16.5v2.5M3 12.5h18"/></svg>
+                <div>
+                  <div class="an">Ethernet</div>
+                  <div class="ad">192.168.1.100</div>
+                  <div class="am">enp0s20f0u3u4 · 1 Gb/s · carries your traffic</div>
+                </div>
+              </div>
+              <div class="a-link">
+                <svg class="i lg" style="color:var(--onvar)"><path d="M2.5 9.5a15 15 0 0119 0"/><path d="M6 13a10 10 0 0112 0"/><circle cx="12" cy="17.5" r="1.4" fill="currentColor" stroke="none"/></svg>
+                <div>
+                  <div class="an">Wi-Fi</div>
+                  <div class="ad">192.168.1.101</div>
+                  <div class="am">Home-WLAN-5GHz · 100%</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="seg" style="margin-bottom:14px">
+            <div class="s on"><svg class="i sm"><path d="M2.5 9.5a15 15 0 0119 0"/><path d="M6 13a10 10 0 0112 0"/><circle cx="12" cy="17.5" r="1.4" fill="currentColor" stroke="none"/></svg>Wi-Fi</div>
+            <div class="s"><svg class="i sm"><path d="M7 7l10 10-5 4V3l5 4L7 17"/></svg>Bluetooth</div>
+          </div>
+
+          <div class="group">
+            <div class="row">
+              <svg class="i lg" style="color:var(--onvar)"><path d="M2.5 9.5a15 15 0 0119 0"/><path d="M6 13a10 10 0 0112 0"/><circle cx="12" cy="17.5" r="1.4" fill="currentColor" stroke="none"/></svg>
+              <div>
+                <div class="rname">Wi-Fi</div>
+                <div class="rsub">Home-WLAN-5GHz · 192.168.1.101</div>
+              </div>
+              <div class="sp"></div>
+              <div class="bars"><i style="height:4px"></i><i style="height:7px"></i><i style="height:10px"></i><i style="height:13px"></i></div>
+              <div class="tog on"><i></i></div>
+            </div>
+            <div class="row" style="padding-top:9px;padding-bottom:9px">
+              <div style="width:22px"></div>
+              <div style="font-size:11.5px;color:var(--subtext)">4 other networks found</div>
+              <div class="sp"></div>
+              <div class="btn ghost"><svg class="i sm"><path d="M20 11a8 8 0 10-2.3 5.7"/><path d="M20 5v6h-6"/></svg>Scan again</div>
+            </div>
+          </div>
+
+          <div class="group" style="margin-top:12px">
+            <div class="gh">Available networks</div>
+            <div class="row">
+              <div class="bars"><i style="height:13px"></i><i style="height:13px"></i><i style="height:13px"></i><i style="height:13px"></i></div>
+              <div><div class="rname">Home-WLAN-5GHz</div><div class="rsub">Connected · WPA3 · 5 GHz</div></div>
+              <div class="sp"></div><span class="pill up">100%</span>
+            </div>
+            <div class="row">
+              <div class="bars"><i style="height:13px"></i><i style="height:13px"></i><i style="height:13px"></i><i class="off" style="height:13px"></i></div>
+              <div><div class="rname">NETGEAR-5G</div><div class="rsub">Secured · 5 GHz</div></div>
+              <div class="sp"></div><span class="pill up">78%</span>
+            </div>
+            <div class="row">
+              <div class="bars"><i style="height:13px"></i><i style="height:10px"></i><i class="off" style="height:7px"></i><i class="off" style="height:4px"></i></div>
+              <div><div class="rname">Guest-WLAN</div><div class="rsub">Open · 2.4 GHz</div></div>
+              <div class="sp"></div><span class="pill up">41%</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="note"><b>What this costs in code:</b> one new status strip, the two section headers lose their duplicate switch row, and the scan switch becomes a button. No new data — everything shown already exists on <code>Network</code>.</div>
+  </div>
+
+  <!-- ══════════════════════ B ══════════════════════ -->
+  <div class="design">
+    <div class="dhead">
+      <span class="tag">Direction B</span>
+      <h2>No tabs — every radio as its own card</h2>
+      <p>
+        Drop the tab switch entirely. Ethernet, Wi-Fi and Bluetooth each become a card: a header
+        with the toggle, and a body carrying either that link's live details or the list of things
+        you can join. Cards the machine has nothing to say about collapse to a single row.
+      </p>
+      <p class="tradeoff"><b>Trade-off:</b> nothing is hidden, which is the whole point — but the page gets longer, and two radios competing for the same scroll is worse than one when you only came to change one of them.</p>
+    </div>
+
+    <div class="app">
+      <div class="rail">
+        <div class="r"><svg class="i"><path d="M4 7h16M4 12h16M4 17h10"/></svg></div>
+        <div class="r"><svg class="i"><path d="M4 20l4-16 4 16M6 14h4M14 8l6 8-6 8V8z"/></svg></div>
+        <div class="r"><svg class="i"><rect x="3.5" y="4.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="4.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="14.5" width="7" height="5" rx="1.5"/><rect x="13.5" y="14.5" width="7" height="5" rx="1.5"/></svg></div>
+        <div class="r on"><svg class="i"><path d="M2.5 9.5a15 15 0 0119 0"/><path d="M6 13a10 10 0 0112 0"/><circle cx="12" cy="17.5" r="1.4" fill="currentColor" stroke="none"/></svg></div>
+        <div class="r"><svg class="i"><path d="M4 19l9-9M13 10l3-3 3 3-3 3"/><circle cx="6" cy="18" r="2"/></svg></div>
+        <div class="sp"></div>
+        <div class="r"><svg class="i"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8"/></svg></div>
+        <div class="r"><svg class="i"><circle cx="12" cy="12" r="8.5"/><path d="M12 8v4.5l3 1.8"/></svg></div>
+        <div class="r"><svg class="i"><path d="M6 3h12v18H6z"/><path d="M9.5 8.5h5M9.5 12h5M9.5 15.5h3"/></svg></div>
+      </div>
+      <div class="main">
+        <div class="titlebar">
+          <svg class="i lg" style="color:var(--subtext)"><path d="M3 8.5h18v8H3z"/><path d="M7 16.5v2.5M17 16.5v2.5M3 12.5h18"/></svg>
+          <h4>Network &amp; internet</h4>
+          <div class="sp"></div>
+          <div class="xbtn"><svg class="i sm"><path d="M6 6l12 12M18 6L6 18"/></svg></div>
+        </div>
+        <div class="body stack2">
+          <div class="group">
+            <div class="row">
+              <svg class="i lg" style="color:var(--ok)"><path d="M3 8.5h18v8H3z"/><path d="M7 16.5v2.5M17 16.5v2.5M3 12.5h18"/></svg>
+              <div>
+                <div class="rname">Ethernet</div>
+                <div class="rsub">Connected · 1 Gb/s full duplex</div>
+              </div>
+              <div class="sp"></div>
+              <div style="text-align:right">
+                <div class="rval">192.168.1.100</div>
+                <div class="rsub">enp0s20f0u3u4</div>
+              </div>
+              <span class="pill up">Active route</span>
+            </div>
+          </div>
+
+          <div class="group">
+            <div class="row">
+              <svg class="i lg" style="color:var(--onvar)"><path d="M2.5 9.5a15 15 0 0119 0"/><path d="M6 13a10 10 0 0112 0"/><circle cx="12" cy="17.5" r="1.4" fill="currentColor" stroke="none"/></svg>
+              <div>
+                <div class="rname">Wi-Fi</div>
+                <div class="rsub">Home-WLAN-5GHz · 192.168.1.101</div>
+              </div>
+              <div class="sp"></div>
+              <div class="btn ghost"><svg class="i sm"><path d="M20 11a8 8 0 10-2.3 5.7"/><path d="M20 5v6h-6"/></svg>Scan</div>
+              <div class="tog on"><i></i></div>
+            </div>
+            <div class="row" style="border-top:1px solid var(--outlinev)">
+              <div class="bars" style="width:30px"><i style="height:13px"></i><i style="height:13px"></i><i style="height:13px"></i><i style="height:13px"></i></div>
+              <div><div class="rname">Home-WLAN-5GHz</div><div class="rsub">Connected · WPA3 · 5 GHz</div></div>
+              <div class="sp"></div><span class="pill up">100%</span>
+            </div>
+            <div class="row">
+              <div class="bars" style="width:30px"><i style="height:13px"></i><i style="height:13px"></i><i style="height:13px"></i><i class="off" style="height:13px"></i></div>
+              <div><div class="rname">NETGEAR-5G</div><div class="rsub">Secured · 5 GHz</div></div>
+              <div class="sp"></div><span class="pill up">78%</span>
+            </div>
+            <div class="row">
+              <div class="bars" style="width:30px"><i style="height:13px"></i><i style="height:10px"></i><i class="off" style="height:7px"></i><i class="off" style="height:4px"></i></div>
+              <div><div class="rname">Guest-WLAN</div><div class="rsub">Open · 2.4 GHz</div></div>
+              <div class="sp"></div><span class="pill up">41%</span>
+            </div>
+          </div>
+
+          <div class="group">
+            <div class="row">
+              <svg class="i lg" style="color:var(--onvar)"><path d="M7 7l10 10-5 4V3l5 4L7 17"/></svg>
+              <div>
+                <div class="rname">Bluetooth</div>
+                <div class="rsub">On · no device connected</div>
+              </div>
+              <div class="sp"></div>
+              <div class="btn ghost"><svg class="i sm"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L21 21"/></svg>Find devices</div>
+              <div class="tog on"><i></i></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="note"><b>What this costs in code:</b> the tab state, the segmented control and <code>onSectionChanged</code> all go. It is the biggest deletion of the four — the page becomes a vertical list of the same components, and <code>SettingsNav</code>'s "open on the bluetooth tab" request turns into "scroll to / highlight the bluetooth card".</div>
+  </div>
+
+  <!-- ══════════════════════ C ══════════════════════ -->
+  <div class="design">
+    <div class="dhead">
+      <span class="tag">Direction C</span>
+      <h2>Master / detail across the full width</h2>
+      <p>
+        A settings app is not a document — it should use the width it has. The left column is a
+        short list of radios, each already showing its live state; the right pane is the detail for
+        whichever one is selected, with the connection's facts as a row of figures above the list
+        of things to join.
+      </p>
+      <p class="tradeoff"><b>Trade-off:</b> fills the page and scales to a fourth or fifth radio later, but it is the biggest change and two-pane layouts are awkward on a narrow window.</p>
+    </div>
+
+    <div class="app">
+      <div class="rail">
+        <div class="r"><svg class="i"><path d="M4 7h16M4 12h16M4 17h10"/></svg></div>
+        <div class="r"><svg class="i"><path d="M4 20l4-16 4 16M6 14h4M14 8l6 8-6 8V8z"/></svg></div>
+        <div class="r"><svg class="i"><rect x="3.5" y="4.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="4.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="14.5" width="7" height="5" rx="1.5"/><rect x="13.5" y="14.5" width="7" height="5" rx="1.5"/></svg></div>
+        <div class="r on"><svg class="i"><path d="M2.5 9.5a15 15 0 0119 0"/><path d="M6 13a10 10 0 0112 0"/><circle cx="12" cy="17.5" r="1.4" fill="currentColor" stroke="none"/></svg></div>
+        <div class="r"><svg class="i"><path d="M4 19l9-9M13 10l3-3 3 3-3 3"/><circle cx="6" cy="18" r="2"/></svg></div>
+        <div class="sp"></div>
+        <div class="r"><svg class="i"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8"/></svg></div>
+        <div class="r"><svg class="i"><circle cx="12" cy="12" r="8.5"/><path d="M12 8v4.5l3 1.8"/></svg></div>
+        <div class="r"><svg class="i"><path d="M6 3h12v18H6z"/><path d="M9.5 8.5h5M9.5 12h5M9.5 15.5h3"/></svg></div>
+      </div>
+      <div class="main">
+        <div class="titlebar">
+          <svg class="i lg" style="color:var(--subtext)"><path d="M2.5 9.5a15 15 0 0119 0"/><path d="M6 13a10 10 0 0112 0"/><circle cx="12" cy="17.5" r="1.4" fill="currentColor" stroke="none"/></svg>
+          <h4>Network &amp; internet</h4>
+          <div class="sp"></div>
+          <div class="xbtn"><svg class="i sm"><path d="M6 6l12 12M18 6L6 18"/></svg></div>
+        </div>
+        <div class="body">
+          <div class="split">
+            <div class="master">
+              <div class="mrow on">
+                <svg class="i lg" style="color:var(--on)"><path d="M2.5 9.5a15 15 0 0119 0"/><path d="M6 13a10 10 0 0112 0"/><circle cx="12" cy="17.5" r="1.4" fill="currentColor" stroke="none"/></svg>
+                <div><div class="mn">Wi-Fi</div><div class="ms">Home-WLAN-5GHz</div></div>
+                <div class="sp"></div>
+                <div class="tog on"><i></i></div>
+              </div>
+              <div class="mrow">
+                <svg class="i lg"><path d="M3 8.5h18v8H3z"/><path d="M7 16.5v2.5M17 16.5v2.5M3 12.5h18"/></svg>
+                <div><div class="mn">Ethernet</div><div class="ms">192.168.1.100</div></div>
+                <div class="sp"></div>
+                <span class="pill up">Up</span>
+              </div>
+              <div class="mrow">
+                <svg class="i lg"><path d="M7 7l10 10-5 4V3l5 4L7 17"/></svg>
+                <div><div class="mn">Bluetooth</div><div class="ms">On · nothing paired</div></div>
+                <div class="sp"></div>
+                <div class="tog on"><i></i></div>
+              </div>
+              <div class="mrow" style="opacity:.45">
+                <svg class="i lg"><circle cx="12" cy="12" r="8"/><path d="M2 12h20M12 2a15 15 0 010 20a15 15 0 010-20"/></svg>
+                <div><div class="mn">Hotspot</div><div class="ms">Off</div></div>
+                <div class="sp"></div>
+                <div class="tog"><i></i></div>
+              </div>
+            </div>
+
+            <div>
+              <div class="fact">
+                <div class="f"><div class="fn">IPv4 address</div><div class="fv">192.168.1.101</div></div>
+                <div class="f"><div class="fn">Signal</div><div class="fv">100%</div></div>
+                <div class="f"><div class="fn">Band</div><div class="fv">5 GHz</div></div>
+              </div>
+              <div class="group">
+                <div class="gh">
+                  Networks
+                  <div class="sp"></div>
+                  <div class="btn ghost" style="text-transform:none"><svg class="i sm"><path d="M20 11a8 8 0 10-2.3 5.7"/><path d="M20 5v6h-6"/></svg>Scan again</div>
+                </div>
+                <div class="row">
+                  <div class="bars"><i style="height:13px"></i><i style="height:13px"></i><i style="height:13px"></i><i style="height:13px"></i></div>
+                  <div><div class="rname">Home-WLAN-5GHz</div><div class="rsub">WPA3 · connected</div></div>
+                  <div class="sp"></div><span class="pill up">Connected</span>
+                </div>
+                <div class="row">
+                  <div class="bars"><i style="height:13px"></i><i style="height:13px"></i><i style="height:13px"></i><i class="off" style="height:13px"></i></div>
+                  <div><div class="rname">NETGEAR-5G</div><div class="rsub">WPA2</div></div>
+                  <div class="sp"></div><span class="pill up">78%</span>
+                </div>
+                <div class="row">
+                  <div class="bars"><i style="height:13px"></i><i style="height:10px"></i><i class="off" style="height:7px"></i><i class="off" style="height:4px"></i></div>
+                  <div><div class="rname">Guest-WLAN</div><div class="rsub">Open</div></div>
+                  <div class="sp"></div><span class="pill up">41%</span>
+                </div>
+                <div class="row">
+                  <div class="bars"><i class="off" style="height:4px"></i><i class="off" style="height:7px"></i><i class="off" style="height:10px"></i><i class="off" style="height:13px"></i></div>
+                  <div><div class="rname">Fritz!Box 7590</div><div class="rsub">WPA3 · 2.4 GHz</div></div>
+                  <div class="sp"></div><span class="pill up">22%</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="note"><b>What this costs in code:</b> the tabs become a selection model rather than a boolean, and the two radio bodies become two components instead of two <code>visible:</code> branches of one. It is the only one of the four that changes how the page is <i>composed</i> rather than what it contains.</div>
+  </div>
+
+  <!-- ══════════════════════ D ══════════════════════ -->
+  <div class="design">
+    <div class="dhead">
+      <span class="tag">Direction D</span>
+      <h2>Dense rows, no chrome</h2>
+      <p>
+        The opposite bet from the other three: no cards, no section headers with icons, no figures
+        row. Everything is a row, grouped under three small caps labels —
+        <b>Connected</b>, <b>Networks</b>, <b>Devices</b> — with the status pushed to the right edge.
+        Roughly twice the information in the same height, for people who read by scanning rather
+        than by looking.
+      </p>
+      <p class="tradeoff"><b>Trade-off:</b> the most scannable and by far the least "settings app"-looking. The IP and the signal stop being landmarks because nothing is a landmark — which is the point, and also the risk.</p>
+    </div>
+
+    <div class="app">
+      <div class="rail">
+        <div class="r"><svg class="i"><path d="M4 7h16M4 12h16M4 17h10"/></svg></div>
+        <div class="r"><svg class="i"><path d="M4 20l4-16 4 16M6 14h4M14 8l6 8-6 8V8z"/></svg></div>
+        <div class="r"><svg class="i"><rect x="3.5" y="4.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="4.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="14.5" width="7" height="5" rx="1.5"/><rect x="13.5" y="14.5" width="7" height="5" rx="1.5"/></svg></div>
+        <div class="r on"><svg class="i"><path d="M2.5 9.5a15 15 0 0119 0"/><path d="M6 13a10 10 0 0112 0"/><circle cx="12" cy="17.5" r="1.4" fill="currentColor" stroke="none"/></svg></div>
+        <div class="r"><svg class="i"><path d="M4 19l9-9M13 10l3-3 3 3-3 3"/><circle cx="6" cy="18" r="2"/></svg></div>
+        <div class="sp"></div>
+        <div class="r"><svg class="i"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8"/></svg></div>
+        <div class="r"><svg class="i"><circle cx="12" cy="12" r="8.5"/><path d="M12 8v4.5l3 1.8"/></svg></div>
+        <div class="r"><svg class="i"><path d="M6 3h12v18H6z"/><path d="M9.5 8.5h5M9.5 12h5M9.5 15.5h3"/></svg></div>
+      </div>
+      <div class="main">
+        <div class="titlebar">
+          <h4>Network &amp; internet</h4>
+          <div class="sp"></div>
+          <div class="btn ghost"><svg class="i sm"><path d="M20 11a8 8 0 10-2.3 5.7"/><path d="M20 5v6h-6"/></svg>Scan</div>
+          <div class="xbtn"><svg class="i sm"><path d="M6 6l12 12M18 6L6 18"/></svg></div>
+        </div>
+        <div class="body dense">
+          <div class="stack2">
+            <div>
+              <div class="grp-label">Connected</div>
+              <div class="group">
+                <div class="row">
+                  <svg class="i" style="color:var(--ok)"><path d="M3 8.5h18v8H3z"/><path d="M7 16.5v2.5M17 16.5v2.5M3 12.5h18"/></svg>
+                  <div><div class="rname">Ethernet</div></div>
+                  <div class="sp"></div>
+                  <div class="rval">192.168.1.100</div>
+                  <span class="pill up">route</span>
+                </div>
+                <div class="row">
+                  <svg class="i"><path d="M2.5 9.5a15 15 0 0119 0"/><path d="M6 13a10 10 0 0112 0"/><circle cx="12" cy="17.5" r="1.4" fill="currentColor" stroke="none"/></svg>
+                  <div><div class="rname">Home-WLAN-5GHz</div></div>
+                  <div class="sp"></div>
+                  <div class="rval">192.168.1.101</div>
+                  <div class="tog on"><i></i></div>
+                </div>
+                <div class="row">
+                  <svg class="i"><path d="M7 7l10 10-5 4V3l5 4L7 17"/></svg>
+                  <div><div class="rname">Bluetooth</div></div>
+                  <div class="sp"></div>
+                  <div class="rval" style="color:var(--subtext)">no device</div>
+                  <div class="tog on"><i></i></div>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <div class="grp-label">Networks</div>
+              <div class="group">
+                <div class="row">
+                  <div class="bars"><i style="height:13px"></i><i style="height:13px"></i><i style="height:13px"></i><i style="height:13px"></i></div>
+                  <div><div class="rname">Home-WLAN-5GHz</div></div>
+                  <div class="sp"></div><div class="rval">WPA3 · 5G</div><span class="pill up">100%</span>
+                </div>
+                <div class="row">
+                  <div class="bars"><i style="height:13px"></i><i style="height:13px"></i><i style="height:13px"></i><i class="off" style="height:13px"></i></div>
+                  <div><div class="rname">NETGEAR-5G</div></div>
+                  <div class="sp"></div><div class="rval">WPA2 · 5G</div><span class="pill up">78%</span>
+                </div>
+                <div class="row">
+                  <div class="bars"><i style="height:13px"></i><i style="height:10px"></i><i class="off" style="height:7px"></i><i class="off" style="height:4px"></i></div>
+                  <div><div class="rname">Guest-WLAN</div></div>
+                  <div class="sp"></div><div class="rval">open · 2.4G</div><span class="pill up">41%</span>
+                </div>
+                <div class="row">
+                  <div class="bars"><i class="off" style="height:4px"></i><i class="off" style="height:7px"></i><i class="off" style="height:10px"></i><i class="off" style="height:13px"></i></div>
+                  <div><div class="rname">Fritz!Box 7590</div></div>
+                  <div class="sp"></div><div class="rval">WPA3 · 2.4G</div><span class="pill up">22%</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="stack2">
+            <div>
+              <div class="grp-label">Devices</div>
+              <div class="group">
+                <div class="empty" style="padding:22px 18px">
+                  <div class="eic"><svg class="i"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L21 21"/></svg></div>
+                  Nothing paired yet
+                  <div class="ebtns"><div class="btn">Find devices</div></div>
+                </div>
+              </div>
+            </div>
+            <div>
+              <div class="grp-label">Hardware</div>
+              <div class="group">
+                <div class="row">
+                  <svg class="i sm"><path d="M3 8.5h18v8H3z"/><path d="M7 16.5v2.5M17 16.5v2.5"/></svg>
+                  <div><div class="rname">enp0s20f0u3u4</div></div>
+                  <div class="sp"></div><div class="rval">1 Gb/s</div>
+                </div>
+                <div class="row">
+                  <svg class="i sm"><path d="M2.5 9.5a15 15 0 0119 0"/><path d="M6 13a10 10 0 0112 0"/></svg>
+                  <div><div class="rname">wlan0</div></div>
+                  <div class="sp"></div><div class="rval">802.11ax</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="note"><b>What this costs in code:</b> a new row-based list and a two-column layout. The row components (<code>WifiNetworkItem</code>, <code>BluetoothDeviceItem</code>) are the closest fit here of the four, since they are already rows.</div>
+  </div>
+
+  <p class="lede" style="margin-top:10px">
+    Say the letter — <b>A</b>, <b>B</b>, <b>C</b> or <b>D</b> — or a mix like "A's status strip with C's layout",
+    and I'll build it against the real components.
+  </p>
+
+</div>
+</body>
+</html>

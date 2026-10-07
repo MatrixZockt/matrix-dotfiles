@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+# NoDisplay keeps this out of the launcher and the dock: it is a handler, not
+# an app. The desktop only ever sees it when resolving a double-clicked file
+# whose mime type it claims (see the MimeType line).
+Name=Run AppImage / executable
+Comment=Launches an AppImage or native executable when double-clicked in a file manager
+# $HOME is resolved at launch time by the caller's environment, so the entry
+# survives the repo being cloned to a different path on a fresh machine.
+Exec=bash -c 'exec "$HOME/.local/bin/appimage-run" "$@"' _ %f
+Terminal=false
+NoDisplay=true
+Icon=application-x-executable
+MimeType=application/vnd.appimage;application/x-executable;application/x-pie-executable;
+Categories=Utility;

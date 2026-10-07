@@ -1,0 +1,3 @@
+module qs.modules.taskmanager
+TaskManagerContent 1.0 TaskManagerContent.qml
+ProcessesView 1.0 ProcessesView.qml

@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Double-click handler for AppImages and loose executables.
+#
+# Why this exists: the shell's own file manager opens files with `gio open`,
+# and gio only launches a file when a registered default handler claims its
+# mime type. AppImages (application/vnd.appimage) and bare binaries
+# (application/x-executable, application/x-pie-executable) had no handler, so
+# a double-click did nothing at all. appimage-run.desktop points at this
+# script, and install.sh makes it the default for those types via
+# xdg-mime -- that registration in ~/.config/mimeapps.list is what makes the
+# behaviour permanent across logins and reboots.
+#
+# Behaviour is deliberately .exe-like: the executable bit is set if it is
+# missing, because browsers strip it on download and a downloaded app should
+# not require a chmod by hand.
+#
+# Called by gio with the file as $1. The Exec line in the desktop entry
+# resolves $HOME at launch time, so this works no matter where the repo is
+# cloned, as long as install.sh put the script on PATH.
+set -u
+
+f="${1:-}"
+[ -n "$f" ] || exit 2
+
+# Tolerate a file:// URI, just in case a caller hands one over: strip the
+# scheme and percent-decode (%20 -> space, ...) via printf's %b.
+case "$f" in
+    file://*)
+        f="${f#file://}"
+        f="$(printf '%b' "${f//%/\\x}")"
+        ;;
+esac
+case "$f" in /*) ;; *) f="$PWD/$f" ;; esac
+
+[ -f "$f" ] || exit 1
+
+# Windows-like convenience: a downloaded AppImage arrives without the +x bit.
+[ -x "$f" ] || chmod +x "$f" 2>/dev/null
+
+# exec: the AppImage replaces this process, so nothing lingers behind the app
+# and it inherits the file manager's session environment untouched.
+exec "$f"

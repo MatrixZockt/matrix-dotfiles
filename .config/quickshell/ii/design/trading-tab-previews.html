@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Now bar — Trading tab content designs</title>
+<style>
+  :root {
+    --bg: #0A0A0A; --lowest: #050505; --low: #121212; --cont: #161616;
+    --high: #1E1E1E; --highest: #262626;
+    --on: #E2E2E2; --onvar: #C6C6C6; --subtext: #9E9E9E;
+    --outline: #7E7E7E; --outlinevar: #3A3A3A;
+    --primary: #F0F0F0; --primaryhover: #FFFFFF; --onprimary: #0A0A0A;
+    --red: #E5484D; --red-soft: #F26B6F; --orange: #E6A23C; --yellow: #D4C04A;
+    --green: #46A758; --blue: #5B8DEF; --violet: #9A7BE0;
+    --sans: "Google Sans Flex", "Google Sans", system-ui, sans-serif;
+    --mono: "JetBrains Mono NF", "JetBrains Mono", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--lowest); color: var(--on);
+    font-family: var(--sans); font-size: 13px;
+    padding: 30px 0 80px; display: flex; flex-direction: column; align-items: center; gap: 34px;
+  }
+  .intro { max-width: 760px; text-align: center; color: var(--subtext); line-height: 1.65; }
+  .intro h1 { color: var(--on); font-size: 19px; font-weight: 500; margin-bottom: 8px; letter-spacing: .3px; }
+  .intro b { color: var(--on); }
+  .intro code { font-family: var(--mono); font-size: 11.5px; color: var(--onvar); }
+  .callout {
+    max-width: 760px; background: #1a1213; border: 1px solid #4a2626; border-left: 3px solid var(--red);
+    border-radius: 6px; padding: 13px 16px; text-align: left; color: var(--onvar);
+    font-size: 12.5px; line-height: 1.65;
+  }
+  .callout b { color: var(--red-soft); }
+  .callout.blue { background: #12161a; border-color: #26404a; border-left-color: var(--blue); }
+  .callout.blue b { color: var(--blue); }
+  .callout code { font-family: var(--mono); font-size: 11px; color: var(--on); }
+
+  h2.section { font-size: 13px; font-weight: 500; letter-spacing: .6px; text-transform: uppercase;
+               color: var(--subtext); margin-top: 8px; }
+  p.section-note { font-size: 12px; color: var(--subtext); max-width: 760px; text-align: center; line-height: 1.55; }
+
+  .grid { display: flex; gap: 20px; flex-wrap: wrap; justify-content: center; align-items: flex-start; max-width: 1180px; }
+  .card { background: var(--cont); border: 1px solid var(--outlinevar); border-radius: 10px; padding: 16px; width: 380px; }
+  .card.wide { width: 560px; }
+  .card.picked { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
+  .card h3 { font-size: 13px; font-weight: 500; }
+  .card .sub { font-size: 11px; color: var(--subtext); font-family: var(--mono); margin: 3px 0 12px; line-height: 1.45; }
+  .card p { font-size: 11.5px; color: var(--subtext); line-height: 1.6; margin-top: 12px; }
+  .card p b { color: var(--onvar); }
+  .pick { margin-top: 10px; background: var(--high); color: var(--on); border: 1px solid var(--outlinevar);
+          border-radius: 6px; padding: 5px 11px; font: inherit; font-size: 11.5px; cursor: pointer; }
+  .pick:hover { background: var(--highest); border-color: var(--outline); }
+
+  /* the island rest surface: the real bar tab is ~360px wide, 40px tall */
+  .island { background: var(--low); border: 1px solid var(--outlinevar); border-radius: 12px;
+            height: 44px; display: flex; align-items: center; padding: 0 12px; gap: 10px; overflow: hidden; }
+  .island .ticks { display: flex; gap: 4px; align-items: center; }
+  .island .tick { width: 5px; height: 5px; border-radius: 50%; background: var(--outlinevar); }
+  .island .tick.on { width: 14px; border-radius: 3px; background: var(--on); }
+
+  /* the expanded panel surface */
+  .panel { background: var(--low); border: 1px solid var(--outlinevar); border-radius: 14px; padding: 14px; }
+  .panel-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .panel-head .title { font-size: 13px; font-weight: 500; }
+  .panel-head .spacer { flex: 1; }
+  .chip { font-size: 10.5px; padding: 3px 8px; border-radius: 999px; background: var(--high);
+          color: var(--onvar); border: 1px solid var(--outlinevar); }
+  .chip.act { background: var(--primary); color: var(--onprimary); border-color: var(--primary); }
+
+  .folder { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+  .folder.hi { background: var(--red); }
+  .folder.md { background: var(--orange); }
+  .folder.lo { background: var(--yellow); }
+  .folder.hl { background: var(--subtext); }
+
+  /* A1 — countdown hero */
+  .count { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; padding: 1px 4px; }
+  .count .big { font-family: var(--mono); font-size: 16px; letter-spacing: .5px; color: var(--on); }
+  .count .cap { font-size: 9.5px; text-transform: uppercase; letter-spacing: .7px; color: var(--subtext); }
+  .ev-mini { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+  .ev-mini .cur { font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--on); }
+  .ev-mini .name { font-size: 11.5px; color: var(--onvar); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sparkwrap { display: flex; align-items: center; gap: 8px; }
+
+  /* event rows */
+  .feed { display: flex; flex-direction: column; gap: 2px; }
+  .ev { display: grid; grid-template-columns: 46px 1fr 74px; gap: 8px; align-items: center;
+        padding: 7px 8px; border-radius: 7px; background: var(--cont); }
+  .ev:hover { background: var(--high); }
+  .ev.now { background: #1d1416; box-shadow: inset 2px 0 0 var(--red); }
+  .ev .t { font-family: var(--mono); font-size: 11px; color: var(--subtext); }
+  .ev .body { display: flex; align-items: center; gap: 7px; min-width: 0; }
+  .ev .cur { font-family: var(--mono); font-size: 10.5px; font-weight: 700; color: var(--onvar);
+             background: var(--highest); border-radius: 4px; padding: 2px 5px; flex: none; }
+  .ev .nm { font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ev .nums { text-align: right; font-family: var(--mono); font-size: 10.5px; color: var(--subtext); }
+  .ev .nums .act { color: var(--green); font-weight: 700; }
+  .ev .nums .act.bad { color: var(--red-soft); }
+
+  /* B2 heatmap */
+  .heat { display: grid; grid-template-columns: 30px repeat(5, 1fr); gap: 3px; }
+  .heat .h { font-size: 9.5px; color: var(--subtext); text-align: center; }
+  .heat .rh { font-size: 9.5px; color: var(--subtext); font-family: var(--mono); align-self: center; }
+  .heat .cell { height: 22px; border-radius: 4px; background: var(--cont); position: relative; }
+  .heat .cell.hi { background: color-mix(in srgb, var(--red) 62%, var(--cont)); }
+  .heat .cell.md { background: color-mix(in srgb, var(--orange) 42%, var(--cont)); }
+  .heat .cell.lo { background: color-mix(in srgb, var(--yellow) 26%, var(--cont)); }
+  .heat .cell span { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+                     font-family: var(--mono); font-size: 9px; color: var(--on); }
+
+  /* B3 watchlist */
+  .watch { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .tile { background: var(--cont); border-radius: 8px; padding: 9px 10px; }
+  .tile .top { display: flex; justify-content: space-between; align-items: baseline; }
+  .tile .sym { font-family: var(--mono); font-size: 11px; font-weight: 700; }
+  .tile .px { font-family: var(--mono); font-size: 13px; }
+  .tile .chg { font-family: var(--mono); font-size: 10.5px; }
+  .tile .chg.up { color: var(--green); } .tile .chg.dn { color: var(--red-soft); }
+
+  /* B4 sessions */
+  .sess { display: flex; flex-direction: column; gap: 5px; }
+  .sess-row { display: grid; grid-template-columns: 62px 1fr; gap: 8px; align-items: center; }
+  .sess-row .lb { font-size: 10.5px; color: var(--subtext); }
+  .sess-track { position: relative; height: 14px; background: var(--cont); border-radius: 4px; overflow: hidden; }
+  .sess-band { position: absolute; top: 0; bottom: 0; border-radius: 4px; opacity: .85; }
+  .nowline { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--primary); border-radius: 2px; }
+  .sess-axis { display: flex; justify-content: space-between; font-family: var(--mono);
+               font-size: 9px; color: var(--subtext); margin: 4px 0 0 70px; }
+
+  /* B5 strength */
+  .strength { display: flex; flex-direction: column; gap: 6px; }
+  .st { display: grid; grid-template-columns: 34px 1fr 40px; gap: 8px; align-items: center; }
+  .st .c { font-family: var(--mono); font-size: 11px; font-weight: 700; }
+  .st .bar { height: 12px; background: var(--cont); border-radius: 4px; position: relative; overflow: hidden; }
+  .st .bar i { position: absolute; top: 0; bottom: 0; border-radius: 4px; }
+  .st .v { font-family: var(--mono); font-size: 10.5px; text-align: right; color: var(--subtext); }
+
+  .stack { display: flex; flex-direction: column; gap: 10px; }
+  .divider { height: 1px; background: var(--outlinevar); margin: 4px 0; }
+  .foot { max-width: 760px; text-align: center; color: var(--subtext); font-size: 12px; line-height: 1.6; }
+  .foot code { font-family: var(--mono); font-size: 11px; color: var(--onvar); }
+  #tag { position: fixed; left: 50%; transform: translateX(-50%); bottom: 14px;
+         background: var(--highest); border: 1px solid var(--outline); color: var(--on);
+         font-size: 11.5px; padding: 7px 14px; border-radius: 999px; opacity: 0; transition: opacity .2s; }
+  #tag.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div class="intro">
+  <h1>Trading tab — content display designs</h1>
+  <p>A new tab for the top-middle <b>NowBar island</b>, and the expanded <b>NowBarPanel</b> card it
+  pops out. The subject is <b>today's red-folder economic calendar</b> — the high-impact releases
+  (rate decisions, CPI, NFP, FOMC) that move price — plus a few glanceable market readouts.
+  Every mock below is drawn at the shell's own palette and type scale.</p>
+</div>
+
+<div class="callout">
+  <b>Red folder, defined.</b> ForexFactory-style impact tiers: <b>red</b> = high impact, orange = medium,
+  yellow = low, grey = holiday. The tab is built around the red tier and uses the other tiers only as
+  quiet context. Each event carries <code>time · currency · name · forecast · previous · actual</code>.
+</div>
+
+<div class="callout blue">
+  <b>Where the data comes from (for the build step, not this preview).</b> An economic-calendar JSON feed
+  polled on a timer — the community ForexFactory mirror, Trading Economics, Finnhub or FMP all serve the
+  same shape — plus a quote feed for the watchlist, sessions and sparklines. The designs below assume one
+  refresh function per panel and a 1-minute cadence; nothing here needs a websocket.
+</div>
+
+<!-- ─────────────────────────────── ISLAND REST STATES ─────────────────────────────── -->
+<h2 class="section">A · island rest state (≈360 px wide, 40 px tall)</h2>
+<p class="section-note">What the tab shows when it is the resting view and the card is closed. Two ideas:
+count down to the next red event, or carry a live ticker.</p>
+
+<div class="grid">
+
+  <div class="card">
+    <h3>A1 · Next-event countdown</h3>
+    <div class="sub">island: [folder] CURRENCY · name · MM:SS</div>
+    <div class="island">
+      <div class="count">
+        <div class="big">−02:14:07</div>
+        <div class="cap">next red</div>
+      </div>
+      <div class="ev-mini">
+        <span class="folder hi"></span>
+        <span class="cur">USD</span>
+        <span class="name">FOMC Meeting Minutes</span>
+      </div>
+      <div class="sparkwrap">
+        <svg width="46" height="18" viewBox="0 0 46 18"><polyline fill="none" stroke="#5B8DEF" stroke-width="1.4"
+          points="0,13 6,11 12,12 18,9 24,10 30,7 36,8 42,5 46,6"/></svg>
+        <div class="ticks"><i class="tick"></i><i class="tick"></i><i class="tick on"></i><i class="tick"></i></div>
+      </div>
+    </div>
+    <p><b>Why:</b> the single most useful number a trader wants at a glance is “how long until the next red
+    release”. No reading required, and it survives a 360 px island because the name just ellipsises.
+    The <b>sparkline + ticks</b> on the right keep the bar alive between events.</p>
+    <button class="pick" onclick="pick(this,'A1 · Next-event countdown')">Choose this</button>
+  </div>
+
+  <div class="card">
+    <h3>A2 · Live ticker + session chip</h3>
+    <div class="sub">island: scrolling instrument · px · Δ% · session dot</div>
+    <div class="island">
+      <div class="ev-mini">
+        <span class="cur">DXY</span>
+        <span class="name">107.42</span>
+        <span class="chip" style="border-color:#3a4a36;color:#8fd39a">▲ 0.31%</span>
+      </div>
+      <div class="spacer" style="flex:1"></div>
+      <svg width="60" height="20" viewBox="0 0 60 20"><polyline fill="none" stroke="#46A758" stroke-width="1.4"
+        points="0,15 8,14 16,15 24,11 32,12 40,8 48,9 60,5"/></svg>
+      <span class="chip">LDN open</span>
+    </div>
+    <p><b>Why:</b> reads like a mini Bloomberg strip. Cycles the watchlist. Pairs naturally with the
+    auto-rotation logic the island already has (timer &gt; sound &gt; rest); trading would sit alongside,
+    and the session chip answers “which desk is awake”.</p>
+    <button class="pick" onclick="pick(this,'A2 · Live ticker + session chip')">Choose this</button>
+  </div>
+
+</div>
+
+<!-- ─────────────────────────────── EXPANDED PANEL LAYOUTS ─────────────────────────────── -->
+<h2 class="section">B · expanded card (the NowBarPanel pop-out)</h2>
+<p class="section-note">Each option is one way to lay out the same four ingredients: the day's red events,
+the next-event countdown, a market glance, and session timing.</p>
+
+<div class="grid">
+
+  <div class="card wide">
+    <h3>B1 · Calendar feed <span style="color:var(--subtext);font-weight:400">(the core view)</span></h3>
+    <div class="sub">ColumnLayout of EventRow · impact rail · live "now" marker · actual-vs-forecast colour</div>
+    <div class="panel">
+      <div class="panel-head">
+        <span class="folder hi"></span><span class="title">Today · high impact</span>
+        <div class="spacer"></div>
+        <span class="chip act">Red</span><span class="chip">All</span><span class="chip">Watch</span>
+      </div>
+      <div class="feed">
+        <div class="ev"><div class="t">08:30</div>
+          <div class="body"><span class="folder hi"></span><span class="cur">EUR</span><span class="nm">ECB President Lagarde Speaks</span></div>
+          <div class="nums">—</div></div>
+        <div class="ev"><div class="t">10:00</div>
+          <div class="body"><span class="folder md"></span><span class="cur">EUR</span><span class="nm">German Factory Orders m/m</span></div>
+          <div class="nums">−1.2% <span style="color:var(--subtext)">/ −2.4%</span></div></div>
+        <div class="ev now"><div class="t">12:30</div>
+          <div class="body"><span class="folder hi"></span><span class="cur">USD</span><span class="nm">Core CPI m/m</span></div>
+          <div class="nums"><span class="act bad">0.4%</span> / 0.3%</div></div>
+        <div class="ev"><div class="t">14:00</div>
+          <div class="body"><span class="folder hi"></span><span class="cur">USD</span><span class="nm">FOMC Member Waller Speaks</span></div>
+          <div class="nums">—</div></div>
+        <div class="ev"><div class="t">14:30</div>
+          <div class="body"><span class="folder lo"></span><span class="cur">USD</span><span class="nm">Crude Oil Inventories</span></div>
+          <div class="nums">+1.1M / +0.7M</div></div>
+        <div class="ev"><div class="t">18:00</div>
+          <div class="body"><span class="folder hi"></span><span class="cur">USD</span><span class="nm">FOMC Meeting Minutes</span></div>
+          <div class="nums">—</div></div>
+      </div>
+    </div>
+    <p><b>Why:</b> the honest default. The <b>red folder</b> is the left rail and the row order is the clock,
+    so the day reads top-to-bottom. The live row gets a tinted background and a red edge; <b>actual</b>
+    turns green/red the moment it prints, which is the whole reason to keep the card open.
+    A <code>now</code> divider scrolls with the clock.</p>
+    <button class="pick" onclick="pick(this,'B1 · Calendar feed')">Choose this</button>
+  </div>
+
+  <div class="card wide">
+    <h3>B2 · Impact heatmap (the week)</h3>
+    <div class="sub">Grid 5 days × 6 time-bands · cell tint = impact · count printed in cell</div>
+    <div class="panel">
+      <div class="panel-head"><span class="title">Week of Oct 5</span><div class="spacer"></div>
+        <span class="chip">6 – 12 Oct</span><span class="chip act">Impact</span></div>
+      <div class="heat">
+        <div class="rh"></div><div class="h">Mon</div><div class="h">Tue</div><div class="h">Wed</div><div class="h">Thu</div><div class="h">Fri</div>
+        <div class="rh">00</div><div class="cell lo"><span>1</span></div><div class="cell"></div><div class="cell lo"><span>2</span></div><div class="cell"></div><div class="cell lo"><span>1</span></div>
+        <div class="rh">04</div><div class="cell"></div><div class="cell md"><span>1</span></div><div class="cell"></div><div class="cell md"><span>2</span></div><div class="cell"></div>
+        <div class="rh">08</div><div class="cell md"><span>2</span></div><div class="cell hi"><span>1</span></div><div class="cell md"><span>1</span></div><div class="cell hi"><span>2</span></div><div class="cell hi"><span>1</span></div>
+        <div class="rh">12</div><div class="cell hi"><span>1</span></div><div class="cell hi"><span>2</span></div><div class="cell md"><span>1</span></div><div class="cell hi"><span>2</span></div><div class="cell hi"><span>3</span></div>
+        <div class="rh">16</div><div class="cell lo"><span>1</span></div><div class="cell md"><span>1</span></div><div class="cell"></div><div class="cell md"><span>2</span></div><div class="cell md"><span>1</span></div>
+        <div class="rh">20</div><div class="cell"></div><div class="cell"></div><div class="cell lo"><span>1</span></div><div class="cell"></div><div class="cell"></div>
+      </div>
+    </div>
+    <p><b>Why:</b> turns the calendar into a picture. You can see the week's <b>red clusters</b> — typically
+    the London and New York opens — without reading a single label, then click a cell to drop into B1
+    filtered to that slot. Best as a secondary view behind B1.</p>
+    <button class="pick" onclick="pick(this,'B2 · Impact heatmap')">Choose this</button>
+  </div>
+
+  <div class="card wide">
+    <h3>B3 · Watchlist grid + sparklines</h3>
+    <div class="sub">Grid 3×2 tiles · symbol · price · Δ% · 24 h sparkline</div>
+    <div class="panel">
+      <div class="panel-head"><span class="title">Watchlist</span><div class="spacer"></div>
+        <span class="chip act">Mine</span><span class="chip">Movers</span></div>
+      <div class="watch">
+        <div class="tile"><div class="top"><span class="sym">DXY</span><span class="px">107.42</span></div>
+          <svg width="100%" height="22" viewBox="0 0 100 22" preserveAspectRatio="none"><polyline fill="none" stroke="#46A758" stroke-width="1.6" points="0,16 12,15 24,17 36,12 48,13 60,9 72,10 84,7 100,6"/></svg>
+          <div class="chg up">▲ 0.31%</div></div>
+        <div class="tile"><div class="top"><span class="sym">EUR/USD</span><span class="px">1.0912</span></div>
+          <svg width="100%" height="22" viewBox="0 0 100 22" preserveAspectRatio="none"><polyline fill="none" stroke="#F26B6F" stroke-width="1.6" points="0,6 12,7 24,6 36,10 48,9 60,12 72,11 84,15 100,16"/></svg>
+          <div class="chg dn">▼ 0.42%</div></div>
+        <div class="tile"><div class="top"><span class="sym">XAU/USD</span><span class="px">2 648</span></div>
+          <svg width="100%" height="22" viewBox="0 0 100 22" preserveAspectRatio="none"><polyline fill="none" stroke="#46A758" stroke-width="1.6" points="0,14 12,12 24,13 36,10 48,11 60,8 72,9 84,6 100,4"/></svg>
+          <div class="chg up">▲ 0.78%</div></div>
+        <div class="tile"><div class="top"><span class="sym">US10Y</span><span class="px">4.21%</span></div>
+          <svg width="100%" height="22" viewBox="0 0 100 22" preserveAspectRatio="none"><polyline fill="none" stroke="#46A758" stroke-width="1.6" points="0,17 12,16 24,14 36,15 48,11 60,12 72,9 84,8 100,7"/></svg>
+          <div class="chg up">▲ 6 bp</div></div>
+        <div class="tile"><div class="top"><span class="sym">ES</span><span class="px">5 812</span></div>
+          <svg width="100%" height="22" viewBox="0 0 100 22" preserveAspectRatio="none"><polyline fill="none" stroke="#46A758" stroke-width="1.6" points="0,13 12,14 24,11 36,12 48,10 60,7 72,8 84,5 100,5"/></svg>
+          <div class="chg up">▲ 0.19%</div></div>
+        <div class="tile"><div class="top"><span class="sym">BTC</span><span class="px">63 210</span></div>
+          <svg width="100%" height="22" viewBox="0 0 100 22" preserveAspectRatio="none"><polyline fill="none" stroke="#F26B6F" stroke-width="1.6" points="0,7 12,9 24,8 36,11 48,12 60,10 72,14 84,13 100,15"/></svg>
+          <div class="chg dn">▼ 1.04%</div></div>
+      </div>
+    </div>
+    <p><b>Why:</b> the “other things” half of the request, and the most graphical. Sparklines are drawn
+    with the shell's own <code>Canvas</code> or a <code>Shape</code> path — no charting dependency. Six tiles
+    is the sweet spot for the card width; a red number should never be the only red on the panel.</p>
+    <button class="pick" onclick="pick(this,'B3 · Watchlist grid')">Choose this</button>
+  </div>
+
+  <div class="card wide">
+    <h3>B4 · Session clock (24 h arc)</h3>
+    <div class="sub">Four session bands on a UTC axis · now marker · overlaps highlighted</div>
+    <div class="panel">
+      <div class="panel-head"><span class="title">Market sessions</span><div class="spacer"></div>
+        <span class="chip">UTC</span><span class="chip act">Local</span></div>
+      <div class="sess">
+        <div class="sess-row"><div class="lb">Sydney</div><div class="sess-track">
+          <div class="sess-band" style="left:87%;width:25%;background:#6b6b6b"></div>
+          <div class="sess-band" style="left:0;width:25%;background:#6b6b6b"></div></div></div>
+        <div class="sess-row"><div class="lb">Tokyo</div><div class="sess-track">
+          <div class="sess-band" style="left:0;width:37%;background:#5B8DEF"></div></div></div>
+        <div class="sess-row"><div class="lb">London</div><div class="sess-track">
+          <div class="sess-band" style="left:29%;width:38%;background:#9A7BE0"></div></div></div>
+        <div class="sess-row"><div class="lb">New York</div><div class="sess-track">
+          <div class="sess-band" style="left:50%;width:38%;background:#46A758"></div>
+          <div class="nowline" style="left:59%"></div></div></div>
+      </div>
+      <div class="sess-axis"><span>00</span><span>06</span><span>12</span><span>18</span><span>24</span></div>
+    </div>
+    <p><b>Why:</b> answers “who is trading right now, and where is the liquidity”. The <b>London × New York
+    overlap</b> (the purple/green band collision) is where red-folder releases hurt most, so pairing it with
+    B1 makes the day legible. The now marker is a single line — cheap to animate.</p>
+    <button class="pick" onclick="pick(this,'B4 · Session clock')">Choose this</button>
+  </div>
+
+  <div class="card wide">
+    <h3>B5 · Currency strength meter</h3>
+    <div class="sub">Derived bars, one per major · signed, centred on zero</div>
+    <div class="panel">
+      <div class="panel-head"><span class="title">Strength · today</span><div class="spacer"></div>
+        <span class="chip">8 majors</span><span class="chip act">From events</span></div>
+      <div class="strength">
+        <div class="st"><span class="c">USD</span><div class="bar"><i style="left:50%;width:31%;background:var(--green)"></i></div><span class="v">+3.1</span></div>
+        <div class="st"><span class="c">EUR</span><div class="bar"><i style="right:50%;width:22%;background:var(--red-soft)"></i></div><span class="v">−2.2</span></div>
+        <div class="st"><span class="c">GBP</span><div class="bar"><i style="left:50%;width:9%;background:var(--green)"></i></div><span class="v">+0.9</span></div>
+        <div class="st"><span class="c">JPY</span><div class="bar"><i style="right:50%;width:27%;background:var(--red-soft)"></i></div><span class="v">−2.7</span></div>
+        <div class="st"><span class="c">AUD</span><div class="bar"><i style="left:50%;width:4%;background:var(--green)"></i></div><span class="v">+0.4</span></div>
+        <div class="st"><span class="c">CAD</span><div class="bar"><i style="right:50%;width:11%;background:var(--red-soft)"></i></div><span class="v">−1.1</span></div>
+        <div class="st"><span class="c">CHF</span><div class="bar"><i style="left:50%;width:6%;background:var(--green)"></i></div><span class="v">+0.6</span></div>
+        <div class="st"><span class="c">NZD</span><div class="bar"><i style="right:50%;width:8%;background:var(--red-soft)"></i></div><span class="v">−0.8</span></div>
+      </div>
+    </div>
+    <p><b>Why:</b> the purest “graphical information” answer — every major on one axis, signed around a zero
+    line, so the pairs you should be watching fall out of the shape. Could be computed from the day's
+    quote moves, or from event surprises; the label says which.</p>
+    <button class="pick" onclick="pick(this,'B5 · Currency strength meter')">Choose this</button>
+  </div>
+
+</div>
+
+<!-- ─────────────────────────────── COMBINED ─────────────────────────────── -->
+<h2 class="section">C · the composed tab</h2>
+<p class="section-note">If the tab scrolls, this is the order: the thing you came for first, context after.</p>
+
+<div class="grid">
+  <div class="card wide">
+    <h3>C1 · Countdown → calendar → glance</h3>
+    <div class="sub">StackLayout: hero countdown · B1 feed · divider · B4 sessions · B3 watchlist</div>
+    <div class="panel stack">
+      <div class="panel-head"><span class="title">Trading</span><div class="spacer"></div>
+        <span class="chip">Red</span><span class="chip act">Today</span></div>
+      <div style="display:flex;align-items:center;gap:12px;background:var(--cont);border-radius:9px;padding:10px 12px">
+        <div class="count"><div class="big">−02:14:07</div><div class="cap">next red · USD</div></div>
+        <div class="spacer" style="flex:1"></div>
+        <span class="folder hi"></span><span style="font-size:11.5px">FOMC Meeting Minutes</span>
+      </div>
+      <div class="feed">
+        <div class="ev now"><div class="t">12:30</div>
+          <div class="body"><span class="folder hi"></span><span class="cur">USD</span><span class="nm">Core CPI m/m</span></div>
+          <div class="nums"><span class="act bad">0.4%</span> / 0.3%</div></div>
+        <div class="ev"><div class="t">14:00</div>
+          <div class="body"><span class="folder hi"></span><span class="cur">USD</span><span class="nm">FOMC Member Waller Speaks</span></div>
+          <div class="nums">—</div></div>
+        <div class="ev"><div class="t">18:00</div>
+          <div class="body"><span class="folder hi"></span><span class="cur">USD</span><span class="nm">FOMC Meeting Minutes</span></div>
+          <div class="nums">—</div></div>
+      </div>
+      <div class="divider"></div>
+      <div class="sess">
+        <div class="sess-row"><div class="lb">London</div><div class="sess-track"><div class="sess-band" style="left:29%;width:38%;background:#9A7BE0"></div></div></div>
+        <div class="sess-row"><div class="lb">New York</div><div class="sess-track"><div class="sess-band" style="left:50%;width:38%;background:#46A758"></div><div class="nowline" style="left:59%"></div></div></div>
+      </div>
+      <div class="divider"></div>
+      <div class="watch" style="grid-template-columns:repeat(3,1fr)">
+        <div class="tile"><div class="top"><span class="sym">DXY</span><span class="px">107.42</span></div>
+          <div class="chg up">▲ 0.31%</div></div>
+        <div class="tile"><div class="top"><span class="sym">EUR/USD</span><span class="px">1.0912</span></div>
+          <div class="chg dn">▼ 0.42%</div></div>
+        <div class="tile"><div class="top"><span class="sym">XAU</span><span class="px">2 648</span></div>
+          <div class="chg up">▲ 0.78%</div></div>
+      </div>
+    </div>
+    <p><b>Why:</b> a defensible full tab. The countdown is hero, the red calendar is the body, and the
+    sessions + watchlist are the footer you scroll to only when you want them. Swap A1 for A2 if the
+    island should ticker when the card is shut.</p>
+    <button class="pick" onclick="pick(this,'C1 · Composed tab')">Choose this</button>
+  </div>
+</div>
+
+<p class="foot">Once you pick, the build is: a <code>TradingService</code> (calendar + quotes, one refresh
+timer), a <code>TradingView</code> for the island, a tab in <code>NowBarPanel</code>, and a fifth
+<code>mode</code> in <code>NowBar.qml</code>'s ring. Nothing here needs a new dependency —
+sparklines and the session arc are plain <code>Shape</code>/<code>Canvas</code>.</p>
+
+<div id="tag"></div>
+<script>
+  let t;
+  function pick(btn, name) {
+    document.querySelectorAll('.card').forEach(c => c.classList.remove('picked'));
+    btn.closest('.card').classList.add('picked');
+    const tag = document.getElementById('tag');
+    tag.textContent = 'chosen: ' + name;
+    tag.classList.add('show');
+    clearTimeout(t);
+    t = setTimeout(() => tag.classList.remove('show'), 2600);
+  }
+</script>
+</body>
+</html>

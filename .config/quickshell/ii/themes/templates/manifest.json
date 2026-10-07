@@ -1,0 +1,137 @@
+{
+  "generatedBy": "themes/build_templates.py",
+  "templates": [
+    {
+      "slug": "tokyo-night",
+      "name": "Tokyo Night",
+      "seed": "#7AA2F7",
+      "scheme": "scheme-vibrant",
+      "description": "Cool cobalt blue on deep navy. The everyday default.",
+      "palettes": {
+        "dark": "tokyo-night-dark.json",
+        "light": "tokyo-night-light.json"
+      }
+    },
+    {
+      "slug": "catppuccin",
+      "name": "Catppuccin",
+      "seed": "#CBA6F7",
+      "scheme": "scheme-fidelity",
+      "description": "Soft mauve pastels. Gentle contrast, easy on the eyes.",
+      "palettes": {
+        "dark": "catppuccin-dark.json",
+        "light": "catppuccin-light.json"
+      }
+    },
+    {
+      "slug": "dracula",
+      "name": "Dracula",
+      "seed": "#BD93F9",
+      "scheme": "scheme-expressive",
+      "description": "High-chroma violet with punchy containers.",
+      "palettes": {
+        "dark": "dracula-dark.json",
+        "light": "dracula-light.json"
+      }
+    },
+    {
+      "slug": "gruvbox",
+      "name": "Gruvbox",
+      "seed": "#D79921",
+      "scheme": "scheme-vibrant",
+      "description": "Warm amber and olive. Retro terminal warmth.",
+      "palettes": {
+        "dark": "gruvbox-dark.json",
+        "light": "gruvbox-light.json"
+      }
+    },
+    {
+      "slug": "everforest",
+      "name": "Everforest",
+      "seed": "#A7C080",
+      "scheme": "scheme-tonal-spot",
+      "description": "Muted forest green. Calm and low-energy.",
+      "palettes": {
+        "dark": "everforest-dark.json",
+        "light": "everforest-light.json"
+      }
+    },
+    {
+      "slug": "kanagawa",
+      "name": "Kanagawa",
+      "seed": "#7E9CD8",
+      "scheme": "scheme-content",
+      "description": "Indigo ink, faithful to the seed. Quiet and precise.",
+      "palettes": {
+        "dark": "kanagawa-dark.json",
+        "light": "kanagawa-light.json"
+      }
+    },
+    {
+      "slug": "nord",
+      "name": "Nord Frost",
+      "seed": "#88C0D0",
+      "scheme": "scheme-content",
+      "description": "Arctic cyan-grey. Cold, clean, low saturation.",
+      "palettes": {
+        "dark": "nord-dark.json",
+        "light": "nord-light.json"
+      }
+    },
+    {
+      "slug": "rose-pine",
+      "name": "Ros\u00e9 Pine",
+      "seed": "#EBBCBA",
+      "scheme": "scheme-tonal-spot",
+      "description": "Dusty rose with soft neutrals. Warm and soft.",
+      "palettes": {
+        "dark": "rose-pine-dark.json",
+        "light": "rose-pine-light.json"
+      }
+    },
+    {
+      "slug": "ash",
+      "name": "Ash",
+      "seed": "#9A9A9A",
+      "scheme": "scheme-monochrome",
+      "description": "Pure greyscale, no hue at all. The quietest option.",
+      "palettes": {
+        "dark": "ash-dark.json",
+        "light": "ash-light.json"
+      }
+    },
+    {
+      "slug": "neon",
+      "name": "Neon",
+      "seed": "#FF2E97",
+      "scheme": "scheme-fruit-salad",
+      "description": "Hot magenta with playful multicolour accents.",
+      "palettes": {
+        "dark": "neon-dark.json",
+        "light": "neon-light.json"
+      }
+    },
+    {
+      "slug": "emerald",
+      "name": "Emerald",
+      "seed": "#10B981",
+      "scheme": "scheme-vibrant",
+      "description": "Deep teal emerald. Fresh and saturated.",
+      "palettes": {
+        "dark": "emerald-dark.json",
+        "light": "emerald-light.json"
+      }
+    },
+    {
+      "slug": "solar",
+      "name": "Solar",
+      "seed": "#F59E0B",
+      "scheme": "scheme-expressive",
+      "description": "Sunset orange. The warmest of the set.",
+      "palettes": {
+        "dark": "solar-dark.json",
+        "light": "solar-light.json"
+      }
+    }
+  ]
+}

@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# session-doctor -- one screen of plain-English answers about a fresh login.
+#
+# Built for the moment right after logging back in, when the questions are
+# always the same and always need four terminals to answer:
+#   * did the shell come up, and with a real display?
+#   * is the Razer app alive, or did it die silently again?
+#   * did the GPU pin work -- is the 4070 finally asleep?
+#   * did the login screen stop complaining?
+#
+# Read-only: it inspects and prints, and changes nothing. Safe to run at any
+# time, including when something is broken.
+set -u
+
+bold=$'\033[1m'; dim=$'\033[2m'; red=$'\033[31m'; grn=$'\033[32m'; yel=$'\033[33m'; off=$'\033[0m'
+[ -t 1 ] || { bold=; dim=; red=; grn=; yel=; off=; }
+
+ok()   { printf '  %sOK%s    %s\n' "$grn" "$off" "$1"; }
+warn() { printf '  %sWARN%s  %s\n' "$yel" "$off" "$1"; }
+bad()  { printf '  %sFAIL%s  %s\n' "$red" "$off" "$1"; }
+note() { printf '        %s%s%s\n' "$dim" "$1" "$off"; }
+
+echo
+echo "${bold}── session health ────────────────────────────────────────${off}"
+
+# ── The session this script is running in ────────────────────────────────
+if WD="$(~/.local/bin/session-env 2>/dev/null | sed -n 's/^WAYLAND_DISPLAY=//p')" && [ -n "$WD" ]; then
+    ok "live compositor found on $WD"
+else
+    bad "no live compositor -- is this a TTY? (fine, just not a desktop session)"
+    WD=""
+fi
+if [ -n "${WAYLAND_DISPLAY:-}" ] && [ "${WAYLAND_DISPLAY}" != "$WD" ]; then
+    note "inherited WAYLAND_DISPLAY=$WAYLAND_DISPLAY is stale; live one is $WD"
+fi
+
+# ── The shell ────────────────────────────────────────────────────────────
+n_qs=$(pgrep -c -x qs 2>/dev/null || echo 0)
+if [ "$n_qs" -eq 1 ]; then
+    ok "shell running (1 quickshell process)"
+elif [ "$n_qs" -gt 1 ]; then
+    warn "$n_qs quickshell processes -- duplicate bars, run: scripts/reset-shell.sh"
+else
+    bad "shell is not running"
+    note "check: /tmp/shell-watchdog.log and /tmp/ii_shell.log"
+fi
+
+# ── The Razer app ────────────────────────────────────────────────────────
+for unit in razer-command-center.service openrazer-daemon.service shell-watchdog.service; do
+    state=$(systemctl --user is-active "$unit" 2>/dev/null)
+    case "$state" in
+        active) ok "$unit active" ;;
+        inactive) bad "$unit inactive" ;;
+        *) warn "$unit ${state:-unknown}" ;;
+    esac
+done
+
+# ── Did the GPU pin work? ────────────────────────────────────────────────
+echo
+echo "${bold}── GPU ───────────────────────────────────────────────────${off}"
+if [ -z "$WD" ]; then
+    note "skipped (no desktop session)"
+else
+    # Count nvidia fds held by the compositor. This is THE number: the whole
+    # point of AQ_DRM_DEVICES is that Hyprland never opens the 4070, so zero
+    # here means the pin took and the dGPU can power down.
+    hp=$(pgrep -x Hyprland | head -1)
+    if [ -n "$hp" ]; then
+        if tr '\0' '\n' < "/proc/$hp/environ" 2>/dev/null | grep -q AQ_DRM_DEVICES; then
+            pin=$(tr '\0' '\n' < "/proc/$hp/environ" 2>/dev/null | sed -n 's/^AQ_DRM_DEVICES=//p')
+            note "compositor was started with AQ_DRM_DEVICES=$pin"
+        else
+            note "no AQ_DRM_DEVICES in the compositor's environment"
+        fi
+        fds=$(ls -l "/proc/$hp/fd" 2>/dev/null | grep -c nvidia)
+        if [ "$fds" -eq 0 ]; then
+            ok "Hyprland holds 0 nvidia fds -- the 4070 can idle"
+        else
+            warn "Hyprland still holds $fds nvidia fds"
+            if tr '\0' '\n' < "/proc/$hp/environ" 2>/dev/null | grep -q AQ_DRM_DEVICES; then
+                note "the pin WAS set but Hyprland opened the 4070 anyway"
+                note "-> the value is being read too late, or is being ignored"
+            else
+                note "the pin never reached the compositor; ~4 W is being spent"
+                note "expected source: ~/.config/fish/conf.d/aq-drm-devices.fish"
+            fi
+        fi
+    fi
+    if [ -n "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null)" ]; then
+        note "nvidia-smi reports active compute clients:"
+        nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader 2>/dev/null | sed 's/^/        /'
+    fi
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        note "power now: $(nvidia-smi --query-gpu=power.draw,pstate --format=csv,noheader 2>/dev/null)"
+    fi
+fi
+
+# ── Did the login screen stop complaining? ───────────────────────────────
+echo
+echo "${bold}── login screen ─────────────────────────────────────────${off}"
+# The greeter's QML warnings go to the JOURNAL, not to /var/log/sddm.log --
+# that file does not exist on this system, and grepping it reported "clean"
+# no matter what the greeter had actually said. Read the real thing: the
+# greeter is a system unit, so the system journal is where its output lands.
+GREETER_ERR="Property value set multiple times"
+n_greeter=$(journalctl -b --no-pager 2>/dev/null | grep -c "$GREETER_ERR" || true)
+if [ "${n_greeter:-0}" -gt 0 ]; then
+    warn "greeter logged '$GREETER_ERR' ${n_greeter}x this boot"
+    note "the fix is written to ~/.config/hypr/custom/sddm-theme/Main.qml"
+    note "but the live copy still needs (this needs sudo):"
+    note "  sudo install -m 0644 ~/.config/hypr/custom/sddm-theme/Main.qml \\"
+    note "       /usr/share/sddm/themes/ii/Main.qml"
+else
+    ok "no duplicate-property error from the greeter"
+fi
+if [ -e /usr/share/wayland-sessions/hyprland-uwsm.desktop ] && ! command -v uwsm >/dev/null 2>&1; then
+    warn "hyprland-uwsm.desktop is offered but uwsm is not installed"
+    note "if the greeter ever picks it, login fails with no session:"
+    note "  sudo rm -f /usr/share/wayland-sessions/hyprland-uwsm.desktop"
+else
+    ok "no unlaunchable session entries"
+fi
+
+# ── Leftovers ────────────────────────────────────────────────────────────
+n_nmcli=$(pgrep -c nmcli 2>/dev/null || echo 0)
+if [ "$n_nmcli" -gt 3 ]; then
+    warn "$n_nmcli 'nmcli monitor' processes (expect 1)"
+    note "the shell reaps its own; these are from crashed instances"
+else
+    ok "no leaked nmcli watchers"
+fi
+
+echo

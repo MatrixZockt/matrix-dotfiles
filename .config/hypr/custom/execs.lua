@@ -1,0 +1,139 @@
+-- Your own autostart programs.
+--
+-- Inside the "hyprland.start" hook = starts once, when you log in:
+-- hl.on("hyprland.start", function()
+--     hl.exec_cmd("nextcloud")
+-- end)
+--
+-- Outside the hook = runs immediately, on every config reload:
+-- hl.exec_cmd("some-daemon")
+
+-- ── Why the shell launch is NOT in a `hl.on("hyprland.start")` hook ──────
+--
+-- Hyprland's Lua port keeps ONE handler per event: the first registration
+-- wins and later ones are dropped. hyprland/execs.lua registers
+-- "hyprland.start" first, so the hook that used to live here NEVER ran -- the
+-- proof is in the process list after a login: that file's two
+-- `wl-paste --type ... --watch` watchers are running, while the
+-- `wl-paste --watch cliphist store` line that sat beside the shell launch in
+-- this very hook was nowhere to be found. Two consequences: the old external
+-- file manager chain and (later) the shell launcher were both dead code, and
+-- the desktop came up as a bare compositor with no bar, no sidebars and no
+-- popup apps -- which reads as "my Hyprland configs stopped loading".
+--
+-- File scope is the fix. Statements outside a hook run every time the config
+-- is parsed, including the very first parse at login, and `hl.exec_cmd`
+-- spawns the child from Hyprland itself, so it survives whatever ran the
+-- config. Everything started here must therefore be idempotent: shell.sh
+-- exits immediately when a `qs -c ii` is already alive, so a config reload
+-- can never stack a second bar, and if the shell ever crashes a reload (or
+-- the next login) brings it straight back.
+-- The desktop's light/dark decision, applied BEFORE anything can be launched.
+--
+-- This is FIRST on purpose, and it is the fix for "an app I open during login
+-- comes up light and stays light". Every toolkit here decides light vs dark
+-- exactly once, at startup, from gsettings or from a file: org.gnome.desktop.interface
+-- color-scheme for GTK4/libadwaita, gtk-application-prefer-dark-theme in
+-- settings.ini for GTK3, QT_QPA_PLATFORMTHEME for Qt. Nothing re-reads any of
+-- it later, so an app launched in the ~14s between Hyprland starting and the
+-- shell loading (shell.sh below) used to parse whatever was on disk at that
+-- moment -- and if that was the light state from the previous session, no
+-- amount of the shell applying the dark palette afterwards could correct it
+-- from inside the running app.
+--
+-- So the state is pushed to disk at session start, not at shell start. The
+-- script takes no mode argument: it reads ~/.local/state/quickshell/theme-mode,
+-- the same file custom/theme.lua reads for the compositor's own chrome, so the
+-- window borders and the applications begin in agreement. With no argument it
+-- also no-ops when the desktop is already in that mode, so this is safe to run
+-- on every config reload as well as at login.
+--
+-- It must stay above shell.sh: the shell's own call is then a no-op rather
+-- than a late correction, which is the whole point.
+hl.exec_cmd("$HOME/.config/quickshell/ii/scripts/colors/sync-desktop-theme.sh")
+
+hl.exec_cmd("$HOME/.config/quickshell/ii/scripts/launch/shell.sh")
+
+-- Keep the keyboard layout file in sync with what the settings app stores.
+-- The generated file (custom/keyboard.lua) is what Hyprland actually reads; this
+-- just guarantees it matches the shell config after a config reset or a manual
+-- edit of config.json. Runs on every start and reload, and writes the file only
+-- if the content actually changed.
+hl.exec_cmd("$HOME/.config/quickshell/ii/scripts/keyboard/apply.sh --no-reload")
+
+-- Workspace sanity sweep: if a previous lock/shell restart left a window on
+-- the lock screen's sentinel workspace (2147483647 - N) it is invisible from
+-- every desktop the bar can show -- the "my window jumped to a desktop that
+-- does not exist" report. Idempotent: it does nothing when nothing is
+-- stranded. See custom/scripts/workspace-sanity.sh.
+hl.exec_cmd("$HOME/.config/hypr/custom/scripts/workspace-sanity.sh")
+
+-- Freebuff Desktop is deliberately NOT started at login. (Removed 2026-10-04
+-- at the user's request.)
+--
+-- It used to be autostarted from here through
+-- custom/scripts/freebuff-autostart.sh. That entry had already cost a login's
+-- worth of GPU-process SIGABRTs -- the wrapper exists precisely because the
+-- app's GPU process aborts on this box (see the header of
+-- ~/.local/bin/freebuff-desktop) -- and on 2026-10-04 it never even got that
+-- far: it sat out its 30 s wait for a WAYLAND_DISPLAY that Hyprland never
+-- handed its autostart children, logged
+--
+--     FAIL: no WAYLAND_DISPLAY after 30s, giving up
+--
+-- and exited. A crash-prone app booting itself is not worth having.
+--
+-- The script itself is kept, and is still the supported way to start it by
+-- hand, where the session is warm and it behaves:
+--
+--     freebuff-autostart.sh            launch if not already running
+--     freebuff-autostart.sh --now      skip the waiting, launch immediately
+--     freebuff-autostart.sh --status   report, change nothing
+--
+-- ~/.local/bin/freebuff-desktop remains the plain one-window launcher used by
+-- the app menu and the terminal.
+
+-- Black border while the pointer is on a window's resize edge.
+--
+-- Paired with `resize_on_border` / `extend_border_grab_area` in
+-- custom/general.lua: Hyprland makes the edge draggable, this makes it
+-- visible, so the black frame only ever appears on an edge that would really
+-- accept a drag. The wrapper keeps it single-instance across config reloads.
+hl.exec_cmd("$HOME/.config/hypr/custom/scripts/window-border-hint.sh &")
+
+-- Cursor that only grows a rim when it would otherwise vanish.
+--
+-- The Bibata themes used here are the borderless variants, so the pointer is
+-- solid white on the dark desktop and solid black on the light one. That looks
+-- cleaner than Bibata's stock white-body/black-rim arrow, but it has one
+-- failure mode: on a surface the same colour as the pointer -- a white app
+-- window while in dark mode -- a solid pointer is genuinely hard to track.
+--
+-- scripts/cursor-adapt.py closes that gap by sampling the background under the
+-- pointer with `grim` (which does not draw the cursor unless passed -c, so it
+-- reads the surface and not the pointer itself) and switching to the rimmed
+-- variant of the same body colour only while the gap is small. It also watches
+-- the mode file and re-seeds itself when darkMode flips, so it never fights
+-- custom/theme.lua, which owns the baseline.
+--
+-- The wrapper keeps it single-instance across config reloads.
+--  DISABLED 2026-10-04: this daemon drives the pointer with `hyprctl
+--  setcursor`, which is a NO-OP on this build -- it answers "ok" for any
+--  theme name, including ones that do not exist, and the pointer never
+--  changes. Proof: `grim -c` vs `grim` diff of the same region gave
+--  byte-identical silhouettes for three different themes. The runtime
+--  cursor theme actually comes from XCURSOR_THEME, which is only read at
+--  process start, so nothing can swap it mid-session here.
+--  Re-enable if/when this Hyprland exposes `cursor.theme` to hl.config.
+-- hl.exec_cmd("$HOME/.config/hypr/custom/scripts/cursor-adapt.sh &")
+
+-- Polkit authentication agent.
+--
+-- Nothing on this desktop registered one, so polkitd had nowhere to send an
+-- authorization request. pkexec fell back to a textual agent and died on the
+-- missing controlling terminal instead of prompting, and udisks2/gvfs had no
+-- way to mount the Windows SSD from a file manager at all.
+--
+-- The wrapper keeps it single-instance across config reloads, and no-ops
+-- silently until hyprpolkit-agent is actually installed.
+hl.exec_cmd("$HOME/.config/hypr/custom/scripts/polkit-agent.sh &")

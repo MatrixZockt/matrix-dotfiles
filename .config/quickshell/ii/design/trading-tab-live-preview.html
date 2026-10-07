@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Now bar — Trading tab (news list + live chart)</title>
+<style>
+  :root {
+    --bg: #0A0A0A; --lowest: #050505; --low: #121212; --cont: #161616;
+    --high: #1E1E1E; --highest: #262626;
+    --on: #E2E2E2; --onvar: #C6C6C6; --subtext: #9E9E9E;
+    --outline: #7E7E7E; --outlinevar: #3A3A3A;
+    --primary: #F0F0F0; --primaryhover: #FFFFFF; --onprimary: #0A0A0A;
+    --red: #E5484D; --red-soft: #F26B6F; --orange: #E6A23C; --yellow: #D4C04A;
+    --green: #46A758; --blue: #5B8DEF; --violet: #9A7BE0;
+    --sans: "Google Sans Flex", "Google Sans", system-ui, sans-serif;
+    --mono: "JetBrains Mono NF", "JetBrains Mono", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--lowest); color: var(--on);
+    font-family: var(--sans); font-size: 13px;
+    padding: 32px 0 80px; display: flex; flex-direction: column; align-items: center; gap: 26px;
+  }
+  .caption { font-size: 11px; letter-spacing: .7px; text-transform: uppercase; color: var(--subtext); }
+
+  /* ── the panel (real card is min(760, max(520, screen-240))) ── */
+  .panel { width: 760px; background: var(--low); border: 1px solid var(--outlinevar); border-radius: 16px;
+           padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+  .panel-head { display: flex; align-items: center; gap: 8px; }
+  .panel-head .title { font-size: 14px; font-weight: 500; letter-spacing: .2px; }
+  .panel-head .spacer { flex: 1; }
+  .chip { font-size: 10.5px; padding: 4px 10px; border-radius: 999px; background: var(--high);
+          color: var(--onvar); border: 1px solid var(--outlinevar); cursor: pointer; user-select: none; }
+  .chip:hover { border-color: var(--outline); }
+  .chip.act { background: var(--primary); color: var(--onprimary); border-color: var(--primary); }
+  .chip.dot::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+                      background: var(--green); margin-right: 6px; vertical-align: middle; }
+
+  /* ── chart block ── */
+  .chart-block { background: var(--cont); border-radius: 12px; padding: 12px 12px 8px; }
+  .sym-row { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+  .sym { font-family: var(--mono); font-size: 11px; font-weight: 600; padding: 5px 11px; border-radius: 8px;
+         background: var(--high); color: var(--onvar); border: 1px solid transparent; cursor: pointer; user-select: none; }
+  .sym:hover { background: var(--highest); color: var(--on); }
+  .sym.act { background: var(--primary); color: var(--onprimary); }
+  .sym-row .spacer { flex: 1; }
+  .tf { font-family: var(--mono); font-size: 10.5px; color: var(--subtext); padding: 4px 8px; border-radius: 7px; cursor: pointer; }
+  .tf:hover { color: var(--on); background: var(--high); }
+  .tf.act { color: var(--on); background: var(--highest); }
+
+  .quote { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
+  .quote .px { font-family: var(--mono); font-size: 26px; letter-spacing: -.5px; }
+  .quote .chg { font-family: var(--mono); font-size: 12.5px; }
+  .quote .chg.up { color: var(--green); } .quote .chg.dn { color: var(--red-soft); }
+  .quote .lbl { font-size: 10.5px; color: var(--subtext); }
+  .quote .spacer { flex: 1; }
+  .quote .live { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--subtext); }
+  .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--green); animation: pulse 1.6s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+
+  canvas { display: block; width: 100%; height: 232px; }
+
+  /* ── news list: one small box per item ── */
+  .news-head { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+  .news-head .t { font-size: 12px; font-weight: 500; color: var(--onvar); }
+  .news-head .folder { width: 9px; height: 9px; border-radius: 2px; background: var(--red); }
+  .news-head .spacer { flex: 1; }
+  .news-head .n { font-family: var(--mono); font-size: 10.5px; color: var(--subtext); }
+
+  .news { display: flex; flex-direction: column; gap: 5px; }
+  .item { display: grid; grid-template-columns: 3px 44px 34px 1fr auto; align-items: center; gap: 10px;
+          background: var(--cont); border-radius: 9px; padding: 8px 12px 8px 9px; }
+  .item:hover { background: var(--high); }
+  .item .rail { width: 3px; height: 18px; border-radius: 2px; background: var(--red); }
+  .item .rail.md { background: var(--orange); }
+  .item .t { font-family: var(--mono); font-size: 11px; color: var(--subtext); }
+  .item .cur { font-family: var(--mono); font-size: 10px; font-weight: 700; color: var(--onvar);
+               background: var(--highest); border-radius: 4px; padding: 2px 5px; text-align: center; }
+  .item .nm { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item .vals { display: flex; align-items: center; gap: 12px; font-family: var(--mono); font-size: 10.5px; }
+  .item .vals .k { color: var(--subtext); }
+  .item .vals .v { color: var(--onvar); }
+  .item .vals .v.act { font-weight: 700; }
+  .item .vals .v.beat { color: var(--green); }
+  .item .vals .v.miss { color: var(--red-soft); }
+  .item .cd { font-family: var(--mono); font-size: 10.5px; color: var(--onvar); background: var(--highest);
+              border-radius: 4px; padding: 2px 6px; }
+  .item .cd.now { background: #2a1a12; color: var(--yellow); }
+
+  /* ── island rest state ── */
+  .island-wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .island { width: 360px; height: 44px; background: var(--low); border: 1px solid var(--outlinevar);
+            border-radius: 12px; display: flex; align-items: center; gap: 10px; padding: 0 12px; overflow: hidden; }
+  .island .sym { background: var(--high); border: none; }
+  .island .px { font-family: var(--mono); font-size: 14px; }
+  .island .chg { font-family: var(--mono); font-size: 11px; }
+  .island .chg.up { color: var(--green); } .island .chg.dn { color: var(--red-soft); }
+  .island .spacer { flex: 1; }
+  .island .ticks { display: flex; gap: 4px; align-items: center; }
+  .island .tick { width: 5px; height: 5px; border-radius: 50%; background: var(--outlinevar); }
+  .island .tick.on { width: 14px; border-radius: 3px; background: var(--on); }
+</style>
+</head>
+<body>
+
+<span class="caption">Trading tab · expanded card (760 px)</span>
+
+<div class="panel">
+  <div class="panel-head">
+    <span class="title">Trading</span>
+    <div class="spacer"></div>
+    <span class="chip dot">Live</span>
+    <span class="chip act">Red folder</span>
+    <span class="chip">All</span>
+  </div>
+
+  <!-- ── live chart ── -->
+  <div class="chart-block">
+    <div class="sym-row" id="symRow">
+      <span class="spacer"></span>
+      <span class="tf act">15m</span><span class="tf">1H</span><span class="tf">4H</span><span class="tf">1D</span>
+    </div>
+    <div class="quote">
+      <span class="px" id="qPx">—</span>
+      <span class="chg up" id="qChg">—</span>
+      <span class="lbl" id="qLbl">—</span>
+      <div class="spacer"></div>
+      <span class="live"><span class="pulse"></span>live</span>
+    </div>
+    <canvas id="chart"></canvas>
+  </div>
+
+  <!-- ── red folder news: one small box each ── -->
+  <div class="news-head">
+    <span class="folder"></span><span class="t">Red folder · today</span>
+    <div class="spacer"></div><span class="n" id="newsCount">8 events</span>
+  </div>
+  <div class="news" id="news"></div>
+</div>
+
+<div class="island-wrap">
+  <span class="caption">island rest state (360 px)</span>
+  <div class="island">
+    <span class="sym act" id="isSym">XAU/USD</span>
+    <span class="px" id="isPx">—</span>
+    <span class="chg up" id="isChg">—</span>
+    <div class="spacer"></div>
+    <svg id="isSpark" width="52" height="20" viewBox="0 0 52 20"><polyline fill="none" stroke="#46A758" stroke-width="1.4" id="isLine" points=""/></svg>
+    <div class="ticks"><i class="tick"></i><i class="tick"></i><i class="tick"></i><i class="tick on"></i></div>
+  </div>
+</div>
+
+<script>
+/* ─────────────────────────── data ─────────────────────────── */
+const SYMBOLS = {
+  'XAU/USD': { px: 2648.40, dec: 2, vol: 1.9,  seed: 11, open: 2631.10, step: "0.1" },
+  'EUR/USD': { px: 1.09124, dec: 5, vol: 0.00042, seed: 22, open: 1.09580, step: "0.00001" },
+  'GBP/USD': { px: 1.27358, dec: 5, vol: 0.00055, seed: 33, open: 1.26890, step: "0.00001" },
+  'BTC/USD': { px: 63210,   dec: 0, vol: 96,    seed: 44, open: 63980,  step: "1" },
+};
+const SYM_ORDER = ['XAU/USD', 'EUR/USD', 'GBP/USD', 'BTC/USD'];
+let current = 'XAU/USD';
+
+const NEWS = [
+  { t: "08:30", cur: "EUR", nm: "ECB President Lagarde Speaks",              hi: 1, cd: "done" },
+  { t: "10:00", cur: "GBP", nm: "BoE Governor Bailey Speaks",                hi: 1, cd: "done" },
+  { t: "12:30", cur: "USD", nm: "Core CPI m/m",            f: "0.3%", p: "0.2%", a: "0.4%", hi: 1, beat: false },
+  { t: "13:30", cur: "CAD", nm: "Employment Change",       f: "25.0K", p: "22.1K", a: "41.2K", hi: 1, beat: true },
+  { t: "14:00", cur: "USD", nm: "FOMC Member Waller Speaks",                 hi: 1, cd: "live" },
+  { t: "14:30", cur: "USD", nm: "Crude Oil Inventories",   f: "+1.1M", p: "+0.7M", hi: 0, md: 1, cd: "in 24m" },
+  { t: "15:30", cur: "EUR", nm: "ECB Monetary Policy Statement",             hi: 1, cd: "in 1h 24m" },
+  { t: "18:00", cur: "USD", nm: "FOMC Meeting Minutes",                      hi: 1, cd: "in 3h 54m" },
+];
+
+/* ─────────────────────────── helpers ─────────────────────────── */
+function mulberry32(a) { return function () {
+  a |= 0; a = a + 0x6D2B79F5 | 0;
+  let t = Math.imul(a ^ a >>> 15, 1 | a);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+  return ((t ^ t >>> 14) >>> 0) / 4294967296;
+}; }
+const fmt = (s, v) => {
+  const [int, dec] = v.toFixed(SYMBOLS[s].dec).split(".");
+  return int.replace(/\B(?=(\d{3})+(?!\d))/g, " ") + (dec ? "." + dec : "");
+};
+
+/* ─────────────────────────── chart ─────────────────────────── */
+const cv = document.getElementById("chart");
+const ctx = cv.getContext("2d");
+let candles = [], lastClose = 0, openPx = 0;
+
+function seed(sym) {
+  const cfg = SYMBOLS[sym], rnd = mulberry32(cfg.seed);
+  const n = 58, out = [];
+  let p = cfg.open;
+  for (let i = 0; i < n; i++) {
+    const drift = (cfg.px - cfg.open) / n;
+    const o = p;
+    const c = i === n - 1 ? cfg.px : o + drift + (rnd() - 0.5) * cfg.vol * 2;
+    const hi = Math.max(o, c) + rnd() * cfg.vol;
+    const lo = Math.min(o, c) - rnd() * cfg.vol;
+    out.push({ o, h: hi, l: lo, c, v: 0.3 + rnd() * 0.7 });
+    p = c;
+  }
+  return out;
+}
+
+function draw() {
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  const padR = 56, padB = 20, padT = 8, padL = 2;
+  const cw = W - padL - padR, ch = H - padT - padB;
+  const volH = 34, priceH = ch - volH - 6;
+
+  const hiAll = Math.max(...candles.map(c => c.h));
+  const loAll = Math.min(...candles.map(c => c.l));
+  const span = (hiAll - loAll) || 1;
+  const pad = span * 0.08;
+  const top = hiAll + pad, bot = loAll - pad;
+  const y = v => padT + (top - v) / (top - bot) * priceH;
+  const stepX = cw / candles.length;
+  const bw = Math.max(2, stepX * 0.62);
+
+  // grid + right price axis
+  ctx.font = "9px " + getComputedStyle(document.body).getPropertyValue("--mono");
+  ctx.textBaseline = "middle";
+  for (let i = 0; i <= 4; i++) {
+    const yy = padT + (priceH / 4) * i;
+    ctx.strokeStyle = "#1E1E1E"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(padL, yy + .5); ctx.lineTo(padL + cw, yy + .5); ctx.stroke();
+    const v = top - (top - bot) * (i / 4);
+    ctx.fillStyle = "#7E7E7E"; ctx.textAlign = "left";
+    ctx.fillText(v.toFixed(SYMBOLS[current].dec), padL + cw + 8, yy);
+  }
+
+  // candles
+  candles.forEach((c, i) => {
+    const x = padL + i * stepX + stepX / 2;
+    const up = c.c >= c.o;
+    ctx.strokeStyle = ctx.fillStyle = up ? "#46A758" : "#E5484D";
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x + .5, y(c.h)); ctx.lineTo(x + .5, y(c.l)); ctx.stroke();
+    const yo = y(c.o), yc = y(c.c);
+    ctx.fillRect(x - bw / 2, Math.min(yo, yc), bw, Math.max(1, Math.abs(yc - yo)));
+  });
+
+  // volume strip
+  candles.forEach((c, i) => {
+    const x = padL + i * stepX + stepX / 2;
+    const h = c.v * volH;
+    ctx.fillStyle = c.c >= c.o ? "rgba(70,167,88,.28)" : "rgba(229,72,77,.28)";
+    ctx.fillRect(x - bw / 2, padT + priceH + 6 + (volH - h), bw, h);
+  });
+
+  // last price line + pill
+  const ly = y(lastClose);
+  ctx.strokeStyle = lastClose >= openPx ? "#46A758" : "#E5484D";
+  ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(padL, ly + .5); ctx.lineTo(padL + cw, ly + .5); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = lastClose >= openPx ? "#46A758" : "#E5484D";
+  const label = lastClose.toFixed(SYMBOLS[current].dec);
+  ctx.font = "bold 9px " + getComputedStyle(document.body).getPropertyValue("--mono");
+  const tw = ctx.measureText(label).width + 12;
+  ctx.fillRect(padL + cw + 2, ly - 8, tw, 16);
+  ctx.fillStyle = "#0A0A0A"; ctx.textAlign = "left";
+  ctx.fillText(label, padL + cw + 8, ly);
+}
+
+function renderQuote() {
+  const cfg = SYMBOLS[current];
+  const chg = lastClose - openPx;
+  const pct = chg / openPx * 100;
+  const up = chg >= 0;
+  document.getElementById("qPx").textContent = fmt(current, lastClose);
+  const qc = document.getElementById("qChg");
+  qc.textContent = (up ? "▲ +" : "▼ ") + chg.toFixed(cfg.dec) + "  (" + (up ? "+" : "") + pct.toFixed(2) + "%)";
+  qc.className = "chg " + (up ? "up" : "dn");
+  document.getElementById("qLbl").textContent = "· today, " + (up ? "up" : "down") + " from open";
+  document.getElementById("isSym").textContent = current;
+  document.getElementById("isPx").textContent = fmt(current, lastClose);
+  const ic = document.getElementById("isChg");
+  ic.textContent = (up ? "▲ " : "▼ ") + (up ? "+" : "") + pct.toFixed(2) + "%";
+  ic.className = "chg " + (up ? "up" : "dn");
+}
+
+function renderSpark() {
+  const pts = candles.slice(-26).map(c => c.c);
+  const lo = Math.min(...pts), hi = Math.max(...pts), sp = (hi - lo) || 1;
+  const line = pts.map((v, i) => (i / (pts.length - 1) * 52).toFixed(1) + "," + (18 - (v - lo) / sp * 16).toFixed(1)).join(" ");
+  document.getElementById("isLine").setAttribute("points", line);
+  document.getElementById("isLine").setAttribute("stroke", lastClose >= openPx ? "#46A758" : "#F26B6F");
+}
+
+function switchSymbol(sym) {
+  current = sym;
+  document.querySelectorAll("#symRow .sym").forEach(e => e.classList.toggle("act", e.dataset.sym === sym));
+  candles = seed(sym);
+  openPx = candles[0].o;
+  lastClose = candles[candles.length - 1].c;
+  draw(); renderQuote(); renderSpark();
+}
+
+/* ─────────────────────────── live tick ─────────────────────────── */
+function tick() {
+  const cfg = SYMBOLS[current];
+  const c = candles[candles.length - 1];
+  c.c += (Math.random() - 0.48) * cfg.vol * 0.8;
+  c.h = Math.max(c.h, c.c); c.l = Math.min(c.l, c.c);
+  c.v = Math.min(1, c.v + Math.random() * 0.05);
+  lastClose = c.c;
+  if (Math.random() < 0.06) {                      // roll a new candle
+    candles.push({ o: c.c, h: c.c, l: c.c, c: c.c, v: 0.3 });
+    if (candles.length > 62) { candles.shift(); openPx = candles[0].o; }
+  }
+  draw(); renderQuote(); renderSpark();
+}
+
+/* ─────────────────────────── build DOM ─────────────────────────── */
+const symRow = document.getElementById("symRow");
+symRow.innerHTML = SYM_ORDER.map(s => `<span class="sym" data-sym="${s}">${s}</span>`).join("")
+  + `<span class="spacer"></span><span class="tf act">15m</span><span class="tf">1H</span><span class="tf">4H</span><span class="tf">1D</span>`;
+symRow.querySelectorAll(".sym").forEach(el => el.onclick = () => switchSymbol(el.dataset.sym));
+
+const newsBox = document.getElementById("news");
+newsBox.innerHTML = NEWS.map(n => {
+  let right;
+  if (n.cd === "done") right = `<span class="k">released</span>`;
+  else if (n.a !== undefined) {
+    const cls = n.beat ? "beat" : "miss";
+    right = `<span class="k">act</span><span class="v ${cls}">${n.a}</span>`
+          + `<span class="k">fc</span><span class="v">${n.f}</span>`
+          + `<span class="k">prev</span><span class="v">${n.p}</span>`;
+  } else if (n.cd === "live") right = `<span class="cd now">live</span>`;
+  else right = `<span class="cd">${n.cd}</span>`;
+  const rail = n.hi ? "" : "md";
+  return `<div class="item"><div class="rail ${rail}"></div><div class="t">${n.t}</div>`
+       + `<div class="cur">${n.cur}</div><div class="nm">${n.nm}</div>`
+       + `<div class="vals">${right}</div></div>`;
+}).join("");
+document.getElementById("newsCount").textContent = NEWS.length + " events";
+
+window.addEventListener("resize", draw);
+switchSymbol(current);
+setInterval(tick, 1100);
+</script>
+</body>
+</html>

@@ -1,0 +1,29 @@
+// Razer Command Center — passwordless for the desktop session user.
+//
+// The shipped policy already sets allow_active=yes on these three actions,
+// and each carries the exec.path annotation that stops pkexec falling back
+// to the generic org.freedesktop.policykit.exec action (which is
+// auth_admin, and is what produced a password prompt on every fan tweak).
+//
+// This rule restates the grant explicitly so the behaviour does not depend
+// on the shipped defaults surviving a package upgrade. It is scoped to the
+// active local session only: allow_inactive stays false, so the same
+// actions still require authentication from a non-session context such as
+// a remote or background caller.
+//
+// It is safe because /usr/local/sbin/razer-cc-elevate only accepts five
+// enumerated operations (fan 0|1, fanlevel 0-50, pwrlimit 5-250 5-250 0|1,
+// nvidia 0|2|3 0|1, decode) and exits 2 on anything else. There is no path
+// from this grant to an arbitrary root command. pwrlimit, added 2026-09-28,
+// is the one the fan modes actually rely on: the ACPI fan level is ignored
+// by the embedded controller on this hardware, so the machine gets quieter
+// by capping the CPU package power rather than by asking the fan for less.
+polkit.addRule(function (action, subject) {
+    if (action.id.indexOf("org.matrix.razercc.") !== 0) {
+        return undefined;
+    }
+    if (subject.local && subject.active) {
+        return "yes";
+    }
+    return undefined;
+});

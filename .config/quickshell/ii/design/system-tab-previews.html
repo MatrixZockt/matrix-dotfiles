@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>System tab — three designs</title>
+<style>
+  :root {
+    --bg: #0A0A0A; --lowest: #050505; --low: #121212; --cont: #161616;
+    --high: #1E1E1E; --highest: #262626;
+    --on: #E2E2E2; --onvar: #C6C6C6; --subtext: #9E9E9E;
+    --outline: #7E7E7E; --outlinevar: #3A3A3A;
+    --primary: #F0F0F0; --seccont: #333333; --onsec: #D6D6D6;
+    --ok: #9CD69C; --warn: #E6C26A; --err: #E68080;
+    --sans: "Google Sans Flex", "Google Sans", system-ui, sans-serif;
+    --mono: "JetBrains Mono NF", monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--lowest); color: var(--on);
+    font-family: var(--sans); font-size: 13px;
+    padding: 28px 0 60px; display: flex; flex-direction: column; align-items: center; gap: 40px;
+  }
+  .intro { max-width: 660px; text-align: center; color: var(--subtext); line-height: 1.5; }
+  .intro b { color: var(--on); }
+  h2.design-title { font-size: 15px; font-weight: 500; letter-spacing: .4px; margin-bottom: 4px; }
+  p.design-note { font-size: 12px; color: var(--subtext); margin-bottom: 14px; text-align: center; max-width: 660px; line-height: 1.5; }
+
+  /* the card */
+  .card {
+    width: 680px; background: var(--cont);
+    border: 1px solid var(--outlinevar); border-radius: 8px;
+    padding: 18px; position: relative;
+  }
+  .tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+  .tab {
+    padding: 5px 14px; border-radius: 6px; color: var(--onvar);
+    font-size: 12.5px; display: flex; align-items: center; gap: 6px;
+  }
+  .tab.active { background: var(--high); color: var(--on); }
+  .tab .material-symbols-rounded { font-size: 15px; }
+
+  /* ── shared pieces ─────────────────────────────────────────── */
+  .gauge-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 14px; }
+  .gauge {
+    background: var(--low); border-radius: 6px; padding: 8px 10px;
+  }
+  .gauge .g-name { font-size: 11px; color: var(--subtext); letter-spacing: .5px; text-transform: uppercase; }
+  .gauge .g-val { font-size: 16px; font-family: var(--mono); margin: 2px 0 5px; }
+  .gauge .bar { height: 3px; border-radius: 2px; background: var(--highest); position: relative; }
+  .gauge .bar i { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--primary); }
+  .sec-h { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; }
+  .sec-h .material-symbols-rounded { font-size: 16px; color: var(--primary); }
+  .sec-h span.t { font-size: 12.5px; font-weight: 500; color: var(--on); }
+  .sec-h i.rule { flex: 1; height: 1px; background: var(--outlinevar); }
+  .kv { display: flex; justify-content: space-between; padding: 4px 10px; border-radius: 4px; }
+  .kv:nth-child(odd) { background: var(--low); }
+  .kv .k { color: var(--subtext); font-size: 12px; }
+  .kv .v { color: var(--on); font-size: 12px; font-family: var(--mono); }
+  .kv .v.live::after { content: "⚡"; font-size: 9px; margin-left: 4px; color: var(--primary); }
+
+  /* ══ A: spec sheets ══ */
+  .a-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .sheet { background: var(--low); border: 1px solid var(--outlinevar); border-radius: 6px; padding: 10px; }
+  .sheet .sec-h { margin-bottom: 4px; }
+  .live-strip {
+    margin-top: 2px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
+    background: var(--low); border: 1px solid var(--outlinevar); border-radius: 6px; padding: 10px;
+  }
+  .live-strip .lv { text-align: left; }
+  .live-strip .lv .n { font-size: 10.5px; color: var(--subtext); text-transform: uppercase; letter-spacing: .5px; }
+  .live-strip .lv .b { font-size: 15px; font-family: var(--mono); margin-top: 2px; }
+  .live-strip .lv .s { font-size: 10.5px; color: var(--outline); margin-top: 1px; }
+
+  /* ══ B: sidebar ══ */
+  .b-wrap { display: grid; grid-template-columns: 148px 1fr; gap: 12px; }
+  .b-nav { display: flex; flex-direction: column; gap: 3px; }
+  .b-nav .ni {
+    display: flex; align-items: center; gap: 8px; padding: 6px 9px;
+    border-radius: 6px; color: var(--onvar); font-size: 12.5px;
+  }
+  .b-nav .ni.active { background: var(--seccont); color: var(--onsec); }
+  .b-nav .ni .material-symbols-rounded { font-size: 16px; }
+  .b-nav .ni .cnt { margin-left: auto; font-size: 10.5px; color: var(--outline); font-family: var(--mono); }
+  .b-pane .sec-h { margin-bottom: 6px; }
+
+  /* ══ C: compact ══ */
+  .c-strip {
+    display: flex; gap: 8px; margin-bottom: 12px;
+  }
+  .c-chip {
+    background: var(--low); border: 1px solid var(--outlinevar); border-radius: 6px;
+    padding: 6px 10px; min-width: 76px;
+  }
+  .c-chip .n { font-size: 10px; color: var(--subtext); text-transform: uppercase; letter-spacing: .5px; }
+  .c-chip .b { font-size: 13.5px; font-family: var(--mono); margin-top: 1px; }
+  .c-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 18px; }
+  .c-sec .sec-h { margin-bottom: 3px; }
+  .c-sec .kv { padding: 3px 8px; }
+  .c-sec .kv .k, .c-sec .kv .v { font-size: 11.5px; }
+
+  .foot { margin-top: 12px; padding-top: 9px; border-top: 1px solid var(--outlinevar);
+    display: flex; gap: 14px; font-family: var(--mono); font-size: 10.5px; color: var(--outline); }
+
+  .pick { margin-top: 10px; text-align: center; }
+  .pick span {
+    display: inline-block; padding: 6px 18px; border-radius: 999px;
+    border: 1px solid var(--outline); color: var(--onvar); font-size: 12px;
+  }
+  .pick.a span { border-color: var(--primary); color: var(--on); }
+</style>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL@20..48,300..500,0..1">
+</head>
+<body>
+
+<p class="intro">Three designs for the <b>System tab</b> of the middle popup. All keep the four live readings on top (CPU / RAM / GPU / temp) and put the <b>static machine facts</b> — the stuff that never varies — into categories, so the tab stops being a wall of charts.</p>
+
+<!-- ══════════ DESIGN A ══════════ -->
+<h2 class="design-title">A — Spec-sheet cards</h2>
+<p class="design-note">One glance = everything. The facts are grouped into bordered cards (Machine / CPU &amp; memory / Graphics &amp; storage), two columns, no interaction needed. Live strip stays on top.</p>
+<div class="card">
+  <div class="tabs">
+    <div class="tab active"><span class="material-symbols-rounded">monitor_heart</span>System</div>
+    <div class="tab"><span class="material-symbols-rounded">graphic_eq</span>Playing</div>
+    <div class="tab"><span class="material-symbols-rounded">schedule</span>Clock</div>
+    <div class="tab"><span class="material-symbols-rounded">data_usage</span>AI usage</div>
+  </div>
+  <div class="live-strip">
+    <div class="lv"><div class="n">CPU</div><div class="b">12%</div><div class="s">i9-14900HX</div></div>
+    <div class="lv"><div class="n">RAM</div><div class="b">19%</div><div class="s">12.1 / 64 GB</div></div>
+    <div class="lv"><div class="n">GPU</div><div class="b">RUNNING</div><div class="s">RTS 4070 · 8%</div></div>
+    <div class="lv"><div class="n">Temp</div><div class="b">58°C</div><div class="s">CPU package</div></div>
+  </div>
+  <div style="height:12px"></div>
+  <div class="a-cols">
+    <div class="sheet">
+      <div class="sec-h"><span class="material-symbols-rounded">laptop_mac</span><span class="t">Machine</span><i class="rule"></i></div>
+      <div class="kv"><span class="k">Device</span><span class="v">Razer Blade 16</span></div>
+      <div class="kv"><span class="k">OS</span><span class="v">Arch Linux · kernel 6.11</span></div>
+      <div class="kv"><span class="k">Firmware</span><span class="v">UEFI · 1.04</span></div>
+      <div class="kv"><span class="k">Uptime</span><span class="v live">3 d 4 h</span></div>
+    </div>
+    <div class="sheet">
+      <div class="sec-h"><span class="material-symbols-rounded">developer_board</span><span class="t">CPU &amp; memory</span><i class="rule"></i></div>
+      <div class="kv"><span class="k">CPU</span><span class="v">i9-14900HX · 24C/32T</span></div>
+      <div class="kv"><span class="k">Frequency</span><span class="v live">800 – 5800 MHz</span></div>
+      <div class="kv"><span class="k">Memory</span><span class="v">64 GB DDR5-5600</span></div>
+      <div class="kv"><span class="k">Swap</span><span class="v">32 GB</span></div>
+    </div>
+    <div class="sheet">
+      <div class="sec-h"><span class="material-symbols-rounded">videocam</span><span class="t">Graphics</span><i class="rule"></i></div>
+      <div class="kv"><span class="k">iGPU</span><span class="v">Iris Xe · i915</span></div>
+      <div class="kv"><span class="k">dGPU</span><span class="v">RTS 4070 · nvidia</span></div>
+      <div class="kv"><span class="k">Display</span><span class="v">2560×1600 @ 240 Hz</span></div>
+      <div class="kv"><span class="k">Battery</span><span class="v live">91.5 / 99 Wh · 214 cycles</span></div>
+    </div>
+    <div class="sheet">
+      <div class="sec-h"><span class="material-symbols-rounded">hard_disk</span><span class="t">Storage &amp; network</span><i class="rule"></i></div>
+      <div class="kv"><span class="k">NVMe</span><span class="v">2 TB Samsung 990</span></div>
+      <div class="kv"><span class="k">Mounts</span><span class="v">/ · /home (btrfs)</span></div>
+      <div class="kv"><span class="k">Wi-Fi</span><span class="v live">Wi-Fi 6E · 1200 Mb/s</span></div>
+      <div class="kv"><span class="k">LAN</span><span class="v">2.5 Gb/s</span></div>
+    </div>
+  </div>
+  <div class="foot"><span>facts: read once at startup</span><span style="margin-left:auto">values marked ⚡ are live</span></div>
+</div>
+<div class="pick a"><span>— pick this one? —</span></div>
+
+<!-- ══════════ DESIGN B ══════════ -->
+<h2 class="design-title">B — Category sidebar</h2>
+<p class="design-note">A narrow category rail on the left (like the task manager's pages). Each pane shows one category fully; counts hint at what's inside. Best if you want depth per category without scrolling far.</p>
+<div class="card">
+  <div class="tabs">
+    <div class="tab active"><span class="material-symbols-rounded">monitor_heart</span>System</div>
+    <div class="tab"><span class="material-symbols-rounded">graphic_eq</span>Playing</div>
+    <div class="tab"><span class="material-symbols-rounded">schedule</span>Clock</div>
+    <div class="tab"><span class="material-symbols-rounded">data_usage</span>AI usage</div>
+  </div>
+  <div class="gauge-row">
+    <div class="gauge"><div class="g-name">CPU</div><div class="g-val">12%</div><div class="bar"><i style="width:12%"></i></div></div>
+    <div class="gauge"><div class="g-name">RAM</div><div class="g-val">19%</div><div class="bar"><i style="width:19%"></i></div></div>
+    <div class="gauge"><div class="g-name">GPU</div><div class="g-val">8%</div><div class="bar"><i style="width:8%"></i></div></div>
+    <div class="gauge"><div class="g-name">Temp</div><div class="g-val">58°C</div><div class="bar"><i style="width:58%"></i></div></div>
+  </div>
+  <div class="b-wrap">
+    <div class="b-nav">
+      <div class="ni active"><span class="material-symbols-rounded">laptop_mac</span>Machine<span class="cnt">9</span></div>
+      <div class="ni"><span class="material-symbols-rounded">developer_board</span>CPU<span class="cnt">6</span></div>
+      <div class="ni"><span class="material-symbols-rounded">memory</span>Memory<span class="cnt">5</span></div>
+      <div class="ni"><span class="material-symbols-rounded">videocam</span>Graphics<span class="cnt">4</span></div>
+      <div class="ni"><span class="material-symbols-rounded">hard_disk</span>Storage<span class="cnt">3</span></div>
+      <div class="ni"><span class="material-symbols-rounded">battery_full</span>Battery<span class="cnt">5</span></div>
+      <div class="ni"><span class="material-symbols-rounded">lan</span>Network<span class="cnt">4</span></div>
+      <div class="ni"><span class="material-symbols-rounded">monitor</span>Display<span class="cnt">2</span></div>
+    </div>
+    <div class="b-pane">
+      <div class="sec-h"><span class="material-symbols-rounded">laptop_mac</span><span class="t">Machine</span><i class="rule"></i></div>
+      <div class="kv"><span class="k">Device</span><span class="v">Razer Blade 16 (2024)</span></div>
+      <div class="kv"><span class="k">Hostname</span><span class="v">blade</span></div>
+      <div class="kv"><span class="k">Operating system</span><span class="v">Arch Linux</span></div>
+      <div class="kv"><span class="k">Kernel</span><span class="v">6.11.4-arch1-1</span></div>
+      <div class="kv"><span class="k">Architecture</span><span class="v">x86_64</span></div>
+      <div class="kv"><span class="k">Firmware</span><span class="v">UEFI · AMI 1.04</span></div>
+      <div class="kv"><span class="k">Session</span><span class="v">Hyprland (Wayland)</span></div>
+      <div class="kv"><span class="k">Shell</span><span class="v">fish 4.0</span></div>
+      <div class="kv"><span class="k">Uptime</span><span class="v live">3 d 4 h 12 m</span></div>
+    </div>
+  </div>
+</div>
+<div class="pick"><span>— pick this one? —</span></div>
+
+<!-- ══════════ DESIGN C ══════════ -->
+<h2 class="design-title">C — Compact two-column</h2>
+<p class="design-note">Density first: live chips shrink to a slim strip, and every category becomes a tight headed list in a 2-column grid. Most info visible with zero scrolling — but smaller type.</p>
+<div class="card">
+  <div class="tabs">
+    <div class="tab active"><span class="material-symbols-rounded">monitor_heart</span>System</div>
+    <div class="tab"><span class="material-symbols-rounded">graphic_eq</span>Playing</div>
+    <div class="tab"><span class="material-symbols-rounded">schedule</span>Clock</div>
+    <div class="tab"><span class="material-symbols-rounded">data_usage</span>AI usage</div>
+  </div>
+  <div class="c-strip">
+    <div class="c-chip"><div class="n">CPU</div><div class="b">12%</div></div>
+    <div class="c-chip"><div class="n">RAM</div><div class="b">19%</div></div>
+    <div class="c-chip"><div class="n">GPU</div><div class="b">8%</div></div>
+    <div class="c-chip"><div class="n">Temp</div><div class="b">58°C</div></div>
+    <div class="c-chip" style="flex:1"><div class="n">Uptime</div><div class="b" style="font-size:12px">3 d 4 h 12 m</div></div>
+  </div>
+  <div class="c-grid">
+    <div class="c-sec">
+      <div class="sec-h"><span class="material-symbols-rounded">laptop_mac</span><span class="t">Machine</span><i class="rule"></i></div>
+      <div class="kv"><span class="k">Device</span><span class="v">Razer Blade 16</span></div>
+      <div class="kv"><span class="k">OS</span><span class="v">Arch · 6.11.4</span></div>
+      <div class="kv"><span class="k">Session</span><span class="v">Hyprland</span></div>
+    </div>
+    <div class="c-sec">
+      <div class="sec-h"><span class="material-symbols-rounded">developer_board</span><span class="t">CPU</span><i class="rule"></i></div>
+      <div class="kv"><span class="k">Model</span><span class="v">i9-14900HX</span></div>
+      <div class="kv"><span class="k">Cores</span><span class="v">24C / 32T</span></div>
+      <div class="kv"><span class="k">Governor</span><span class="v">performance</span></div>
+    </div>
+    <div class="c-sec">
+      <div class="sec-h"><span class="material-symbols-rounded">memory</span><span class="t">Memory</span><i class="rule"></i></div>
+      <div class="kv"><span class="k">Installed</span><span class="v">64 GB DDR5</span></div>
+      <div class="kv"><span class="k">Cached</span><span class="v live">18.2 GB</span></div>
+      <div class="kv"><span class="k">Swap</span><span class="v">0.4 / 32 GB</span></div>
+    </div>
+    <div class="c-sec">
+      <div class="sec-h"><span class="material-symbols-rounded">videocam</span><span class="t">Graphics</span><i class="rule"></i></div>
+      <div class="kv"><span class="k">iGPU</span><span class="v">Iris Xe</span></div>
+      <div class="kv"><span class="k">dGPU</span><span class="v">RTS 4070 · 8 GB</span></div>
+      <div class="kv"><span class="k">State</span><span class="v live">running · 31 W</span></div>
+    </div>
+    <div class="c-sec">
+      <div class="sec-h"><span class="material-symbols-rounded">hard_disk</span><span class="t">Storage</span><i class="rule"></i></div>
+      <div class="kv"><span class="k">NVMe</span><span class="v">2 TB 990 PRO</span></div>
+      <div class="kv"><span class="k">Root</span><span class="v">btrfs · 61% used</span></div>
+    </div>
+    <div class="c-sec">
+      <div class="sec-h"><span class="material-symbols-rounded">battery_full</span><span class="t">Power</span><i class="rule"></i></div>
+      <div class="kv"><span class="k">Charge</span><span class="v live">86% · discharging</span></div>
+      <div class="kv"><span class="k">Health</span><span class="v">92% · 214 cycles</span></div>
+    </div>
+  </div>
+  <div class="foot"><span>6 categories · no scroll</span></div>
+</div>
+<div class="pick"><span>— pick this one? —</span></div>
+
+</body>
+</html>

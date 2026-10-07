@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Desktop pill — active indicator animations</title>
+<style>
+  :root {
+    --bg: #0A0A0A; --lowest: #050505; --low: #121212; --cont: #161616;
+    --high: #1E1E1E; --highest: #262626;
+    --on: #E2E2E2; --onvar: #C6C6C6; --subtext: #9E9E9E;
+    --outline: #7E7E7E; --outlinevar: #3A3A3A;
+    --primary: #F0F0F0; --seccont: #333333; --onsec: #D6D6D6;
+    --sans: "Google Sans Flex", "Google Sans", system-ui, sans-serif;
+    --mono: "JetBrains Mono NF", monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--lowest); color: var(--on);
+    font-family: var(--sans); font-size: 13px;
+    padding: 28px 0 60px; display: flex; flex-direction: column; align-items: center; gap: 34px;
+  }
+  .intro { max-width: 700px; text-align: center; color: var(--subtext); line-height: 1.55; }
+  .intro b { color: var(--on); }
+  .intro code { font-family: var(--mono); font-size: 11.5px; color: var(--onvar); }
+
+  h2.design-title { font-size: 15px; font-weight: 500; letter-spacing: .4px; }
+  p.design-note { font-size: 12px; color: var(--subtext); max-width: 700px; text-align: center; line-height: 1.5; }
+
+  .card {
+    width: 700px; background: var(--cont);
+    border: 1px solid var(--outlinevar); border-radius: 8px; padding: 18px;
+  }
+  .card.picked { border-color: var(--primary); }
+
+  /* ── the stage: the real desktop bottom edge ────────────────── */
+  .stage {
+    position: relative; height: 132px; border-radius: 6px; overflow: hidden;
+    background:
+      radial-gradient(120% 90% at 50% 120%, #1a1410 0%, #0d0b0a 55%, #0a0a0a 100%);
+    border: 1px solid #221d18;
+    display: flex; align-items: flex-end; justify-content: center;
+  }
+  /* the pill: capsuleRow spacing 8, 16px capsule padding, windowRounding */
+  .pill {
+    position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 8px;
+    padding: 3px 8px; border-radius: 12px;
+    background: rgba(240,240,240,0.10);
+    border: 1px solid rgba(240,240,240,0.16);
+    height: 22px;
+  }
+  .cell { position: relative; width: 21px; height: 3px; display: flex; align-items: center; justify-content: center; }
+
+  /* a base "line" mark, 11x3, radius 1.5 -- the compact inactive state */
+  .line {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+    width: 11px; height: 3px; border-radius: 1.5px;
+    background: #6a6a6a;
+  }
+
+  /* ── per-design animation ───────────────────────────────────── */
+  /* 1. morph to dot */
+  .d1 .line { transition: width .26s cubic-bezier(.2,.9,.25,1.2), height .26s cubic-bezier(.2,.9,.25,1.2),
+                           border-radius .26s cubic-bezier(.2,.9,.25,1.2), background .2s linear; }
+  .d1 .cell.on .line { width: 5px; height: 5px; border-radius: 2.5px; background: var(--primary); }
+
+  /* 2. sliding pill behind the row */
+  .d2 .rail { position: relative; display: flex; gap: 8px; }
+  .d2 .slider {
+    position: absolute; top: 50%; left: 0; transform: translateY(-50%);
+    width: 21px; height: 3px; border-radius: 1.5px; background: var(--primary);
+    transition: transform .3s cubic-bezier(.2,.8,.2,1);
+  }
+  .d2 .line { transition: opacity .25s linear, background .25s linear; }
+  .d2 .cell.on .line { background: #0A0A0A; }
+  .d2 .cell:not(.on) .line { opacity: .55; }
+
+  /* 3. stretch + neighbours dim */
+  .d3 .line { transition: width .3s cubic-bezier(.2,.9,.3,1), background .25s linear, opacity .25s linear; }
+  .d3 .cell.on .line { width: 17px; background: var(--primary); }
+  .d3 .cell.dim .line { opacity: .35; }
+
+  /* 4. pulse on arrival (the farewell wink, reused for the switch) */
+  .d4 .line { transition: background .18s linear; }
+  .d4 .cell.on .line { background: var(--primary); }
+  /* opacity 0 at rest is load-bearing: the pulse layer exists on every cell,
+     so without it every dot sits under a permanently visible white bar. */
+  .d4 .pulse { position: absolute; left: 50%; top: 50%; width: 11px; height: 3px; margin: -1.5px;
+              border-radius: 1.5px; background: var(--primary); opacity: 0; }
+  @keyframes pulse {
+    0%   { transform: translate(-50%,-50%) scale(1,1); opacity: 1; }
+    35%  { transform: translate(-50%,-50%) scale(1.55,1.9); opacity: .95; }
+    100% { transform: translate(-50%,-50%) scale(1,1); opacity: 0; }
+  }
+  .d4 .pulse.go { animation: pulse .42s cubic-bezier(.2,.9,.3,1); }
+
+  /* 5. travelling token */
+  .d5 .rail { position: relative; display: flex; gap: 8px; }
+  .d5 .token {
+    position: absolute; top: 50%; left: 0; margin-top: -1.5px;
+    width: 5px; height: 3px; border-radius: 1.5px; background: var(--primary);
+    transition: transform .34s cubic-bezier(.34,1.3,.4,1), width .2s ease;
+  }
+  .d5 .cell.on .token { width: 11px; }
+  .d5 .line { transition: opacity .25s linear; }
+  .d5 .cell.on .line { opacity: 0; }
+  .d5 .cell:not(.on) .line { opacity: .5; }
+
+  /* ── controls ───────────────────────────────────────────────── */
+  .controls { display: flex; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  button {
+    font: inherit; font-size: 12px; color: var(--on);
+    background: var(--high); border: 1px solid var(--outlinevar);
+    border-radius: 6px; padding: 5px 12px; cursor: pointer;
+  }
+  button:hover { background: var(--highest); }
+  button.ghost { background: transparent; }
+  button.pick { border-color: var(--primary); }
+  .desktops { display: flex; gap: 4px; }
+  .desktops button { padding: 4px 10px; font-family: var(--mono); }
+  .desktops button.sel { background: var(--primary); color: #0A0A0A; border-color: var(--primary); }
+  .spacer { flex: 1; }
+  .tag { font-size: 11px; color: var(--subtext); font-family: var(--mono); }
+  .zoom { display: flex; gap: 6px; align-items: center; }
+
+  /* 4x detail row: 3px marks are not judgeable at 1x on a real screen, and
+     overlaying the inset inside the stage clipped it against the stage edge. */
+  .zoomrow { margin-top: 10px; display: flex; align-items: center; gap: 12px; }
+  .zoomlabel { font-size: 10.5px; letter-spacing: .6px; text-transform: uppercase; color: var(--subtext); }
+  .zoomview {
+    width: 640px; height: 108px; border-radius: 6px; overflow: hidden;
+    background: rgba(5,5,5,.72); border: 1px solid var(--outlinevar);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .zoomview .pill { position: static; transform: scale(4); transform-origin: center; }
+  .stagelabel { position: absolute; left: 10px; top: 8px; font-size: 10.5px;
+                letter-spacing: .6px; text-transform: uppercase; color: #6b5b4a; }
+</style>
+</head>
+<body>
+
+<div class="intro">
+  The <b>desktop pill</b> at the bottom of the screen (<code>DesktopIndicator.qml</code>) is
+  <code>Bar.Workspaces</code> in <code>compact</code> metrics: a row of <b>11&times;3 lines</b>, 21px
+  cells, 8px apart, inside a 22px capsule. Today the active desktop is the same line
+  <b>in accent colour</b> — switching desktops teleports that colour with no animation at all.
+  <br><br>
+  Five ways to animate the handover. Each one loops on its own; use the buttons to drive it by hand,
+  or <b>Replay</b> to fire a single switch. Every stage shows the real pill at 1&times;, with a
+  4&times; inset so 3px marks are actually judgeable.
+</div>
+
+<div id="cards"></div>
+
+<script>
+const DESIGNS = [
+  {
+    id: 1, title: "Morph to a dot",
+    note: "The active line shortens and thickens into a 5px round dot. One shape, one spring — the same idea the bar's non-compact widget already uses (it morphs its active line into a ball), so the pill and the bar would finally agree. Costs nothing: only implicitWidth/implicitHeight/radius change.",
+    build: () => {
+      const pill = el("div", "pill d1");
+      const rail = el("div", "rail"); rail.style.cssText = "display:flex;gap:8px";
+      DESKNO = 5;
+      for (let i = 0; i < DESKNO; i++) {
+        const c = el("div", "cell"); c.dataset.i = i;
+        c.appendChild(el("div", "line"));
+        rail.appendChild(c);
+      }
+      pill.appendChild(rail);
+      return pill;
+    },
+    apply: (card, active) => {
+      card.querySelectorAll(".cell").forEach(c => c.classList.toggle("on", +c.dataset.i === active));
+    }
+  },
+  {
+    id: 2, title: "Sliding bar",
+    note: "A separate accent bar slides between cells while the lines stay put underneath. Reads as one object travelling rather than two things changing — but it adds a second element to a 22px-tall pill and, at 3px tall, a slider sitting next to a line under the same cell can look doubled.",
+    build: () => {
+      const pill = el("div", "pill d2");
+      const rail = el("div", "rail");
+      const slider = el("div", "slider");
+      rail.appendChild(slider);
+      DESKNO = 5;
+      for (let i = 0; i < DESKNO; i++) {
+        const c = el("div", "cell"); c.dataset.i = i;
+        c.appendChild(el("div", "line"));
+        rail.appendChild(c);
+      }
+      pill.appendChild(rail);
+      return pill;
+    },
+    apply: (card, active) => {
+      const rail = card.querySelector(".rail");
+      const slider = card.querySelector(".slider");
+      rail.style.position = "relative";
+      // slider spans a cell: 21px per cell, 8px gaps
+      slider.style.transform = `translateY(-50%) translateX(${active * 29}px)`;
+      slider.style.width = "21px";
+      card.querySelectorAll(".cell").forEach(c => c.classList.toggle("on", +c.dataset.i === active));
+    }
+  },
+  {
+    id: 3, title: "Stretch and dim",
+    note: "The active line stretches from 11px to 17px and the other desktops fade back. The quietest option — nothing new appears, the row just breathes, and the pill stays as quiet as a glance is supposed to be. Downside: 'longer' is a weak signal on its own, so it leans on colour to carry the state.",
+    build: () => {
+      const pill = el("div", "pill d3");
+      const rail = el("div", "rail"); rail.style.cssText = "display:flex;gap:8px";
+      DESKNO = 5;
+      for (let i = 0; i < DESKNO; i++) {
+        const c = el("div", "cell"); c.dataset.i = i;
+        c.appendChild(el("div", "line"));
+        rail.appendChild(c);
+      }
+      pill.appendChild(rail);
+      return pill;
+    },
+    apply: (card, active) => {
+      card.querySelectorAll(".cell").forEach(c => {
+        const on = +c.dataset.i === active;
+        c.classList.toggle("on", on);
+        c.classList.toggle("dim", !on);
+      });
+    }
+  },
+  {
+    id: 4, title: "Arrival pulse",
+    note: "The handover stays instant (colour only) and the newly active line gets ONE squash-and-stretch pulse as it lights up. This is not a new idea: Workspaces.qml already has exactly this pulse for the reclaim wink, so it is the same tell the pill already uses for 'this desktop just became real'. Cheapest of the five — one scale animation, no layout change.",
+    build: () => {
+      const pill = el("div", "pill d4");
+      const rail = el("div", "rail"); rail.style.cssText = "display:flex;gap:8px";
+      DESKNO = 5;
+      for (let i = 0; i < DESKNO; i++) {
+        const c = el("div", "cell"); c.dataset.i = i;
+        c.appendChild(el("div", "line"));
+        c.appendChild(el("div", "pulse"));
+        rail.appendChild(c);
+      }
+      pill.appendChild(rail);
+      return pill;
+    },
+    apply: (card, active) => {
+      card.querySelectorAll(".cell").forEach(c => c.classList.toggle("on", +c.dataset.i === active));
+      const pulse = card.querySelector(`.cell[data-i="${active}"] .pulse`);
+      if (pulse) { pulse.classList.remove("go"); void pulse.offsetWidth; pulse.classList.add("go"); }
+    }
+  },
+  {
+    id: 5, title: "Travelling token",
+    note: "The accent mark physically detaches from one cell and slides to the next, stretching to full line width only once it arrives. The strongest read of the five — it says 'you moved', not 'the highlight changed'. Costs a moving element and a slightly overshooting curve; on a pill this small the travel is only ~29px per desktop, so the animation is quick.",
+    build: () => {
+      const pill = el("div", "pill d5");
+      const rail = el("div", "rail");
+      const token = el("div", "token");
+      rail.appendChild(token);
+      DESKNO = 5;
+      for (let i = 0; i < DESKNO; i++) {
+        const c = el("div", "cell"); c.dataset.i = i;
+        c.appendChild(el("div", "line"));
+        rail.appendChild(c);
+      }
+      pill.appendChild(rail);
+      return pill;
+    },
+    apply: (card, active) => {
+      const token = card.querySelector(".token");
+      // token is 5px wide, centred in a 21px cell -> x = active*29 + 8
+      token.style.transform = `translateX(${active * 29 + 8}px)`;
+      card.querySelectorAll(".cell").forEach(c => c.classList.toggle("on", +c.dataset.i === active));
+    }
+  }
+];
+
+let DESKNO = 5;
+function el(tag, cls) { const e = document.createElement(tag); if (cls) e.className = cls; return e; }
+
+const rootEl = document.getElementById("cards");
+const cards = [];
+
+DESIGNS.forEach(d => {
+  const card = el("div", "card"); card.dataset.id = d.id;
+  const stage = el("div", "stage");
+  const pill = d.build();
+  stage.appendChild(pill);
+
+  // 4x inset
+  const stageLabel = el("div", "stagelabel"); stageLabel.textContent = "1\u00d7 on the desktop edge";
+  stage.appendChild(stageLabel);
+
+  const zoomRow = el("div", "zoomrow");
+  const zoomLabel = el("div", "zoomlabel"); zoomLabel.textContent = "4\u00d7 detail";
+  const zoom = el("div", "zoomview");
+  const zoomPill = pill.cloneNode(true);
+  zoom.appendChild(zoomPill);
+  zoomRow.append(zoomLabel, zoom);
+
+  const title = el("h2", "design-title"); title.textContent = `${d.id}. ${d.title}`;
+  const note = el("p", "design-note"); note.textContent = d.note;
+
+  const controls = el("div", "controls");
+  const deskBox = el("div", "desktops");
+  const deskBtns = [];
+  for (let i = 0; i < DESKNO; i++) {
+    const b = el("button", null); b.textContent = String(i + 1);
+    b.onclick = () => set(d.id, i, false);
+    deskBox.appendChild(b); deskBtns.push(b);
+  }
+  const replay = el("button", "ghost"); replay.textContent = "↻ Replay";
+  replay.onclick = () => set(d.id, (current[d.id] + 1) % DESKNO, false);
+  const play = el("button", "ghost"); play.textContent = "▶ Auto";
+  const pick = el("button", "ghost pick"); pick.textContent = "Choose this";
+  pick.onclick = () => {
+    cards.forEach(c => c.el.classList.toggle("picked", c.d.id === d.id));
+    tag.textContent = `chosen: ${d.id}. ${d.title}`;
+  };
+  const tag = el("span", "tag"); tag.textContent = "";
+  controls.append(deskBox, replay, play, pick, el("span", "spacer"), tag);
+  card.append(title, note, stage, zoomRow, controls);
+  rootEl.appendChild(card);
+  cards.push({ d, el: card, stage, pill, zoomPill, deskBtns, play, current: null });
+});
+
+const current = {};
+// mirror state across every design so they all show the same desktop
+let activeDesk = 0;
+function set(id, active, fromLoop) {
+  current[id] = active;
+  activeDesk = active;
+  const c = cards.find(x => x.d.id === id);
+  c.d.apply(c.stage, active);
+  c.d.apply(c.zoomPill.parentElement, active);
+  c.deskBtns.forEach((b, i) => b.classList.toggle("sel", i === active));
+}
+
+
+cards.forEach(c => {
+  c.play.onclick = () => {
+    if (c.timer) { clearInterval(c.timer); c.timer = null; c.play.textContent = "▶ Auto"; return; }
+    c.timer = setInterval(() => {
+      current[c.d.id] = (current[c.d.id] + 1) % DESKNO;
+      c.d.apply(c.stage, current[c.d.id]);
+      c.d.apply(c.zoomPill.parentElement, current[c.d.id]);
+      c.deskBtns.forEach((b, i) => b.classList.toggle("sel", i === current[c.d.id]));
+    }, 1500);
+    c.play.textContent = "⏸ Pause";
+  };
+});
+
+// initial paint, then start every design looping
+DESKNO = 5;
+cards.forEach((c, i) => {
+  set(c.d.id, [0, 3, 1, 4, 2][i % 5], false);
+});
+let started = false;
+setTimeout(() => { if (!started) { started = true; cards.forEach(c => c.play.onclick()); } }, 900);
+</script>
+</body>
+</html>

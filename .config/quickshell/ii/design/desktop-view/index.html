@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Desktop overview — three designs</title>
+<style>
+  :root{
+    --bg:#0A0A0A; --lowest:#050505; --low:#121212; --cont:#161616;
+    --high:#1E1E1E; --highest:#262626; --on:#E2E2E2; --onvar:#C6C6C6;
+    --sub:#9E9E9E; --outline:#7E7E7E; --outvar:#3A3A3A;
+    --primary:#F0F0F0; --seccont:#333333; --onsec:#D6D6D6;
+    --sans:"Inter","Noto Sans",system-ui,sans-serif;
+    --mono:"JetBrains Mono","Noto Sans Mono",monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#070707;color:var(--on);font-family:var(--sans);padding:40px 32px 80px}
+
+  header{max-width:1560px;margin:0 auto 34px}
+  header h1{font-size:26px;font-weight:600;letter-spacing:-.2px}
+  header p{color:var(--sub);font-size:14px;margin-top:8px;line-height:1.6;max-width:820px}
+  header .k{color:var(--on);background:var(--seccont);padding:1px 7px;border-radius:5px;font-family:var(--mono);font-size:12px}
+
+  .design{max-width:1560px;margin:0 auto 64px}
+  .dhead{display:flex;align-items:baseline;gap:14px;margin-bottom:14px;flex-wrap:wrap}
+  .dhead .letter{width:28px;height:28px;border-radius:8px;background:var(--seccont);color:var(--on);
+    display:grid;place-items:center;font-weight:700;font-size:14px;flex:none}
+  .dhead h2{font-size:19px;font-weight:600}
+  .dhead .tag{color:var(--sub);font-size:13.5px}
+  .dhead .live{margin-left:auto;font-size:12px;color:var(--sub);font-family:var(--mono);
+    border:1px solid var(--outvar);padding:3px 9px;border-radius:20px}
+
+  /* the simulated 2560x1600 desktop */
+  .stage{position:relative;width:100%;aspect-ratio:2560/1600;border-radius:14px;overflow:hidden;
+    background:#000 url('assets/wp.jpg') center/cover no-repeat;
+    box-shadow:0 24px 70px rgba(0,0,0,.65), 0 0 0 1px rgba(255,255,255,.05)}
+  .stage .veil{position:absolute;inset:0}
+  .stage .bar{position:absolute;top:0;left:0;right:0;height:34px;display:flex;align-items:center;
+    padding:0 14px;gap:10px;font-size:10.5px;color:#cfcfcf}
+  .island{background:rgba(30,30,30,.86);border-radius:9px;height:20px;display:flex;align-items:center;
+    padding:0 10px;gap:8px;backdrop-filter:blur(8px)}
+  .island.left{width:112px;margin-right:auto}
+  .island.mid{width:196px}
+  .island.right{width:150px;margin-left:auto;justify-content:flex-end}
+  .dot{width:4px;height:4px;border-radius:50%;background:#8a8a8a}
+
+  /* frosted card primitives */
+  .frost{background:rgba(22,22,22,.62);backdrop-filter:blur(22px) saturate(140%);
+    border:1px solid rgba(255,255,255,.09);border-radius:16px;
+    box-shadow:0 18px 50px rgba(0,0,0,.5)}
+  .num{font-family:var(--mono);font-weight:600;color:var(--on)}
+  .apps{display:flex;gap:5px;align-items:center;flex-wrap:wrap}
+  .chip{font-size:10px;color:var(--onvar);background:rgba(255,255,255,.09);
+    padding:2.5px 7px;border-radius:20px;white-space:nowrap;display:flex;align-items:center;gap:4px}
+  .chip i{width:7px;height:7px;border-radius:2px;display:inline-block}
+  .empty{border:1.5px dashed rgba(255,255,255,.22);border-radius:16px;
+    display:grid;place-items:center;color:rgba(255,255,255,.4);font-size:12px}
+
+  .shot{width:100%;height:100%;object-fit:cover;display:block}
+
+  /* ── DESIGN A : stage grid ───────────────────────────── */
+  .a-wrap{position:absolute;inset:0;display:grid;place-items:center}
+  .a-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;width:74%}
+  .a-card{position:relative;aspect-ratio:16/10;border-radius:15px;overflow:hidden;
+    background:rgba(20,20,20,.55);backdrop-filter:blur(26px) saturate(130%);
+    border:1px solid rgba(255,255,255,.08);
+    box-shadow:0 16px 44px rgba(0,0,0,.45);
+    transition:transform .22s cubic-bezier(.2,.9,.25,1)}
+  .a-card .shot{position:absolute;inset:0;opacity:.9}
+  .a-card .scrim{position:absolute;inset:0;background:linear-gradient(to top,rgba(0,0,0,.72),rgba(0,0,0,0) 52%)}
+  .a-card .meta{position:absolute;left:12px;right:12px;bottom:10px;display:flex;align-items:center;gap:8px}
+  .a-card .pill{width:22px;height:22px;border-radius:7px;background:rgba(0,0,0,.55);
+    display:grid;place-items:center;font-family:var(--mono);font-size:11px;font-weight:600;
+    border:1px solid rgba(255,255,255,.14)}
+  .a-card .apps{margin-left:auto}
+  .a-card.active{border:2px solid var(--primary);transform:scale(1.035);
+    box-shadow:0 22px 60px rgba(0,0,0,.6),0 0 0 6px rgba(240,240,240,.10)}
+  .a-card.active .pill{background:var(--primary);color:#0A0A0A;border-color:transparent}
+  .a-card.add{display:grid;place-items:center;background:rgba(20,20,20,.34);
+    backdrop-filter:blur(20px);border:1.5px dashed rgba(255,255,255,.2);color:rgba(255,255,255,.55);font-size:26px}
+
+  /* ── DESIGN B : filmstrip ────────────────────────────── */
+  .b-wrap{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:flex-end;
+    padding-bottom:44px;align-items:center}
+  .b-strip{display:flex;align-items:flex-end;gap:16px}
+  .b-card{position:relative;border-radius:13px;overflow:hidden;width:212px;height:126px;
+    background:rgba(20,20,20,.5);backdrop-filter:blur(24px) saturate(130%);
+    border:1px solid rgba(255,255,255,.08);box-shadow:0 14px 36px rgba(0,0,0,.5);
+    transition:all .26s cubic-bezier(.2,.9,.25,1)}
+  .b-card .shot{position:absolute;inset:0;opacity:.92}
+  .b-card .scrim{position:absolute;inset:0;background:linear-gradient(to top,rgba(0,0,0,.78),transparent 60%)}
+  .b-card .foot{position:absolute;left:10px;right:10px;bottom:8px;display:flex;align-items:center;gap:7px}
+  .b-card .pill{width:20px;height:20px;border-radius:6px;background:rgba(0,0,0,.6);
+    display:grid;place-items:center;font-family:var(--mono);font-size:10.5px;font-weight:600;
+    border:1px solid rgba(255,255,255,.14)}
+  .b-card .apps{margin-left:auto;gap:4px}
+  .b-card .chip{font-size:9px;padding:2px 6px}
+  .b-card.side{width:158px;height:96px;opacity:.62}
+  .b-card.hero{width:430px;height:250px;border:2px solid var(--primary);
+    box-shadow:0 26px 70px rgba(0,0,0,.6),0 0 0 6px rgba(240,240,240,.10)}
+  .b-card.hero .pill{background:var(--primary);color:#0A0A0A;border-color:transparent;width:24px;height:24px}
+  .b-card.hero .chip{font-size:10.5px;padding:3px 8px}
+  .b-card.add{width:158px;height:96px;display:grid;place-items:center;background:rgba(20,20,20,.3);
+    backdrop-filter:blur(18px);border:1.5px dashed rgba(255,255,255,.2);color:rgba(255,255,255,.5);font-size:20px}
+  .b-hint{position:absolute;top:0;left:0;right:0;bottom:0;display:grid;place-items:center;
+    pointer-events:none}
+  .b-title{text-align:center;margin-bottom:16px}
+  .b-title .h{font-size:19px;font-weight:600;letter-spacing:-.2px}
+  .b-title .s{color:rgba(255,255,255,.62);font-size:12.5px;margin-top:4px}
+
+  /* ── DESIGN C : list + stage ─────────────────────────── */
+  .c-wrap{position:absolute;inset:0;display:grid;grid-template-columns:288px 1fr;gap:26px;
+    padding:52px 46px;align-items:center}
+  .c-list{display:flex;flex-direction:column;gap:8px}
+  .c-row{display:flex;align-items:center;gap:12px;padding:11px 13px;border-radius:13px;
+    background:rgba(22,22,22,.5);backdrop-filter:blur(22px) saturate(130%);
+    border:1px solid rgba(255,255,255,.07);transition:all .2s}
+  .c-row .pill{width:26px;height:26px;border-radius:8px;background:rgba(0,0,0,.5);
+    display:grid;place-items:center;font-family:var(--mono);font-size:12px;font-weight:600;
+    border:1px solid rgba(255,255,255,.13);flex:none}
+  .c-row .txt{min-width:0;flex:1}
+  .c-row .n{font-size:12.5px;color:var(--on);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .c-row .m{font-size:11px;color:var(--sub);margin-top:2px}
+  .c-row.sel{background:var(--seccont);border-color:transparent;
+    box-shadow:0 10px 26px rgba(0,0,0,.4)}
+  .c-row.sel .pill{background:var(--primary);color:#0A0A0A;border-color:transparent}
+  .c-row.add{border:1.5px dashed rgba(255,255,255,.18);background:rgba(22,22,22,.28);color:var(--sub);
+    justify-content:center;font-size:12.5px}
+  .c-stage{position:relative;height:100%;border-radius:18px;overflow:hidden;
+    background:rgba(20,20,20,.45);backdrop-filter:blur(30px) saturate(130%);
+    border:1px solid rgba(255,255,255,.09);box-shadow:0 26px 70px rgba(0,0,0,.55)}
+  .c-stage .shot{position:absolute;inset:0;opacity:.93}
+  .c-stage .scrim{position:absolute;inset:0;background:linear-gradient(to top,rgba(0,0,0,.8),transparent 55%)}
+  .c-stage .foot{position:absolute;left:20px;right:20px;bottom:16px;display:flex;align-items:flex-end;gap:12px}
+  .c-stage .big{font-family:var(--mono);font-size:40px;font-weight:700;line-height:.9;opacity:.95}
+  .c-stage .apps{margin-left:auto}
+  .c-stage .chip{font-size:11.5px;padding:4px 10px;background:rgba(0,0,0,.42)}
+
+
+  /* ── Design A (rich) ─────────────────────────────────── */
+  .a-head{position:absolute;top:52px;left:0;right:0;display:flex;align-items:flex-end;
+    padding:0 6%;gap:20px}
+  .a-head-t{font-size:21px;font-weight:650;letter-spacing:-.3px}
+  .a-head-s{font-size:12.5px;color:rgba(255,255,255,.6);margin-top:3px}
+  .a-hints{margin-left:auto;display:flex;gap:14px;align-items:center}
+  .hint{font-size:11.5px;color:rgba(255,255,255,.62);display:flex;align-items:center;gap:5px}
+  .kbd{font-family:var(--mono);font-size:10.5px;background:rgba(255,255,255,.13);
+    border:1px solid rgba(255,255,255,.12);border-radius:5px;padding:1.5px 6px;color:#fff}
+  .a-wrap{position:absolute;inset:0;display:grid;place-items:center;padding-top:6px}
+  .a-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;width:88%;
+    margin-top:34px}
+  .a-card2{position:relative;aspect-ratio:16/10;border-radius:15px;overflow:hidden;
+    background:rgba(20,20,20,.5);backdrop-filter:blur(24px) saturate(130%);
+    border:1px solid rgba(255,255,255,.08);box-shadow:0 16px 44px rgba(0,0,0,.5)}
+  .a-card2 .shot{position:absolute;inset:0;opacity:.62}
+  .a-card2 .scrim{position:absolute;inset:0;
+    background:linear-gradient(to bottom,rgba(0,0,0,.55),rgba(0,0,0,.12) 34%,rgba(0,0,0,.86))}
+  .c2-top{position:absolute;top:10px;left:11px;right:11px;display:flex;align-items:center;gap:8px}
+  .c2-num{width:26px;height:26px;border-radius:8px;background:rgba(0,0,0,.55);
+    display:grid;place-items:center;font-family:var(--mono);font-size:12.5px;font-weight:700;
+    border:1px solid rgba(255,255,255,.16)}
+  .c2-num.big{width:44px;height:44px;border-radius:12px;font-size:19px;background:rgba(255,255,255,.08)}
+  .c2-badge{margin-left:auto;font-size:10.5px;color:rgba(255,255,255,.78);
+    background:rgba(0,0,0,.45);border:1px solid rgba(255,255,255,.11);
+    padding:3px 8px;border-radius:20px}
+  .c2-bot{position:absolute;left:11px;right:11px;bottom:10px}
+  .c2-list{display:flex;flex-direction:column;gap:4px;margin-bottom:8px}
+  .c2-app{display:flex;align-items:center;gap:7px;font-size:11.5px;color:#fff}
+  .c2-app i{width:9px;height:9px;border-radius:3px;flex:none}
+  .c2-n{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .c2-c{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:rgba(255,255,255,.55)}
+  .c2-now{display:flex;align-items:center;gap:7px;font-size:11px;color:#fff;
+    background:rgba(255,255,255,.10);border-radius:8px;padding:4px 8px;margin-bottom:8px}
+  .c2-now .c2-c{margin-left:auto}
+  .eq{display:flex;align-items:flex-end;gap:2px;height:10px}
+  .eq i{width:2.5px;background:#fff;border-radius:1px;animation:eq .9s ease-in-out infinite}
+  .eq i:nth-child(1){height:5px}
+  .eq i:nth-child(2){height:10px;animation-delay:.15s}
+  .eq i:nth-child(3){height:7px;animation-delay:.3s}
+  @keyframes eq{0%,100%{transform:scaleY(.45)}50%{transform:scaleY(1)}}
+  .c2-bar{height:4px;border-radius:3px;background:rgba(255,255,255,.16);overflow:hidden}
+  .c2-bar span{display:block;height:100%;width:var(--p);background:rgba(255,255,255,.82);border-radius:3px}
+  .c2-ram{font-family:var(--mono);font-size:10px;color:rgba(255,255,255,.6);margin-top:5px}
+  .c2-live{position:absolute;top:10px;left:50%;transform:translateX(-50%);
+    font-size:10px;letter-spacing:.4px;text-transform:uppercase;color:#0A0A0A;
+    background:#F0F0F0;padding:3px 10px;border-radius:20px;font-weight:700;
+    display:flex;align-items:center;gap:5px}
+  .dotlive{width:5px;height:5px;border-radius:50%;background:#0A0A0A;animation:bl 1.4s infinite}
+  @keyframes bl{0%,100%{opacity:1}50%{opacity:.25}}
+  .a-card2.active{border:2px solid #F0F0F0;transform:scale(1.04);
+    box-shadow:0 24px 64px rgba(0,0,0,.6),0 0 0 6px rgba(240,240,240,.10)}
+  .a-card2.active .c2-num{background:#F0F0F0;color:#0A0A0A;border-color:transparent}
+  .a-card2.vacant{background:rgba(20,20,20,.34);backdrop-filter:blur(20px);
+    border:1.5px dashed rgba(255,255,255,.18)}
+  .c2-vac{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:6px;padding-bottom:34px}
+  .c2-vt{font-size:12.5px;color:rgba(255,255,255,.8)}
+  .c2-vs{font-size:11px;color:rgba(255,255,255,.45)}
+  .a-card2.add{background:rgba(20,20,20,.28);backdrop-filter:blur(18px);
+    border:1.5px dashed rgba(255,255,255,.18);display:grid;place-items:center;gap:8px;
+    align-content:center;color:rgba(255,255,255,.6)}
+  .c2-plus{font-size:34px;line-height:1;font-weight:200}
+
+  .notes{max-width:1560px;margin:14px auto 0;font-size:13px;color:var(--sub);line-height:1.65}
+  .notes b{color:var(--onvar);font-weight:600}
+  .kbd{font-family:var(--mono);font-size:11.5px;background:var(--seccont);border-radius:5px;padding:2px 6px;color:var(--onsec)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Desktop overview — where the bar's empty middle used to open the sidebars</h1>
+  <p>One wallpaper, blurred once. The desktops are <b style="color:var(--on)">frosted cards floating on it</b> — no repeated wallpaper per tile — and each card carries its own
+  <b style="color:var(--on)">live app previews</b> inside (real <span class="k">ScreencopyView</span> captures, exactly like the window switcher already does).
+  Click a card to jump. Nothing closes: no window is ever moved or killed.
+  Gestures: <span class="k">SUPER + 4-finger swipe down</span>, or tap the bar's empty stretches (left of the clock island, right of the now-bar island).</p>
+</header>
+
+<!-- ══════════════ A (rich) ══════════════ -->
+<section class="design">
+  <div class="dhead">
+    <div class="letter">A</div>
+    <h2>Frosted stage — full</h2>
+    <span class="tag">Same frosted grid, but every card carries real content: number, window count, named apps, what's playing</span>
+    <span class="live">one blurred wallpaper · live app previews</span>
+  </div>
+  <div class="stage">
+    <div class="veil" style="background:rgba(0,0,0,.42);backdrop-filter:blur(3px)"></div>
+    <div class="bar">
+      <div class="island left"><span class="dot"></span><span style="margin-left:4px">03:06</span></div>
+      <div class="island mid"><span class="dot"></span><span style="opacity:.7">now playing · Focus</span></div>
+      <div class="island right"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+    </div>
+
+    <!-- header -->
+    <div class="a-head">
+      <div class="a-head-l">
+        <div class="a-head-t">Desktops</div>
+        <div class="a-head-s">6 total · 2 apps running</div>
+      </div>
+      <div class="a-hints">
+        <span class="hint"><span class="kbd">↵</span> open</span>
+        <span class="hint"><span class="kbd">←</span><span class="kbd">→</span> move</span>
+        <span class="hint"><span class="kbd">esc</span> close</span>
+        <span class="hint"><span class="kbd">del</span> close desktop</span>
+      </div>
+    </div>
+
+    <div class="a-wrap">
+      <div class="a-grid">
+        <!-- card 1 -->
+        <div class="a-card2">
+          <img class="shot" src="assets/app1.png">
+          <div class="scrim"></div>
+          <div class="c2-top"><div class="c2-num">1</div>
+            <div class="c2-badge">2 windows</div></div>
+          <div class="c2-bot">
+            <div class="c2-list">
+              <div class="c2-app"><i style="background:#FB542B"></i><span class="c2-n">Brave</span><span class="c2-c">1</span></div>
+              <div class="c2-app"><i style="background:#3AA6A6"></i><span class="c2-n">Codebuff</span><span class="c2-c">1</span></div>
+            </div>
+            <div class="c2-bar" style="--p:34%"><span></span></div>
+            <div class="c2-ram">RAM 34% · 11.0 / 32 GB</div>
+          </div>
+        </div>
+        <!-- card 2 -->
+        <div class="a-card2">
+          <img class="shot" src="assets/app2.png">
+          <div class="scrim"></div>
+          <div class="c2-top"><div class="c2-num">2</div>
+            <div class="c2-badge">1 window</div></div>
+          <div class="c2-bot">
+            <div class="c2-list">
+              <div class="c2-app"><i style="background:#FF7139"></i><span class="c2-n">Firefox</span><span class="c2-c">1</span></div>
+            </div>
+            <div class="c2-bar" style="--p:41%"><span></span></div>
+            <div class="c2-ram">RAM 41% · 13.1 / 32 GB</div>
+          </div>
+        </div>
+        <!-- card 3 : active -->
+        <div class="a-card2 active">
+          <img class="shot" src="assets/app3.png">
+          <div class="scrim"></div>
+          <div class="c2-live"><span class="dotlive"></span>you are here</div>
+          <div class="c2-top"><div class="c2-num">3</div>
+            <div class="c2-badge">1 window</div></div>
+          <div class="c2-bot">
+            <div class="c2-list">
+              <div class="c2-app"><i style="background:#8B7FE8"></i><span class="c2-n">Freebuff</span><span class="c2-c">1</span></div>
+            </div>
+            <div class="c2-now"><span class="eq"><i></i><i></i><i></i></span>
+              <span class="c2-n">Focus</span><span class="c2-c">In Flames</span></div>
+            <div class="c2-bar" style="--p:27%"><span></span></div>
+            <div class="c2-ram">RAM 27% · 8.6 / 32 GB</div>
+          </div>
+        </div>
+        <!-- card 4 -->
+        <div class="a-card2">
+          <img class="shot" src="assets/app1.png">
+          <div class="scrim"></div>
+          <div class="c2-top"><div class="c2-num">4</div>
+            <div class="c2-badge">3 windows</div></div>
+          <div class="c2-bot">
+            <div class="c2-list">
+              <div class="c2-app"><i style="background:#5E9E4F"></i><span class="c2-n">Files</span><span class="c2-c">1</span></div>
+              <div class="c2-app"><i style="background:#E6C26A"></i><span class="c2-n">Terminal</span><span class="c2-c">1</span></div>
+              <div class="c2-app"><i style="background:#4A90D9"></i><span class="c2-n">Settings</span><span class="c2-c">1</span></div>
+            </div>
+            <div class="c2-bar" style="--p:58%"><span></span></div>
+            <div class="c2-ram">RAM 58% · 18.6 / 32 GB</div>
+          </div>
+        </div>
+        <!-- card 5 : empty -->
+        <div class="a-card2 vacant">
+          <div class="c2-vac">
+            <div class="c2-num big">5</div>
+            <div class="c2-vt">Empty desktop</div>
+            <div class="c2-vs">no windows · 0.4 GB free headroom</div>
+          </div>
+          <div class="c2-bot">
+            <div class="c2-bar" style="--p:27%"><span></span></div>
+            <div class="c2-ram">shared · 8.6 / 32 GB</div>
+          </div>
+        </div>
+        <!-- add -->
+        <div class="a-card2 add">
+          <div class="c2-plus">+</div>
+          <div class="c2-vt">New desktop</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="notes"><b>What each card now carries:</b> desktop number, window count, every app with its own per-app count, a live RAM bar for that desktop, "you are here" on the current one, and what's playing if audio lives there. Empty desktops say so instead of showing a dead preview. Those are the facts a normal overview gives you — the wallpaper is still the only background, blurred once.</p>
+</section>
+
+<!-- ══════════════ B ══════════════ -->
+<section class="design">
+  <div class="dhead">
+    <div class="letter">B</div>
+    <h2>Filmstrip</h2>
+    <span class="tag">One big hero card for the desktop you're on, neighbours shrink to the sides</span>
+    <span class="live">wallpaper stays sharp — it's the wallpaper, not a scrim</span>
+  </div>
+  <div class="stage">
+    <div class="veil" style="background:radial-gradient(120% 90% at 50% 100%,rgba(0,0,0,.62),rgba(0,0,0,.12) 70%)"></div>
+    <div class="bar">
+      <div class="island left"><span class="dot"></span><span style="margin-left:4px">03:06</span></div>
+      <div class="island mid"><span class="dot"></span><span style="opacity:.7">now playing · Focus</span></div>
+      <div class="island right"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+    </div>
+    <div class="b-wrap">
+      <div class="b-title">
+        <div class="h">Desktop 3</div>
+        <div class="s">Freebuff · 1 window</div>
+      </div>
+      <div class="b-strip">
+        <div class="b-card side">
+          <img class="shot" src="assets/app2.png"><div class="scrim"></div>
+          <div class="foot"><div class="pill">2</div>
+            <div class="apps"><span class="chip"><i style="background:#8B7FE8"></i>Freebuff</span></div></div>
+        </div>
+        <div class="b-card hero">
+          <img class="shot" src="assets/app3.png"><div class="scrim"></div>
+          <div class="foot"><div class="pill">3</div>
+            <div class="apps"><span class="chip"><i style="background:#8B7FE8"></i>Freebuff</span><span class="chip">⌥ switch</span></div></div>
+        </div>
+        <div class="b-card side">
+          <img class="shot" src="assets/app1.png"><div class="scrim"></div>
+          <div class="foot"><div class="pill">4</div>
+            <div class="apps"><span class="chip"><i style="background:#5E9E4F"></i>Files</span></div></div>
+        </div>
+        <div class="b-card add">+</div>
+      </div>
+    </div>
+  </div>
+  <p class="notes"><b>Reads as:</b> a media shelf — the current desktop is the poster, its neighbours are the thumbnails. The wallpaper stays <b>sharp</b> and only the cards are frosted.
+  <b>Best for:</b> "which desktop do I want" — you see one clearly and the rest as context. <b>Cost:</b> only neighbours are visible, so jumping from 1 to 9 takes two presses.</p>
+</section>
+
+<!-- ══════════════ C ══════════════ -->
+<section class="design">
+  <div class="dhead">
+    <div class="letter">C</div>
+    <h2>Rail + stage</h2>
+    <span class="tag">A slim list of every desktop on the left, the selected one blown up on the right</span>
+    <span class="live">most information, least wallpaper</span>
+  </div>
+  <div class="stage">
+    <div class="veil" style="background:linear-gradient(100deg,rgba(0,0,0,.55),rgba(0,0,0,.22))"></div>
+    <div class="bar">
+      <div class="island left"><span class="dot"></span><span style="margin-left:4px">03:06</span></div>
+      <div class="island mid"><span class="dot"></span><span style="opacity:.7">now playing · Focus</span></div>
+      <div class="island right"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+    </div>
+    <div class="c-wrap">
+      <div class="c-list">
+        <div class="c-row"><div class="pill">1</div>
+          <div class="txt"><div class="n">Brave</div><div class="m">1 window</div></div></div>
+        <div class="c-row"><div class="pill">2</div>
+          <div class="txt"><div class="n">Freebuff</div><div class="m">1 window</div></div></div>
+        <div class="c-row sel"><div class="pill">3</div>
+          <div class="txt"><div class="n">Freebuff</div><div class="m">1 window · active</div></div></div>
+        <div class="c-row"><div class="pill">4</div>
+          <div class="txt"><div class="n">Files · Codebuff</div><div class="m">2 windows</div></div></div>
+        <div class="c-row"><div class="pill">5</div>
+          <div class="txt"><div class="n">Freebuff</div><div class="m">1 window</div></div></div>
+        <div class="c-row add">+ new desktop</div>
+      </div>
+      <div class="c-stage">
+        <img class="shot" src="assets/app3.png"><div class="scrim"></div>
+        <div class="foot">
+          <div class="big">3</div>
+          <div>
+            <div style="font-size:13px;font-weight:600">Freebuff</div>
+            <div style="font-size:11.5px;color:rgba(255,255,255,.6);margin-top:2px">Desktop 3 of 5 · 1 window open</div>
+          </div>
+          <div class="apps"><span class="chip"><i style="background:#8B7FE8"></i>Freebuff</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="notes"><b>Reads as:</b> a file manager for desktops — a list you can scan and a big preview beside it.
+  <b>Best for:</b> many desktops, and for names (the list can show each desktop's apps as text, not just icons). <b>Cost:</b> the wallpaper is the most covered-up of the three.</p>
+</section>
+
+</body>
+</html>

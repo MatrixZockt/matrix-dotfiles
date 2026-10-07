@@ -9,7 +9,7 @@ My own Hyprland configuration — versioned, editable, and **live**.
 | Desktop shell | Quickshell (`qs -c ii`), illogical-impulse style |
 | Base | [end-4/dots-hyprland](https://github.com/end-4/dots-hyprland) |
 | Repo location | `~/hyprland` |
-| GitHub | [grafizum/grafizum-dotfiles](https://github.com/grafizum/grafizum-dotfiles) |
+| GitHub | [grafizum/matrix-dotfiles](https://github.com/grafizum/matrix-dotfiles) |
 | Live config | `~/.config/hypr` → symlink to `~/hyprland/.config/hypr` |
 
 `~/.config/hypr` **is** this repo. Edit a file here, run `make reload`, and the running
@@ -546,7 +546,7 @@ recoverable. After an update, re-check the two local patches above, then `make r
 ## Restoring this setup on a fresh machine
 
 ```bash
-git clone https://github.com/grafizum/grafizum-dotfiles.git ~/hyprland
+git clone https://github.com/grafizum/matrix-dotfiles.git ~/hyprland
 ~/hyprland/install.sh        # links ~/.config/*
 make reload
 ```

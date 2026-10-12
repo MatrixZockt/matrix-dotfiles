@@ -40,7 +40,12 @@ ContentPage {
 
     readonly property var sections: [
         { key: "wifi", name: Translation.tr("Wi-Fi"), icon: "wifi" },
-        { key: "bluetooth", name: Translation.tr("Bluetooth"), icon: "bluetooth" }
+        { key: "bluetooth", name: Translation.tr("Bluetooth"), icon: "bluetooth" },
+        // The third kind of connection this machine can be on. It is a tab and
+        // not a separate page because it is the same question -- what is this
+        // machine connected to -- and because the bar's VPN menu ('s tune
+        // button) already walks here the way the other two icons do.
+        { key: "vpn", name: Translation.tr("VPN"), icon: "vpn_lock" }
     ]
 
     // Which tab is open. Where it starts comes from whoever opened the app: the
@@ -78,12 +83,26 @@ ContentPage {
             Network.enableWifi();
         Network.rescanWifi();
         root.syncRadios();
+        // Tailscale is asked for its state here as well as on its own tab:
+        // the tab may never be opened, and the sidebar's toggle reads the same
+        // service, so a stale read would be two places disagreeing.
+        Tailscale.refresh();
+        Tailscale.refreshPrefs();
     }
 
     // Discovery is expensive, so it is only on while the Bluetooth tab is the
     // one being looked at -- the same rule the Bluetooth popup used, moved from
     // "the page is open" to "the tab is open".
-    onSectionChanged: root.syncRadios()
+    onSectionChanged: {
+        root.syncRadios();
+        // The VPN tab reads the daemon the moment it opens, so its switches
+        // show the tailnet's real preferences rather than whatever they were
+        // when this page started.
+        if (root.section === "vpn") {
+            Tailscale.refresh();
+            Tailscale.refreshPrefs();
+        }
+    }
     function syncRadios() {
         const wanted = root.section === "bluetooth";
         if (Bluetooth.defaultAdapter === null)
@@ -427,6 +446,345 @@ ContentPage {
             visible: !BluetoothStatus.available
             color: Appearance.colors.colOnLayer1Inactive
             text: Translation.tr("No Bluetooth adapter found on this machine.")
+        }
+    }
+
+    // ── VPN (Tailscale) ──────────────────────────────────────────────────
+    //
+    // One switch per preference `tailscale set` documents, in the order the
+    // decisions are actually made: is it up, which machine do I leave the
+    // tailnet through, what do I accept FROM the tailnet, and only then what
+    // do I offer TO it. The offering half is device configuration and an
+    // admin still has to approve it in the console -- the note at the bottom
+    // says so instead of letting a switch imply it is done.
+    ContentSection {
+        visible: root.section === "vpn"
+        icon: "vpn_lock"
+        title: Translation.tr("VPN")
+
+        StyledText {
+            Layout.fillWidth: true
+            visible: !Tailscale.installed
+            color: Appearance.colors.colOnLayer1Inactive
+            text: Translation.tr("The tailscale command was not found on this machine.")
+        }
+
+        // ── Where the tailnet stands ─────────────────────────────────────
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            visible: Tailscale.installed
+
+            StyledText {
+                Layout.fillWidth: true
+                color: Appearance.colors.colOnLayer1Inactive
+                font.pixelSize: Appearance.font.pixelSize.small
+                elide: Text.ElideRight
+                text: {
+                    if (!Tailscale.installed)
+                        return "";
+                    const who = Tailscale.selfName.length > 0
+                        ? Tailscale.selfName + (Tailscale.selfIp.length > 0 ? "  " + Tailscale.selfIp : "")
+                        : Translation.tr("This device");
+                    const online = Tailscale.peers.filter(p => p.online).length;
+                    return Translation.tr("%1  ·  %2  ·  %3 of %4 devices online")
+                        .arg(who).arg(Tailscale.statusText).arg(online).arg(Tailscale.peers.length);
+                }
+            }
+
+            StyledIndeterminateProgressBar {
+                visible: Tailscale.busy
+                Layout.fillWidth: false
+                Layout.preferredWidth: 120
+            }
+        }
+
+        // Connect / disconnect. `down` leaves the node key alone, so the next
+        // switch on needs no sign-in -- see the service's own note.
+        ConfigSwitch {
+            buttonIcon: Tailscale.connected ? "vpn_lock" : "vpn_key_off"
+            text: Translation.tr("Tailscale")
+            enabled: Tailscale.installed && !Tailscale.busy
+            checked: Tailscale.connected
+            onCheckedChanged: {
+                if (Tailscale.connected !== checked)
+                    Tailscale.setEnabled(checked);
+            }
+        }
+
+        // A node whose key expired looks exactly like a VPN that will not turn
+        // on, so the one case that needs a browser offers the link here too.
+        RippleButton {
+            Layout.fillWidth: true
+            visible: Tailscale.loginRequired && Tailscale.authUrl !== ""
+            implicitHeight: 38
+            buttonRadius: Appearance.rounding.normal
+            colBackground: Appearance.colors.colPrimary
+            colBackgroundHover: Appearance.colors.colPrimaryHover
+            onClicked: Quickshell.execDetached(["xdg-open", Tailscale.authUrl])
+            contentItem: StyledText {
+                anchors.centerIn: parent
+                text: Translation.tr("Sign in to Tailscale")
+                color: Appearance.colors.colOnPrimary
+                font.pixelSize: Appearance.font.pixelSize.small
+            }
+        }
+
+        // ── Which machine the tailnet leaves through ──────────────────────
+        StyledText {
+            Layout.fillWidth: true
+            Layout.topMargin: 6
+            visible: Tailscale.installed
+            text: Translation.tr("Exit node")
+            font.pixelSize: Appearance.font.pixelSize.small
+            color: Appearance.colors.colOnLayer1
+        }
+
+        StyledText {
+            Layout.fillWidth: true
+            visible: Tailscale.installed && Tailscale.exitNodeOptions.length === 0
+            color: Appearance.colors.colOnLayer1Inactive
+            font.pixelSize: Appearance.font.pixelSize.small
+            text: Translation.tr("No other device offers to be an exit node. Turn one on from the device you want, or approve it in the admin console.")
+        }
+
+        // "None" first, then the nodes: the way out of a setting is always in
+        // the same list as the setting. Rows, not a dropdown -- there are
+        // rarely more than a handful, and a list shows which one is in use.
+        Repeater {
+            model: ScriptModel {
+                values: [{
+                    "name": Translation.tr("Direct connection (no exit node)"),
+                    "ip": "",
+                    "selected": !Tailscale.usingExitNode
+                }].concat(Tailscale.exitNodeOptions.map(peer => ({
+                    "name": peer.name,
+                    "ip": peer.ip,
+                    "selected": Tailscale.exitNodeIp === peer.ip
+                })))
+            }
+
+            delegate: RippleButton {
+                id: exitNodeRow
+                required property var modelData
+                Layout.fillWidth: true
+                implicitHeight: 40
+                buttonRadius: Appearance.rounding.normal
+                visible: Tailscale.installed
+                enabled: !Tailscale.busy
+                colBackground: exitNodeRow.modelData.selected
+                    ? Appearance.colors.colSecondaryContainer
+                    : "transparent"
+                colBackgroundHover: exitNodeRow.modelData.selected
+                    ? Appearance.colors.colSecondaryContainerHover
+                    : Appearance.colors.colLayer1Hover
+                onClicked: Tailscale.setExitNode(exitNodeRow.modelData.ip)
+
+                contentItem: RowLayout {
+                    anchors {
+                        fill: parent
+                        leftMargin: 12
+                        rightMargin: 12
+                    }
+                    spacing: 10
+
+                    MaterialSymbol {
+                        text: exitNodeRow.modelData.selected ? "radio_button_checked" : "radio_button_unchecked"
+                        iconSize: Appearance.font.pixelSize.normal
+                        color: exitNodeRow.modelData.selected
+                            ? Appearance.colors.colOnSecondaryContainer
+                            : Appearance.colors.colOnLayer1Inactive
+                    }
+                    StyledText {
+                        Layout.fillWidth: true
+                        elide: Text.ElideRight
+                        font.pixelSize: Appearance.font.pixelSize.small
+                        color: exitNodeRow.modelData.selected
+                            ? Appearance.colors.colOnSecondaryContainer
+                            : Appearance.colors.colOnLayer1
+                        text: exitNodeRow.modelData.name
+                    }
+                }
+            }
+        }
+
+        // Off by default in Tailscale, and the first thing anyone notices they
+        // want after switching an exit node on: without it the printer on your
+        // own LAN disappears behind the exit node.
+        ConfigSwitch {
+            buttonIcon: "lan"
+            text: Translation.tr("Allow local network access while using an exit node")
+            visible: Tailscale.installed
+            // Meaningless without an exit node, so it says so by being
+            // unavailable rather than by silently doing nothing when pressed.
+            enabled: Tailscale.usingExitNode && !Tailscale.busy
+            checked: Tailscale.exitNodeAllowLanAccess
+            onCheckedChanged: {
+                if (Tailscale.exitNodeAllowLanAccess !== checked)
+                    Tailscale.setToggle("--exit-node-allow-lan-access", checked);
+            }
+        }
+
+        // ── What this device accepts from the tailnet ─────────────────────
+        ConfigSwitch {
+            buttonIcon: "route"
+            text: Translation.tr("Accept subnet routes")
+            visible: Tailscale.installed
+            enabled: !Tailscale.busy
+            checked: Tailscale.acceptRoutes
+            onCheckedChanged: {
+                if (Tailscale.acceptRoutes !== checked)
+                    Tailscale.setToggle("--accept-routes", checked);
+            }
+        }
+
+        ConfigSwitch {
+            buttonIcon: "dns"
+            text: Translation.tr("Use tailnet DNS (MagicDNS)")
+            visible: Tailscale.installed
+            enabled: !Tailscale.busy
+            checked: Tailscale.acceptDns
+            onCheckedChanged: {
+                if (Tailscale.acceptDns !== checked)
+                    Tailscale.setToggle("--accept-dns", checked);
+            }
+        }
+
+        ConfigSwitch {
+            buttonIcon: "shield"
+            text: Translation.tr("Shields up (block incoming connections)")
+            visible: Tailscale.installed
+            enabled: !Tailscale.busy
+            checked: Tailscale.shieldsUp
+            onCheckedChanged: {
+                if (Tailscale.shieldsUp !== checked)
+                    Tailscale.setToggle("--shields-up", checked);
+            }
+        }
+
+        ConfigSwitch {
+            buttonIcon: "terminal"
+            text: Translation.tr("Tailscale SSH server")
+            visible: Tailscale.installed
+            enabled: !Tailscale.busy
+            checked: Tailscale.runSSH
+            onCheckedChanged: {
+                if (Tailscale.runSSH !== checked)
+                    Tailscale.setToggle("--ssh", checked);
+            }
+        }
+
+        // ── What this device offers to the tailnet ────────────────────────
+        // Device configuration only. The admin console has the final say on
+        // both of these, which the note under them states outright -- an
+        // advertised route that nobody approved is a switch that appears to
+        // work and does nothing.
+        ConfigSwitch {
+            buttonIcon: "logout"
+            text: Translation.tr("Offer this device as an exit node")
+            visible: Tailscale.installed
+            enabled: !Tailscale.busy
+            checked: Tailscale.advertiseExitNode
+            onCheckedChanged: {
+                if (Tailscale.advertiseExitNode !== checked)
+                    Tailscale.setToggle("--advertise-exit-node", checked);
+            }
+        }
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            visible: Tailscale.installed
+            spacing: 6
+
+            StyledText {
+                Layout.fillWidth: true
+                text: Translation.tr("Advertise subnet routes")
+                font.pixelSize: Appearance.font.pixelSize.small
+                color: Appearance.colors.colOnLayer1
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                MaterialTextField {
+                    id: advertiseRoutesField
+                    Layout.fillWidth: true
+                    placeholderText: "192.168.1.0/24, 10.0.0.0/8"
+                    // The daemon's current answer, so the field shows what is
+                    // actually advertised (the exit-node default route excepted:
+                    // that half is the switch above).
+                    text: Tailscale.advertiseRoutes.filter(route => route !== "0.0.0.0/0" && route !== "::/0").join(", ")
+                }
+
+                RippleButton {
+                    Layout.fillWidth: false
+                    implicitWidth: 86
+                    implicitHeight: 40
+                    buttonRadius: Appearance.rounding.small
+                    enabled: !Tailscale.busy
+                    colBackground: Appearance.colors.colLayer1
+                    colBackgroundHover: Appearance.colors.colLayer1Hover
+                    onClicked: Tailscale.setAdvertiseRoutes(advertiseRoutesField.text)
+                    contentItem: StyledText {
+                        anchors.centerIn: parent
+                        text: Translation.tr("Apply")
+                        color: Appearance.colors.colOnLayer1
+                        font.pixelSize: Appearance.font.pixelSize.small
+                    }
+                }
+            }
+
+            StyledText {
+                Layout.fillWidth: true
+                color: Appearance.colors.colOnLayer1Inactive
+                font.pixelSize: Appearance.font.pixelSize.smaller
+                wrapMode: Text.WordWrap
+                text: Translation.tr("Advertised routes and exit nodes still have to be approved for this device in the Tailscale admin console before the tailnet can use them.")
+            }
+        }
+
+        // ── The way out ──────────────────────────────────────────────────
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.topMargin: 6
+            visible: Tailscale.installed
+            spacing: 8
+
+            RippleButton {
+                Layout.fillWidth: true
+                implicitHeight: 38
+                buttonRadius: Appearance.rounding.normal
+                enabled: !Tailscale.busy
+                colBackground: Appearance.colors.colLayer1
+                colBackgroundHover: Appearance.colors.colLayer1Hover
+                onClicked: Tailscale.login()
+                contentItem: StyledText {
+                    anchors.centerIn: parent
+                    text: Translation.tr("Sign in")
+                    color: Appearance.colors.colOnLayer1
+                    font.pixelSize: Appearance.font.pixelSize.small
+                }
+            }
+
+            // Logging out expires the node key, so the next sign-in needs the
+            // browser again. That is what the label says, because the switch
+            // above is the reversible half and this is not.
+            RippleButton {
+                Layout.fillWidth: true
+                implicitHeight: 38
+                buttonRadius: Appearance.rounding.normal
+                enabled: !Tailscale.busy
+                colBackground: Appearance.colors.colLayer1
+                colBackgroundHover: Appearance.colors.colLayer1Hover
+                onClicked: Tailscale.logout()
+                contentItem: StyledText {
+                    anchors.centerIn: parent
+                    text: Translation.tr("Log out of Tailscale")
+                    color: Appearance.colors.colOnLayer1
+                    font.pixelSize: Appearance.font.pixelSize.small
+                }
+            }
         }
     }
 }

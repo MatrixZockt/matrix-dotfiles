@@ -293,4 +293,19 @@ DelegateChooser {
         cellSpacing: root.spacing
         cellSize: modelData.size
     } }
+
+    DelegateChoice { roleValue: "tailscale"; AndroidTailscaleToggle {
+        required property int index
+        required property var modelData
+        buttonIndex: root.startingIndex + index
+        buttonData: modelData
+        editMode: root.editMode
+        editOps: root.editOps
+        panelRef: root.panelRef
+        expandedSize: modelData.size > 1
+        baseCellWidth: root.baseCellWidth
+        baseCellHeight: root.baseCellHeight
+        cellSpacing: root.spacing
+        cellSize: modelData.size
+    } }
 }

@@ -1,0 +1,18 @@
+[Unit]
+Description=ii power failsafe - watches kernel PSI for sustained stalls, flips CPU/GPU to performance so lag cannot persist
+# There is no graphical-session.target on this setup (it is inactive), so the
+# anchor is default.target: the daemon is cheap while idle (one awk every 5s)
+# and starting it early is harmless.
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/power-failsafe
+Restart=on-failure
+RestartSec=10
+# A watchdog that dies silently is worse than none: journal is the record.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

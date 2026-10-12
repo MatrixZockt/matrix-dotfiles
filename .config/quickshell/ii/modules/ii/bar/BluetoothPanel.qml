@@ -20,8 +20,12 @@ BarAnchoredPanel {
     contentWidth: 360
 
     onOpened: {
-        Bluetooth.defaultAdapter.enabled = true;
-        Bluetooth.defaultAdapter.discovering = true;
+        // Discovery only when there is a radio to discover with. Opening a
+        // panel must not switch Bluetooth ON: a card you looked at is not a
+        // request to change a radio, which is why the Wi-Fi panel states its
+        // adapter as a switch and does not flip it on arrival either.
+        if (BluetoothStatus.enabled)
+            Bluetooth.defaultAdapter.discovering = true;
     }
 
     // See WifiPanel: the quick menu lists and connects; pairing management and
@@ -50,7 +54,7 @@ BarAnchoredPanel {
             spacing: 8
 
             MaterialSymbol {
-                text: "bluetooth"
+                text: BluetoothStatus.enabled ? "bluetooth" : "bluetooth_disabled"
                 iconSize: Appearance.font.pixelSize.larger
                 color: Appearance.colors.colOnLayer0
             }
@@ -98,6 +102,37 @@ BarAnchoredPanel {
             Layout.fillWidth: true
         }
 
+        // ── The radio ─────────────────────────────────────────────────────
+        // The switch the panel used to do without (it just switched the
+        // adapter on for you). One-way from the service, exactly like the
+        // Wi-Fi panel's: a click is a request, a rebuild is the truth.
+        ConfigSwitch {
+            id: bluetoothSwitch
+            Layout.fillWidth: true
+            iconSize: Appearance.font.pixelSize.larger
+            buttonIcon: BluetoothStatus.enabled ? "bluetooth" : "bluetooth_disabled"
+            text: Translation.tr("Bluetooth")
+            enabled: Bluetooth.defaultAdapter !== null
+            checked: BluetoothStatus.enabled
+            onCheckedChanged: {
+                if (checked === BluetoothStatus.enabled) return;
+                if (!Bluetooth.defaultAdapter) return;
+                Bluetooth.defaultAdapter.enabled = checked;
+                // Leaving discovery running on a radio you just turned off is
+                // the one state the adapter cannot actually hold.
+                if (!checked)
+                    Bluetooth.defaultAdapter.discovering = false;
+            }
+        }
+
+        StyledText {
+            Layout.fillWidth: true
+            visible: !BluetoothStatus.enabled
+            text: Translation.tr("Bluetooth is off.")
+            font.pixelSize: Appearance.font.pixelSize.small
+            color: Appearance.colors.colOnLayer1
+        }
+
         // Recent devices: the adapter has forgotten, the shell has not.
         // Shared with the sidebar dialog and the settings network page --
         // three screens list bluetooth devices and a history that showed up in
@@ -110,6 +145,9 @@ BarAnchoredPanel {
             Layout.fillWidth: true
             // See WifiPanel: undefined before the first layout pass.
             Layout.preferredHeight: Math.min(contentHeight ?? 0, 320)
+            // A list of paired devices under a radio that is off can only be
+            // stale, and the "off" line above already says why it is empty.
+            visible: BluetoothStatus.enabled
             clip: true
             spacing: 0
 

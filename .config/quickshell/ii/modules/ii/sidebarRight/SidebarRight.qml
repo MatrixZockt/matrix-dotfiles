@@ -72,6 +72,26 @@ Scope {
             height: panelWindow.t > 0.1 ? panelWindow.height : 0
         }
 
+        // ── The screen edge is an OPENING gesture, both halves of it ──────
+        //
+        // Mirrored from SidebarLeft, and it is that file's lesson too: this
+        // used to be a click-to-close sliver, on the reasoning that the edge
+        // strip OPENS the panel by hover so a click arriving afterwards would
+        // find it already up and, if it could only open, do nothing at all.
+        //
+        // Backwards, as a real mouse showed: pointer on the edge, hover opens
+        // the panel, user clicks to bring it out -- and this sliver dismissed
+        // it. Every time, which reads as "the sidebar only opens on hover".
+        //
+        // The top edge's rule is the good one (Bar.qml's fsEdgePress: a press
+        // only ever opens, and a press on the revealed bar is a no-op), so the
+        // right edge now follows it: the strip opens, and a click on the
+        // panel's own edge does nothing. Leaving the edge, Esc, the bar's
+        // buttons and the shortcuts still close it.
+        //
+        // The mask above already covers these pixels while the panel is out, so
+        // a click here stays with the panel rather than reaching the app.
+
         anchors {
             top: true
             right: true
@@ -97,10 +117,69 @@ Scope {
         // Same contract as the left sidebar: a passive HoverHandler on the
         // window (it does not block hover for the controls inside), and a
         // short-grace timer that fires only after the pointer has been here
-        // and then left. "Instantly, with a small buffer": the 200ms grace
-        // absorbs the flicker of crossing to a nested control without ever
-        // reading as a lag.
+        // and then left. "Not on a pixel, with a small buffer": 12px of slack
+        // plus half a second absorbs an overshoot -- crossing to a nested
+        // control, or moving slightly too far on the way somewhere else --
+        // without ever reading as a lag on a deliberate exit.
         property bool pointerWasInside: false
+
+        // ── What counts as "still on the sidebar": the CARD, not the window ──
+        //
+        // Mirrors SidebarLeft.qml's block exactly, and for the same reason
+        // measured there: the HoverHandler covers the WINDOW, whose width is
+        // not the card's -- the card is inset by the elevation margin and the
+        // outer gaps (see the contentStage Loader below), so the window's edge
+        // is a strip of empty surface beside it. Deciding the close from the
+        // pointer's POSITION against the card's own rectangle means the panel
+        // retracts when the pointer is genuinely away from the card, instead of
+        // never -- and the two numbers below decide what "away" means: how far
+        // past the card still counts as being on it, and how long a departure
+        // may last before it is taken at its word.
+        //
+        // The region reaches the screen edge on the sidebar's own side: that is
+        // where the edge strip (EdgeReveal.qml) is, and a hand resting on it
+        // has not left the sidebar.
+        readonly property real cardLeft: Appearance.sizes.elevationMargin
+        readonly property real cardTop: Appearance.sizes.hyprlandGapsOut
+        readonly property real cardWidth: Math.max(0, root.sidebarWidth
+            - Appearance.sizes.hyprlandGapsOut - Appearance.sizes.elevationMargin)
+        readonly property real cardHeight: Math.max(0, panelWindow.height
+            - Appearance.sizes.hyprlandGapsOut * 2)
+        // Slack around that card, in pixels: the same 12 as the left sidebar's,
+        // and for the same measured reason -- at 4, "outside" began the instant
+        // the cursor crossed the edge, so an overshoot of a few pixels was
+        // treated exactly like having left for good. 12px is about one
+        // deliberate slip of the hand.
+        readonly property real pointerOutBuffer: 12
+
+        // How long the pointer may sit outside that region before the panel
+        // retracts. Half a second: long enough to come back from an overshoot,
+        // short enough that leaving on purpose still reads as leaving.
+        //
+        // NOT scaled by `motionScale` -- this is slack for a hand, not an
+        // animation, and a hand does not move faster on a different power
+        // profile. (The two sides keep the same numbers: this block and the
+        // left sidebar's are a mirror, deliberately.)
+        readonly property int pointerOutGraceMs: 500
+
+        // Live pointer position, in this window's coordinates, for as long as
+        // the pointer is on this surface at all -- a bound property of its own
+        // so the close decision below re-evaluates on every motion.
+        readonly property var pointerPos: windowHover.point.position
+
+        readonly property bool pointerOnCard: {
+            if (!windowHover.hovered)
+                return false;
+            const p = panelWindow.pointerPos;
+            if (p.y < panelWindow.cardTop - panelWindow.pointerOutBuffer)
+                return false;
+            if (p.y > panelWindow.cardTop + panelWindow.cardHeight + panelWindow.pointerOutBuffer)
+                return false;
+            // The window's own right edge, not the card's plus a buffer: the
+            // edge strip the panel is opened from lives there.
+            return p.x <= panelWindow.width
+                && p.x >= panelWindow.cardLeft - panelWindow.pointerOutBuffer;
+        }
 
         HoverHandler {
             id: windowHover
@@ -108,11 +187,9 @@ Scope {
                 if (hovered)
                     panelWindow.pointerWasInside = true;
             }
-        }
-
-        Timer {
+        }            Timer {
             id: mouseOutTimer
-            interval: 200
+            interval: panelWindow.pointerOutGraceMs
             repeat: false
             // Held down for the whole of a task drag.
             //
@@ -134,13 +211,13 @@ Scope {
             // by itself, so the sidebar still closes on its own once the menu is
             // gone and the pointer is elsewhere.
             running: GlobalStates.sidebarRightOpen && panelWindow.pointerWasInside
-                && !windowHover.hovered && !Todo.dragInFlight
+                && !panelWindow.pointerOnCard && !Todo.dragInFlight
                 && !GlobalStates.sidebarRightPopupOpen
             onTriggered: {
                 // Re-checked, not just guarded on `running`: the popup flag can
-                // flip back to false while this timer is sitting on its
-                // 200ms delay, and closing then would be exactly the bug.
-                if (!windowHover.hovered && !Todo.dragInFlight
+                // flip back to false while this timer is sitting on its half
+                // second, and closing then would be exactly the bug.
+                if (!panelWindow.pointerOnCard && !Todo.dragInFlight
                     && !GlobalStates.sidebarRightPopupOpen)
                     panelWindow.hide();
             }
@@ -214,6 +291,25 @@ Scope {
 
         function open(): void {
             GlobalStates.sidebarRightOpen = true;
+        }
+
+        // Mirrors sidebarLeft.state(): flag, animation value, and the input
+        // region the surface is actually declaring, so "it is open but nothing
+        // is drawn / nothing is clickable" is a readable state instead of a
+        // guess. See the same note in SidebarLeft.qml.
+        function state(): string {
+            // `onCard` and `cardLeft` are the pointer-out close's own inputs --
+            // see the same note in SidebarLeft.qml.
+            return `open=${GlobalStates.sidebarRightOpen} t=${panelWindow.t.toFixed(2)}`
+                + ` mask=${panelWindow.mask.width.toFixed(0)}x${panelWindow.mask.height.toFixed(0)}@${panelWindow.mask.x.toFixed(0)}`
+                + ` window=${panelWindow.width.toFixed(0)}x${panelWindow.height.toFixed(0)}`
+                // The pointer-out close's two magnitudes, read off the live
+                // window rather than the source (see SidebarLeft.qml).
+                + ` buffer=${panelWindow.pointerOutBuffer}`
+                + ` grace=${panelWindow.pointerOutGraceMs}`
+                + ` onCard=${panelWindow.pointerOnCard}`
+                + ` cardLeft=${panelWindow.cardLeft.toFixed(0)}`
+                + ` latch=${GlobalStates.sidebarRightEdgeLatch}`;
         }
     }
 

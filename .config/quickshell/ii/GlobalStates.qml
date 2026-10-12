@@ -141,6 +141,30 @@ Singleton {
     // surface. EdgeReveal watches this instead of polling Hyprland for the cursor,
     // so knowing "did the pointer leave the dock" costs nothing at all.
     property bool dockPointerInside: false
+    // ── "The edge just sent this panel away" ────────────────────────────────
+    //
+    // The sidebars and the edge strips share the outermost sliver of the
+    // screen: hovering it opens a sidebar (EdgeReveal), clicking it while one
+    // is open closes it again (the sliver handler in SidebarLeft/SidebarRight,
+    // because the open card owns those pixels and the strip underneath sees
+    // nothing).
+    //
+    // This flag is what stops the two halves from fighting: the hover that
+    // opened the panel is still armed while the pointer rests on the edge, so
+    // without it a dismissal would be undone 450ms later, over and over -- the
+    // panel would flicker on every click and "the click does nothing" would be
+    // half true anyway. Set by whichever half closed the panel, cleared the
+    // moment a strip sees the pointer leave its own edge, so the next visit
+    // hovers as usual.
+    //
+    // ONE FLAG PER EDGE, deliberately: each is read and written only by the
+    // strip that owns that edge (and by that panel's own sliver), and a shared
+    // flag would let a dismissal on the left mute the right until the pointer
+    // happened to leave the left strip -- which, after a close from the panel
+    // side, it may never do: the strip underneath never received the pointer in
+    // the first place, so it has no leave to report.
+    property bool sidebarLeftEdgeLatch: false
+    property bool sidebarRightEdgeLatch: false
     property bool sidebarLeftOpen: false
     // One-shot tab request for the left sidebar ("Music"), consumed on arrival
     property string sidebarLeftTargetTab: ""
@@ -343,6 +367,132 @@ Singleton {
     property bool wallpaperSelectorOpen: false
     property bool workspaceShowNumbers: false
 
+    // ═══ The temporary popups, as ONE list ═══════════════════════════════════
+    //
+    // Everything here is a popup that was opened to do one small thing and has
+    // no business outliving the desktop it was opened over: the launcher, both
+    // desktop grids, the island's popped-out card, the music player, the
+    // session menu, the wallpaper picker and its theatre, a menu opened from
+    // the right sidebar.
+    //
+    // Two things need to ask that question, and until now neither could:
+    //
+    //   * the DESKTOP CHANGED -- by a bar pill, SUPER+<n>, another gesture --
+    //     and a popup left floating over a desktop it was not opened on reads
+    //     as stuck; and
+    //   * a FOUR-FINGER HORIZONTAL SWIPE ended. That swipe is a desktop
+    //     switch, so the popup it covered has to go -- and it has to go
+    //     WITHOUT swallowing the swipe (see the gesture case in shell.qml).
+    //
+    // One list, one closer, so neither path has to re-invent "which popups are
+    // temporary": a popup added later is covered by adding its flag here. The
+    // popups that hold a compositor-level grab instead of a flag -- the bar's
+    // icon cards (VPN, wifi, bluetooth, battery, background apps, the clock),
+    // the sidebars, the cheatsheet, the clipboard, the on-screen keyboard --
+    // are the other half, and GlobalFocusGrab.dismiss() below is exactly what
+    // that registry exists for.
+    //
+    // NOTE: `transientPopupOpen` below names the same flags property by
+    // property, in the same order. That is not duplication for its own sake: a
+    // QML binding does NOT track a dependency it reaches through a dynamic
+    // lookup, so a `some()` over this array would be evaluated once and then
+    // never again -- a popup would open and the flag would still read false.
+    readonly property var transientPopupFlags: [
+        "appSearchOverlayOpen",     // the SUPER-tap launcher
+        "desktopOverviewOpen",      // the desktop grid
+        "overviewOpen",             // SUPER+Tab / ALT+Tab
+        "searchOpen",
+        "nowBarPanelOpen",          // the island popped out into its card
+        "musicPlayerOpen",
+        "sessionOpen",
+        "wallpaperSelectorOpen",
+        "wallpaperStageOpen",       // the wallpaper theatre
+        "sidebarRightPopupOpen",    // a menu opened from the right sidebar
+        "screenTranslatorOpen",
+        "regionSelectorOpen",
+        "crosshairOpen",
+        "trayOverflowOpen",
+        "overlayOpen"
+    ]
+
+    /// True while any temporary popup is on screen, right now.
+    ///
+    /// The second half is the GRAB, and it is not a convenience: the bar's
+    /// icon cards -- the user's own example -- keep no flag here at all. They
+    /// are `BarAnchoredPanel`s, and their only record of being open is their
+    /// registration with GlobalFocusGrab (that file explains why: the panel is
+    /// a layer surface, so the compositor-level grab IS its open state). Asking
+    /// the flags alone therefore answered "no popup" while the VPN card filled
+    /// the screen, and the swipe that closed it switched nothing -- measured,
+    /// with `closed=false` in the gesture log for exactly those cases.
+    /// `liveDismissable` is that same list with the entries that are no longer
+    /// on screen filtered out, so a stale registration cannot pin this true.
+    readonly property bool transientPopupOpen:
+        root.appSearchOverlayOpen || root.desktopOverviewOpen || root.overviewOpen
+        || root.searchOpen || root.nowBarPanelOpen || root.musicPlayerOpen
+        || root.sessionOpen || root.wallpaperSelectorOpen || root.wallpaperStageOpen
+        || root.sidebarRightPopupOpen || root.screenTranslatorOpen
+        || root.regionSelectorOpen || root.crosshairOpen || root.trayOverflowOpen
+        || root.overlayOpen
+        || GlobalFocusGrab.liveDismissable.length > 0
+
+    /// Put every temporary popup away; true when one was actually up.
+    ///
+    /// The return value is what lets a caller ask "did this have to close
+    /// something?" without keeping a second copy of the list. `except` is the
+    /// one flag a caller knows better than this function does (the desktop
+    /// grid, on a desktop change -- see below).
+    function closeTransientPopups(except: string): bool {
+        let closed = false;
+        for (const flag of root.transientPopupFlags) {
+            if (flag === except)
+                continue;
+            if (root[flag]) {
+                root[flag] = false;
+                closed = true;
+            }
+        }
+        // The grab half: every popup that registered itself as dismissable is
+        // closed by its own `onDismissed`, in one call. This is also what puts
+        // the bar's icon cards away, and they have no flag of their own to
+        // reach -- so a grab with anything on screen counts as closed too, or
+        // this would report "nothing was open" about a card the user was
+        // looking at (measured: the VPN panel closed through here while the
+        // flag list had nothing left to clear).
+        const hadGrabbed = GlobalFocusGrab.liveDismissable.length > 0;
+        GlobalFocusGrab.dismiss();
+        return closed || hadGrabbed;
+    }
+
+    // A desktop change closes them, whichever way it happened -- a bar pill, a
+    // card in the desktop grid, SUPER+<n>, a script, another gesture.
+    //
+    // The ID is compared, never the object: HyprlandData reassigns
+    // `activeWorkspace` to a freshly parsed object on every poll, so the change
+    // signal fires constantly with the same desktop in it -- closing on the
+    // signal alone would slam popups shut a fraction of a second after they
+    // open. This is the same guard the launcher and the desktop grid already
+    // use for themselves.
+    //
+    // The desktop grid is deliberately NOT closed from here: it has its own
+    // version, because it is the one popup that can tell a desktop SWITCH from
+    // a desktop REORDER (arranging desktops renumbers the desktop you are
+    // standing on as a side effect, and the grid must survive that -- it is
+    // mid-arrangement). Everything else has no such case.
+    property int lastWorkspaceForPopups: 0
+    Connections {
+        target: HyprlandData
+        function onActiveWorkspaceChanged() {
+            const id = Number(HyprlandData.activeWorkspace?.id ?? 0);
+            if (id === root.lastWorkspaceForPopups)
+                return;
+            root.lastWorkspaceForPopups = id;
+            if (id <= 0)
+                return; // a special workspace is not a desktop to be closed for
+            root.closeTransientPopups("desktopOverviewOpen");
+        }
+    }
+
     // ── "Nothing that way" ─────────────────────────────────────────────
     // A four-finger swipe that lands on no desktop publishes NO workspace
     // event, so the desktop pill -- which flashes on every real switch --
@@ -494,6 +644,11 @@ Singleton {
     // is in the middle of opening. A window inside this window withdraws the
     // verdict rather than leaving a lie on screen.
     readonly property int launchLateGraceMs: 20000
+    // When the wait now on screen STARTED. The failsafe's interval is ten
+    // seconds, but a launch that came through `open.sh` RENEWS that clock while
+    // the app is still alive (see the `renew` IPC below), so when a verdict is
+    // finally reached the honest number is the elapsed one, not the ten.
+    property real loadingWaitStartedAt: 0
     // Ticks left on the failsafe, 0 = disarmed. A count rather than a running
     // flag so `display`'s zero really does disarm a timer armed by an earlier
     // launch.
@@ -583,6 +738,7 @@ property bool loadingFailFlash: false
         // it, and by the time the failsafe fires `loadingText` may have been
         // rewritten by anything that touched the card in between.
         root.launchFailsafeName = root.loadingText;
+        root.loadingWaitStartedAt = Date.now();
         root.launchFailsafeTicks = root.launchFailsafeTicksMax;
         root.launchFailsafeVerdict = false;   // no verdict on screen yet
         launchLateGraceTimer.stop();
@@ -923,6 +1079,19 @@ property bool loadingFailFlash: false
     // the window it is compared against can never disagree.
     function isSingleInstance(cls) {
         const c0 = String(cls ?? "").toLowerCase();
+        // Tray-apps registry entries are always single-instance: they are the
+        // shell's own tray icons (WhatsApp, Thunderbird), and a second binary
+        // of either is a new session / a new profile -- the user did not ask
+        // for that by clicking the already-open app again. This covers the
+        // case the config list misses: a class that is in the tray registry
+        // but not yet in apps.singleInstance (newly added tray app, or an app
+        // whose class was only added to the registry). Belt-and-suspenders on
+        // top of shellSingleInstance, which already contains WhatsApp.
+        for (const e of TrayApps.registry) {
+            const k = String(e.cls ?? "").toLowerCase();
+            if (k.length > 0 && (c0 === k || c0.split("/").pop() === k.split("/").pop()))
+                return true;
+        }
         // The shell's own apps first: a reverse-DNS class is also matched by
         // its LAST segment ("iimusic"), because a window's class and a
         // desktop file's StartupWMClass do not always agree on the dots.
@@ -1208,12 +1377,24 @@ property bool loadingFailFlash: false
             // app. A window that turns up inside the grace withdraws it.
             root.launchFailsafeTicks = 0;
             const name = root.launchFailsafeName || root.loadingText || "";
+            // HOW LONG it waited, measured: a launch on the open.sh path has
+            // had its clock renewed for as long as the app was alive, so a
+            // verdict reached now can be a minute after the click. Printing the
+            // interval (ten) would be printing the rule, not the fact.
+            const waited = Math.max(1, Math.round(
+                (root.loadingWaitStartedAt > 0
+                    ? Date.now() - root.loadingWaitStartedAt
+                    : root.launchFailsafeMs) / 1000));
             // Marked BEFORE the report, because showLoadingError is also the
             // path open.sh's own verdict takes and only THIS one may be
             // withdrawn later (see the address watcher).
             root.launchFailsafeVerdict = true;
+            // And the reason, because "Couldn't open X" alone cannot be acted
+            // on. This verdict is the DESKTOP's rather than the app's -- no
+            // window ever appeared, and the clock is the only thing saying so.
             root.showLoadingError(
-                `${Translation.tr("Couldn't open")}${name.length > 0 ? " " + name : ""}`);
+                `${Translation.tr("Couldn't open")}${name.length > 0 ? " " + name : ""}`
+                + ` (${Translation.tr("no window after")} ${waited}s)`);
             launchLateGraceTimer.restart();
         }
     }
@@ -1374,6 +1555,28 @@ property bool loadingFailFlash: false
         function fail(text: string): void {
             root.showLoadingError(text);
         }
+
+        // ── A launch that is still alive is still a launch ────────────────
+        //
+        // `open.sh` -- the app's own parent -- calls this every few seconds
+        // while the process it started is still running. It is the answer to
+        // the failsafe's one blind spot: this shell can only see WINDOWS, so
+        // "no window after ten seconds" cannot tell a slow cold launch from a
+        // dead one, and it has called slow apps broken. The process that knows
+        // the difference is the parent; the clock is renewed from there, the
+        // verdict stays open, and if the app then exits without a window the
+        // parent reports the real reason -- its exit status and its own last
+        // line of output.
+        //
+        // It cannot un-say a failure the user is already reading: a renewal
+        // that arrives after a verdict is ignored.
+        function renew(text: string): void {
+            if (!root.loadingPending || root.loadingFailed || root.loadingInfo)
+                return;
+            if (text && text.length > 0)
+                root.launchFailsafeName = text;
+            root.launchFailsafeTicks = root.launchFailsafeTicksMax;
+        }
         // Download progress: name + 0..1 fraction. frac >= 1 or a negative
         // frac finishes the download face and clears the line.
         function progress(name: string, frac: real): void {
@@ -1503,6 +1706,123 @@ property bool loadingFailFlash: false
         onReleased: {
             root.superDown = false
         }
+    }
+
+    // ═══ Re-arm the SUPER-tap candidate on the PRESS edge ═════════════════════
+    //
+    // The launcher opens on the RELEASE of a SUPER tap: `searchToggleRelease`
+    // (Overview.qml) toggles it only while `superReleaseMightTrigger` is still
+    // true, and the release-interrupt -- which every SUPER chord in
+    // custom/keybinds.lua trips -- clears that flag so no chord can open the
+    // search panel on the way up. The flag therefore has to be ARMED at the
+    // start of each SUPER hold, and arming it from `searchToggleRelease`'s own
+    // `onPressed`, which is where it looks like it belongs, does not work on
+    // this build:
+    //
+    //   * `SUPER + SUPER_L` is registered with modmask SUPER, and the tap that
+    //     RAISES SUPER is the very event that creates that modifier -- so the
+    //     press bind never matches. Read off the running shell, a tap logs a
+    //     `searchToggleRelease` RELEASE and never a PRESS.
+    //   * With nothing arming the flag, the only writer left that ever cleared
+    //     it was the close path in AppSearchOverlay.qml (which clears it so a
+    //     stale in-flight release cannot re-open the menu). The next tap was
+    //     then spent re-arming instead of opening, and one tap in three did
+    //     nothing at all -- measured with real input on the wire: open, close,
+    //     *nothing*, open, close, *nothing*.
+    //
+    // `superDown` IS reliable on that same tap: it is set from the bare
+    // `SUPER_L`/`SUPER_R` bind, which is registered with `ignore_mods` and so
+    // matches the press whatever modifiers are held. That is the edge to arm
+    // from -- the same edge the bar already trusts to show workspace numbers
+    // while SUPER is held.
+    //
+    // The ordering is the part that makes it work, so it is worth stating: a
+    // tap delivers the press first, then the shortcut's RELEASE, and only then
+    // `superDown = false`. Arming while superDown RISES therefore always lands
+    // before the release that reads it. Nothing happens on the falling edge --
+    // a chord must be free to clear the flag and keep it cleared.
+    onSuperDownChanged: {
+        if (!root.superDown) {
+            // The falling edge is the tap. If the hold never fired, this is
+            // where the app search card is about to open (the bare-SUPER
+            // release does that), so the hold has nothing left to do.
+            superHoldTimer.stop();
+            return;
+        }
+        // ── A press while something the SUPER tap opened is still up ──────
+        // "Press SUPER again and you are back where you were": that closes the
+        // desktop grid, or the app search card, ON THE PRESS and silences the
+        // release in the same breath. Doing it on the release instead (which
+        // is what the card does on its own) would leave a press-and-HOLD to
+        // start the grid on top of the card, and either way the release would
+        // then toggle the card open a beat after the grid went down.
+        if (root.desktopOverviewOpen) {
+            root.desktopOverviewOpen = false;
+            root.superReleaseMightTrigger = false;
+            superHoldTimer.stop();
+            return;
+        }
+        if (root.appSearchOverlayOpen) {
+            root.appSearchOverlayOpen = false;
+            root.superReleaseMightTrigger = false;
+            superHoldTimer.stop();
+            return;
+        }
+        root.superReleaseMightTrigger = true;
+        superHoldTimer.restart();
+    }
+
+    // ═══ Hold SUPER: the desktops come up under the key ═════════════════════
+    //
+    // Requested: holding SUPER shows the desktops -- the same stage the SUPER +
+    // four-finger swipe opens -- and it STAYS after SUPER is let go; the next
+    // SUPER press puts it away. A quick tap is untouched: it keeps opening the
+    // app search card.
+    //
+    // WHY A TIMER AND NOT A KEYBIND. Nothing in either layer can be asked "is
+    // something else down while SUPER is held". Hyprland's Lua config exposes
+    // no key event to hook (only actions to bind), and this singleton only ever
+    // hears the two edges of the bare-SUPER bind -- the same edges a chord
+    // produces. So the hold is measured, from the press edge:
+    //
+    //   * it fires only while `superDown` is still true AND the release is
+    //     still a candidate (`superReleaseMightTrigger`). Every SUPER chord in
+    //     custom/keybinds.lua clears that flag, which is exactly what keeps a
+    //     held chord -- SUPER+A, SUPER+arrow, a SUPER-drag -- from ever
+    //     reaching this: a hold that is really a shortcut cancels itself.
+    //   * firing clears the flag itself, so the release that follows does not
+    //     ALSO toggle the app search card open behind the grid.
+    //   * a release before the timer stops it. That is the tap, and the card
+    //     stays the tap's.
+    //
+    // 300 ms is long enough that a deliberate tap (measured over real input:
+    // ~90-160 ms) can never reach it, and short enough to feel like the key
+    // did it rather than like a delay.
+    readonly property int superHoldMs: 300
+
+    Timer {
+        id: superHoldTimer
+        interval: root.superHoldMs
+        repeat: false
+        onTriggered: {
+            // Re-checked rather than trusted: a chord can have cleared the flag
+            // and the key can have come up inside the interval.
+            if (!root.superDown || !root.superReleaseMightTrigger)
+                return;
+            // Flag first, then the grid: one order, so a release landing in the
+            // same frame cannot read a stale "still armed" and open the card.
+            root.superReleaseMightTrigger = false;
+            root.desktopOverviewOpen = true;
+        }
+    }
+
+    // Every chord trips the interrupt (see the SUPER-chord block in
+    // custom/keybinds.lua). A hold that has not fired yet has to go with it, or
+    // holding SUPER+A for a third of a second would drag the grid up behind the
+    // sidebar the chord just opened.
+    onSuperReleaseMightTriggerChanged: {
+        if (!root.superReleaseMightTrigger)
+            superHoldTimer.stop();
     }
 
     // ── The power failsafe's alert channel ──────────────────────────────

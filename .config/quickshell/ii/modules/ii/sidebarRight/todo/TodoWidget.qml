@@ -1,6 +1,7 @@
 import qs.services
 import qs.modules.common
 import qs.modules.common.widgets
+import Quickshell.Io
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -267,6 +268,7 @@ Item {
 
 
             TaskList {
+                id: unfinishedPage
                 emptyPlaceholderIcon: "check_circle"
                 emptyPlaceholderText: Translation.tr("Nothing here!")
                 // A plain `filter`, NOT a `map` that clones each entry.
@@ -284,12 +286,35 @@ Item {
                 // `filter` keeps the original objects, and tasks now carry a
                 // stable `id` (see Todo.qml), so nothing here has to be
                 // positional and a reorder is a pure move.
-                taskList: Todo.list.filter(function(item) { return !item.done; })
+                //
+                // `done` is the condition, plus exactly one exception: a task
+                // that has just been ticked stays on this page for the length
+                // of its own "Done" badge, so the acknowledgement has a row to
+                // be drawn on. It is DONE the whole time -- this is the view
+                // holding its own row on screen for a beat, not the task being
+                // undecided (`exitIds` in TaskList.qml), and the row leaves when
+                // that beat expires. So the page is still a plain view of
+                // `done`, as it was when the tick moved the row in the same
+                // frame.
+                taskList: Todo.list.filter(function(item) {
+                    return !item.done || unfinishedPage.isExiting(item.id);
+                })
             }
             TaskList {
                 emptyPlaceholderIcon: "checklist"
                 emptyPlaceholderText: Translation.tr("Finished tasks will go here")
-                taskList: Todo.list.filter(function(item) { return item.done; })
+                // Only the DONE page shows when each task was finished; the
+                // Unfinished page above leaves this off, so its rows are
+                // unchanged.
+                showCompletedAt: true
+                // The other half of the same statement, and the reason the tick
+                // got simpler: a done task is here, immediately, and nowhere
+                // else. It used to be held off this page until the ticked row's
+                // page was left, so a task you had just finished was listed
+                // under neither tab's finished set until you navigated away.
+                taskList: Todo.list.filter(function(item) {
+                    return item.done;
+                })
             }
         }
     }
@@ -305,5 +330,70 @@ Item {
         anchors.fill: parent
         acceptedButtons: Qt.NoButton
         onWheel: w => root.onSwipeWheel(w)
+    }
+
+    // ── Self-test, reachable over IPC ────────────────────────────────────
+    //
+    // The sidebars are LAYER surfaces, and on this box a synthetic pointer can
+    // hover one but its press never lands in the QML -- so the tick cannot be
+    // driven from a script, and every claim about what it does would otherwise
+    // be an assertion. These call the real handler and report the real state,
+    // the same escape hatch the left sidebar's `wheelTest`/`scrollProbe` use:
+    //
+    //   qs -c ii ipc call todoWidget tick 21
+    //   qs -c ii ipc call todoWidget state
+    //
+    // `state` reports the ids the CURRENT page is showing, which are expanded,
+    // and which are done -- enough to tell a row that left the list at its tick
+    // from one that is still standing on it.
+    IpcHandler {
+        target: "todoWidget"
+
+        function tick(id: int): string {
+            const page = swipeView.currentItem;
+            if (!page)
+                return "no page";
+            page.tick(id);
+            return state();
+        }
+
+        // Open or fold a row, exactly as clicking its text does, so the tick's
+        // half of the job -- the fold -- can be measured from a script.
+        function expand(id: int): string {
+            const page = swipeView.currentItem;
+            if (!page)
+                return "no page";
+            page.toggleExpanded(id);
+            return state();
+        }
+
+        // Move the widget to a page without a mouse, so the tick below can be
+        // driven on the page it means. 0 is Unfinished, 1 is Done.
+        function setPage(i: int): string {
+            tabBar.setCurrentIndex(i);
+            return state();
+        }
+
+        function state(): string {
+            const page = swipeView.currentItem;
+            const ids = (page && page.taskList)
+                ? page.taskList.map(t => t.id)
+                : [];
+            return "page=" + swipeView.currentIndex
+                + " shown=" + JSON.stringify(ids)
+                // The tasks whose rows are still playing out their Done badge on
+                // this page. A ticked id is in both of the lists above for the
+                // length of the badge, which is the whole of what the tick
+                // does on screen -- so it has to be visible from out here.
+                + " exiting=" + JSON.stringify(page ? page.exitIds : [])
+                + " expanded=" + JSON.stringify(page ? page.expandedSet : [])
+                + " done=" + JSON.stringify(Todo.list.filter(t => t.done).map(t => t.id))
+                // The completion stamps, so a tick's stamp and an untick's
+                // removal are both readable from a script.
+                + " completed=" + JSON.stringify(Todo.list
+                    .filter(t => t.completedAt !== undefined && t.completedAt !== null)
+                    .map(t => ({ id: t.id, at: t.completedAt })))
+                + " retentionMs=" + Todo.retentionMs;
+        }
     }
 }

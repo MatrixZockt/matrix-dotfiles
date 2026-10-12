@@ -50,6 +50,12 @@ ColumnLayout {
     readonly property var indicators: [
         { key: "network", group: "indicators", icon: "wifi", name: Translation.tr("Wi-Fi") },
         { key: "bluetooth", group: "indicators", icon: "bluetooth", name: Translation.tr("Bluetooth") },
+        // Same pill, same switch shape (`bar.indicators.vpn`). The chip is ON
+        // whenever the switch is, even with the tailscale CLI absent: the icon
+        // is only ever shown for an installed CLI, and a chip that silently
+        // reported "off" on a machine without it would be lying about the
+        // setting the user can actually see in Settings.
+        { key: "vpn", group: "indicators", icon: "vpn_lock", name: Translation.tr("VPN") },
         { key: "sound", group: "indicators", icon: "volume_up", name: Translation.tr("Sound") },
         { key: "battery", group: "indicators", icon: "battery_full", name: Translation.tr("Battery") },
         { key: "mic", group: "indicators", icon: "mic_off", name: Translation.tr("Muted mic chip") },

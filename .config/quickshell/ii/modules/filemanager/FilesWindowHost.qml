@@ -1,3 +1,16 @@
+// FilesWindowHost -- RETIRED, kept as the record of the morph contract.
+//
+// This was how the Files popup became a real window: the morph spawned this
+// empty Window at the screen rect and pushed it fullscreen (same contract as
+// SettingsWindowHost). It is retired because the file manager IS an ordinary
+// window now -- filemanager.qml is a plain `Window`, so there is nothing to
+// morph INTO: it opens attached, tiles, and takes SUPER + F like any other app.
+// Nothing references this file. It is left in the tree rather than deleted
+// because it is the only written-down version of the pid-guarded fullscreen
+// assertion (focus by pid, then fullscreen, retried to win the race with the
+// map) that the settings window host still uses.
+//
+// --- original header ---------------------------------------------------
 // FilesWindowHost -- the file manager as a REAL desktop window, for the
 // popup → fullscreen morph. Same contract as SettingsWindowHost: the Window
 // is created empty, spawned by the morph at the full-screen rect, asks the

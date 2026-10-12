@@ -422,6 +422,16 @@ Item {
     // each owning one -- so all this does is say "I want a meter" and read.
     property list<real> visualizerPoints: AudioVisualizer.points
 
+    // The last track the island actually SAW -- the same "Title · Artist"
+    // string the media row paints. `mediaView.title` empties the moment MPRIS
+    // drops the player, which is exactly when "what was I just listening to?"
+    // is the only useful thing the resting island can say, so the name is kept
+    // here and the resting row shows it instead of falling straight to
+    // "Nothing playing". Written from the row's own onTextChanged (the one
+    // place that knows the composed string), never from a binding, and never
+    // cleared: it is a memory, not state.
+    property string lastTrackText: ""
+
     // `aiCell` (the top FlareData provider) is gone with the rest of the
     // subscription-quota view; the AI view now reads LlamaService.
 
@@ -1250,6 +1260,39 @@ Item {
                 return Array.isArray(a) ? a.join(", ") : String(a);
             }
 
+            // ── The row shows the SONG; the artist is an OPTION ─────────
+            // The second field a player reports is not always an artist -- on
+            // this library it can be the playlist or the folder -- so it is
+            // never printed unconditionally beside the song name.
+            //
+            // The label is the song. The author is appended ONLY while the
+            // pair still fits in one piece, measured below with the label's
+            // own font: if it does not fit, the artist is dropped. It is never
+            // allowed to be the reason the song name ends in "…".
+            readonly property string artistSuffix: artists !== "" ? " · " + artists : ""
+            // TWO budgets, and they are not the same number on purpose.
+            //
+            // `titleMaxW` is how wide the NAME may get. It is generous, because
+            // the name is the point of the row: the island grows a little to
+            // hold it rather than cutting a real title short -- measured on
+            // this library, "a new kind of love - Enkei Remix" needs 229px, and
+            // the old 186 budget truncated it to "a new kind of love - Enke…".
+            //
+            // `pairMaxW` is the budget the AUTHOR has to earn. It is the old,
+            // compact width: the artist is a bonus, so it is only added while
+            // the pair fits inside the width the island would have had anyway.
+            // A name that needs the wider budget means there is no room to
+            // spare, and then the author is simply left out -- never shown as
+            // "…".
+            readonly property real titleMaxW: 320
+            readonly property real pairMaxW: 186
+            // (`advanceWidth` is a PROPERTY of TextMetrics -- the width of the
+            // `text` it is given -- not a function, so the pair is handed to
+            // the metrics item and its width read back.)
+            readonly property bool artistFits: artistSuffix !== ""
+                && titleMetrics.advanceWidth <= pairMaxW
+            readonly property string shownText: artistFits ? title + artistSuffix : title
+
             // Laid out by hand, not by a Layout: the label + soundbar block
             // and the transport button are anchored to each other, so the
             // block can never be squeezed or re-centred by a layout that
@@ -1328,17 +1371,21 @@ Item {
                 }
 
                 // The label and its soundbar are ONE block, and the block is
-                // positioned by hand rather than by a layout: the title sits
-                // DIRECTLY on the bar (1px above it), the bar is always drawn
-                // -- a dim track at rest, the live accent waveform while
-                // audio plays -- and the pair is centred in the island as a
-                // unit. The old version let a layout own the soundbar's slot,
-                // which is how the label ended up floating in the top half
-                // of the island with dead space under it whenever the
-                // waveform was invisible (nothing playing), and the block
-                // jumped whenever an artist line came or went. One fixed
-                // block, explicit anchors: no drift, no jumps.
-                // Laid out as a ROW: soundbar, then label, then transport.
+                // positioned by hand rather than by a layout. It is laid out
+                // as a ROW: soundbar, then label, then transport.
+                //
+                // The meter's span is counted ONLY while audio plays
+                // (`meterSpan` below). At rest the block is the label alone,
+                // so the name sits on the island's centre; while audio plays
+                // the block widens by the meter's span and the LABEL moves
+                // right by exactly that much, leaving the meter its place at
+                // the label's left.
+                //
+                // The old version drew a dim 24px track at rest -- a thin
+                // horizontal hairline beside the name with nothing playing,
+                // which read as a stray rule -- and reserved the meter's
+                // width even then, so the name could never sit in the middle
+                // of the island.
                 //
                 // The soundbar used to sit UNDER the label, centred, which is
                 // where the owner's "weird line under the music" came from --
@@ -1358,11 +1405,20 @@ Item {
                     anchors.horizontalCenterOffset:
                         -(mediaPlayButton.width + 9) / 2
                     anchors.verticalCenter: parent.verticalCenter
-                    // Hugs the label (up to the elide cap) plus the bar's own
-                    // width, so the transport button sits right next to it
-                    // instead of across an empty field.
-                    width: mediaSoundbar.width + 6
-                        + Math.min(186, mediaTitle.implicitWidth)
+                    // How much of this row the meter takes: its own width plus
+                    // its gap, and ONLY while it is drawn. At rest this is 0,
+                    // so the block is the label and nothing else -- the label
+                    // lands on the island's centre instead of being shoved off
+                    // it by a meter that is not on screen. While audio plays
+                    // it is the meter's real span, and the label's left inset
+                    // below reads this same number, so the two can never
+                    // disagree about where the name starts.
+                    readonly property real meterSpan: root.audioPlaying
+                        ? mediaSoundbar.width + 6 : 0
+                    // Hugs the label (up to the elide cap) plus whatever the
+                    // meter is using, so the transport button sits right next
+                    // to it instead of across an empty field.
+                    width: meterSpan + Math.min(mediaView.titleMaxW, mediaTitle.implicitWidth)
                     height: 20
 
                     // The soundbar: a MINIATURE of the popped-out card's bar
@@ -1381,6 +1437,12 @@ Item {
                     // make the whole block twitch.
                     Item {
                         id: mediaSoundbar
+                        // Drawn ONLY while audio is playing. At rest the island
+                        // has no meter at all: no pills (they were already
+                        // gated) and no 1.5px bottom rule either -- that rule
+                        // was the thin horizontal line left sitting beside the
+                        // track name whenever nothing was playing.
+                        visible: root.audioPlaying
                         anchors.left: parent.left
                         anchors.verticalCenter: parent.verticalCenter
                         width: 24
@@ -1421,16 +1483,19 @@ Item {
                             return Math.pow(Math.min(1, m / 700), 0.7);
                         }
 
-                        // The bottom line: the resting state IS this rule (a
-                        // stopped player shows a thin dim track, exactly what
-                        // the old WaveVisualizer slot showed), and while audio
-                        // plays the pills rise from it.
+                        // The bottom line belongs to the METER, not to the
+                        // resting island: while audio plays the pills rise
+                        // from it, and with nothing playing it is not drawn at
+                        // all. Visible is stated here as well as on the meter
+                        // itself so the rule cannot come back on its own if
+                        // that outer switch is ever changed.
                         Rectangle {
                             anchors.bottom: parent.bottom
                             width: parent.width
                             height: 1.5
                             radius: 0.75
                             color: ColorUtils.transparentize(Appearance.colors.colOnLayer0, 0.35)
+                            visible: root.audioPlaying
                         }
 
                         Repeater {
@@ -1459,19 +1524,39 @@ Item {
 
                     Text {
                         id: mediaTitle
-                        // Centred against the meter, not based on its top
-                        // edge. The old baseline anchoring existed to stop the
-                        // glyphs floating above a bar they stood ON; with the
-                        // bar beside them there is no edge to sit on, and
-                        // verticalCenter is what actually centres text whose
-                        // box carries leading under the baseline.
-                        anchors.left: mediaSoundbar.right
-                        anchors.leftMargin: 6
+                        // Anchored to the BLOCK, not to the meter: the meter's
+                        // span is 0 at rest, and anchoring to a hidden bar's
+                        // right edge would push the name right by a width that
+                        // is not on screen. `leftMargin` IS the meter's span,
+                        // so the name starts at the block's left edge when
+                        // idle and 30px in when the meter is up.
+                        //
+                        // Vertically centred against the meter, not based on
+                        // its top edge: with the bar beside the glyphs there
+                        // is no edge to sit on, and verticalCenter is what
+                        // actually centres text whose box carries leading
+                        // under the baseline.
+                        anchors.left: parent.left
+                        anchors.leftMargin: mediaBlock.meterSpan
                         anchors.verticalCenter: parent.verticalCenter
-                        width: Math.min(186, implicitWidth)
+                        width: Math.min(mediaView.titleMaxW, implicitWidth)
+                        // Playing: the SONG name, plus the author when the pair
+                        // fits whole (see mediaView.artistFits -- it is dropped
+                        // rather than elided). At rest: the last song this
+                        // island saw, remembered below -- "Nothing playing" is
+                        // only for a session that never played anything.
                         text: mediaView.title !== ""
-                            ? (mediaView.artists !== "" ? `${mediaView.title} · ${mediaView.artists}` : mediaView.title)
-                            : (root.audioPlaying ? "Audio playing" : "Nothing playing")
+                            ? mediaView.shownText
+                            : (root.lastTrackText !== "" ? root.lastTrackText
+                                : (root.audioPlaying ? "Audio playing" : "Nothing playing"))
+                        // The one writer of the memory above. The binding can
+                        // only read; this stores the SONG NAME while there is a
+                        // real track (an empty title means the player went
+                        // away, not that the song changed), so the resting row
+                        // still names it -- artist left out on purpose, since
+                        // that field is not trusted enough to keep.
+                        onTextChanged: if (mediaView.title !== "")
+                            root.lastTrackText = mediaView.title
                         color: Appearance.colors.colOnLayer0
                         font.pixelSize: Appearance.font.pixelSize.small
                         font.weight: 500
@@ -1632,11 +1717,25 @@ Item {
                         // speed. Blank rather than "—" when idle, because the
                         // island shows a name above it and a dash under a name
                         // reads as a broken value.
-                        text: LlamaService.genTokensPerSec > 0
-                            ? `${LlamaService.genTokensPerSec.toFixed(1)} t/s`
-                            : ""
-                        visible: LlamaService.genTokensPerSec > 0
-                        color: Appearance.colors.colOnLayer1Inactive
+                        //
+                        // "starting…" outranks the speed and takes the accent,
+                        // because while the weights are loading there is no
+                        // speed to print and this line was BLANK for the whole
+                        // boot -- which is what made a server that was coming
+                        // up read exactly like one that was off. The island is
+                        // the only place the model is named while the popup is
+                        // shut, so it is the only place that can say so. The
+                        // word matches the offline pane's Endpoint row, which
+                        // says the same thing one surface over.
+                        text: LlamaService.loading
+                            ? Translation.tr("starting…")
+                            : (LlamaService.genTokensPerSec > 0
+                                ? `${LlamaService.genTokensPerSec.toFixed(1)} t/s`
+                                : "")
+                        visible: LlamaService.loading || LlamaService.genTokensPerSec > 0
+                        color: LlamaService.loading
+                            ? Appearance.colors.colPrimary
+                            : Appearance.colors.colOnLayer1Inactive
                         font.pixelSize: Appearance.font.pixelSize.tiny
                     }
                 }
@@ -2649,6 +2748,22 @@ Item {
         id: inkMetrics
     }
 
+    // The song label's own metrics, for the one question the label cannot
+    // answer about itself: would "Song · Artist" fit whole? Asked with the
+    // label's font OBJECT, so the answer is the width that label is actually
+    // going to paint rather than an estimate from a lookalike font. Ids are
+    // file-wide, so this can live here while the label it measures sits inside
+    // the media view; and, like inkMetrics, it must not be nested inside the
+    // IpcHandler, which has no default property.
+    TextMetrics {
+        id: titleMetrics
+        font: mediaTitle.font
+        // The PAIR, so `advanceWidth` is the width of "Song · Artist" as the
+        // label would paint it. When the artist is dropped the label paints the
+        // song alone, and that width is the label's own `implicitWidth`.
+        text: mediaView.title + mediaView.artistSuffix
+    }
+
     // The fill-axis regression test's second sample, and it is a SIBLING of
     // the TextMetrics above rather than a child of it: TextMetrics has no
     // default property either, so a Timer nested in one is the same hard load
@@ -2912,6 +3027,17 @@ Item {
                 + " | prev x " + pv.x.toFixed(1) + " w " + skipPrev.width.toFixed(1)
                 + " | next x " + nx.x.toFixed(1) + " w " + skipNext.width.toFixed(1)
                 + " | block x " + blk.x.toFixed(1) + " w " + mediaBlock.width.toFixed(1)
+                + " meterSpan " + mediaBlock.meterSpan.toFixed(1)
+                + " meterDrawn " + mediaSoundbar.visible
+                + " audio " + root.audioPlaying
+                + " | title x " + t.mapToItem(null, 0, 0).x.toFixed(1)
+                + " text [" + t.text + "]"
+                + " recalled [" + root.lastTrackText + "]"
+                + " shownW " + t.implicitWidth.toFixed(1)
+                + " pairW " + titleMetrics.advanceWidth.toFixed(1)
+                + " cap " + mediaView.titleMaxW + "/" + mediaView.pairMaxW
+                + " artistFits " + mediaView.artistFits
+                + " elided " + t.truncated
                 + " | btn x " + btn.x.toFixed(1) + " w " + mediaPlayButton.width.toFixed(1));
             // Gaps measured against the ISLAND, in the ISLAND's coordinates.
             // Two mistakes lived here for several rounds, both worth writing

@@ -1,0 +1,63 @@
+#!/bin/bash
+# Health check for local llama-server (Qwen3-8B)
+# Exit codes: 0 = healthy, 1 = not running, 2 = server error
+
+SERVER_URL="${LLAMA_SERVER_URL:-http://localhost:8001}"
+TIMEOUT="${LLAMA_HEALTH_TIMEOUT:-10}"
+
+# 1. Check if the systemd service is active
+if command -v systemctl &>/dev/null && systemctl --user is-active --quiet llama-server-local 2>/dev/null; then
+  SERVICE_STATUS="running"
+else
+  SERVICE_STATUS="stopped"
+fi
+
+# 2. Check if port 8001 is listening
+if ss -tlnp 2>/dev/null | grep -q ":8001 "; then
+  PORT_STATUS="listening"
+else
+  PORT_STATUS="not-listening"
+fi
+
+# 3. Check the /v1/models endpoint
+MODELS_RESPONSE=$(curl -s --max-time "$TIMEOUT" "$SERVER_URL/v1/models" 2>/dev/null)
+if [ $? -eq 0 ] && [ -n "$MODELS_RESPONSE" ]; then
+  MODELS_STATUS="ok"
+  MODEL_NAME=$(echo "$MODELS_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); models=d.get('data',d.get('models',[])); print(models[0]['id'] if models else 'unknown')" 2>/dev/null || echo "unknown")
+else
+  MODELS_STATUS="failed"
+  MODEL_NAME="N/A"
+fi
+
+# 4. Live inference test (lightweight)
+INFERENCE_RESPONSE=$(curl -s --max-time "$TIMEOUT" "$SERVER_URL/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d "{\"model\":\"$MODEL_NAME\",\"messages\":[{\"role\":\"user\",\"content\":\"1+1=\"}],\"max_tokens\":2,\"stream\":false}" 2>/dev/null)
+
+if [ $? -eq 0 ] && echo "$INFERENCE_RESPONSE" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
+  INFERENCE_STATUS="ok"
+else
+  INFERENCE_STATUS="failed"
+fi
+
+# Summary
+echo "=== Local LLM Health Check ==="
+echo "  Service (systemd):  $SERVICE_STATUS"
+echo "  Port 8001:          $PORT_STATUS"
+echo "  /v1/models API:     $MODELS_STATUS"
+echo "  Model:              $MODEL_NAME"
+echo "  Inference test:     $INFERENCE_STATUS"
+echo ""
+
+if [ "$SERVICE_STATUS" = "running" ] && [ "$PORT_STATUS" = "listening" ] && [ "$MODELS_STATUS" = "ok" ] && [ "$INFERENCE_STATUS" = "ok" ]; then
+  echo "✅ Local LLM is healthy and ready."
+  exit 0
+elif [ "$SERVICE_STATUS" = "running" ] || [ "$PORT_STATUS" = "listening" ]; then
+  echo "⚠️  Server is partially up but not fully responsive. Check logs:"
+  echo "   journalctl --user -u llama-server-local --no-pager -n 20"
+  exit 1
+else
+  echo "❌ Local LLM is not running."
+  echo "   Start it with: systemctl --user start llama-server-local"
+  exit 2
+fi

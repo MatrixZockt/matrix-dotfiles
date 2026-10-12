@@ -1,0 +1,41 @@
+#!/bin/bash
+# Start the local llama-server service
+
+if systemctl --user is-active --quiet llama-server-local 2>/dev/null; then
+  echo "✅ llama-server is already running."
+  /home/user/.local/bin/llama-health-check
+  exit 0
+fi
+
+echo "🚀 Starting llama-server (Qwen3-8B)..."
+systemctl --user start llama-server-local
+
+# Wait for the model to load (can take 30-60 seconds)
+echo "⏳ Loading model (this may take a moment)..."
+for i in $(seq 1 40); do
+  sleep 3
+  if systemctl --user is-active --quiet llama-server-local 2>/dev/null; then
+    # Check if it's actually serving
+    if curl -s --max-time 5 http://localhost:8001/v1/models >/dev/null 2>&1; then
+      echo ""
+      /home/user/.local/bin/llama-health-check
+      exit 0
+    fi
+  else
+    echo "❌ Server failed to start. Check logs:"
+    echo "   journalctl --user -u llama-server-local --no-pager -n 20"
+    exit 1
+  fi
+done
+
+echo "⏳ Still loading... giving it more time."
+sleep 30
+if curl -s --max-time 5 http://localhost:8001/v1/models >/dev/null 2>&1; then
+  echo ""
+  /home/user/.local/bin/llama-health-check
+  exit 0
+else
+  echo "❌ Server did not become ready in time. Check logs:"
+  echo "   journalctl --user -u llama-server-local --no-pager -n 30"
+  exit 1
+fi

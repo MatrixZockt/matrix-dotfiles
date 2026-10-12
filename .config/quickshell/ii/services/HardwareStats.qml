@@ -33,8 +33,38 @@ import Quickshell.Io
 Singleton {
     id: root
 
-    // Set by the monitor while it is on screen. Nothing is sampled otherwise.
-    property bool active: false
+    // ── Who is watching ──────────────────────────────────────────────────
+    //
+    // A SET of owners, not a flag. `active` used to be a plain bool that every
+    // surface wrote for itself, so the last writer decided for everybody: the
+    // overlay closing set it false while the settings window's task manager was
+    // still open, and that page's sampling stopped dead with no way for it to
+    // know or to ask again. Three surfaces want these numbers now (the overlay
+    // widget, the task manager, and the island's System tab), which is past the
+    // point where a bool can say what is meant. Same convention as
+    // ProcessList.setActive, so the shell has one way to say "I am looking".
+    property var _watchers: ({})
+    // True while ANYONE is looking. Nothing is sampled otherwise.
+    readonly property bool active: Object.keys(root._watchers).length > 0
+
+    function setActive(owner, want) {
+        const next = Object.assign({}, root._watchers);
+        if (want)
+            next[owner] = true;
+        else
+            delete next[owner];
+        const wasActive = root.active;
+        root._watchers = next;
+        // Prime the counters on the way in, but only when nothing has been read
+        // yet. The rates below are DELTAS between two samples, so the first
+        // numbers after a cold start are whatever a gap with no previous
+        // reading averages to -- on a fresh session, "0 B/s" under a disk that
+        // is working. Calling sample() twice inside one tick instead would
+        // divide a ~0 delta by the 0.2 s floor and zero out a real reading, so
+        // this fires only when there is no previous sample to measure against.
+        if (!wasActive && root.active && root.lastDiskCounters === null)
+            root.sample();
+    }
     // Bumped on every sample so bindings reading the arrays below re-evaluate.
     property int revision: 0
 

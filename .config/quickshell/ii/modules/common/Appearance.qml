@@ -691,6 +691,12 @@ Singleton {
         property real barShortenScreenWidthThreshold: 1200 // Shorten if screen width is at most this value
         property real barHellaShortenScreenWidthThreshold: 1000 // Shorten even more...
         property real elevationMargin: 10
+        // The outermost sliver of the screen belongs to the edge-reveal strips,
+        // not to the panels they open: the sidebars' input regions stop short
+        // of it (see SidebarLeft/SidebarRight) so the same few pixels that
+        // summon a sidebar by hovering are also the ones that take the click
+        // that sends it back. One number, three files, no drift.
+        property real edgeRevealStripWidth: 10
         property real fabShadowRadius: 5
         property real fabHoveredShadowRadius: 7
         property real hyprlandGapsOut: 5

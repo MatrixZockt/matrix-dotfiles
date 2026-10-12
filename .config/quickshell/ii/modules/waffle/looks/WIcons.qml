@@ -54,7 +54,10 @@ Singleton {
 
     property string volumeIcon: {
         const muted = Audio.sink?.audio.muted ?? false;
-        const volume = Audio.sink?.audio.volume ?? 0;
+        // The shell's fraction (100% = the loud end): the raw sink value is a
+        // fraction of two, so "< 0.5" meant "below 100%" and the icon stayed at
+        // its quietest glyph for the whole upper half of the range.
+        const volume = Audio.currentVolume();
         if (muted)
             return "speaker-mute";
         if (volume == 0)

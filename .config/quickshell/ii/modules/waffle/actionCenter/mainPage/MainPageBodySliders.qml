@@ -54,14 +54,15 @@ ColumnLayout {
         
         WSlider {
             Layout.fillWidth: true
-            // Null-guarded: `Audio.sink` is null during PipeWire churn and on
-            // machines with no output device; the bare access threw TypeErrors.
-            value: Audio.sink?.audio?.volume ?? 0
+            // Through the audio service's own scale: 0..1 where 1.0 is 100%
+            // (`Audio.hardMaxValue`), so this slider cannot read or set the
+            // sink's "200%". The null-guard the old binding needed is inside
+            // `currentVolume`/`setSinkVolume` now -- `Audio.sink` is null during
+            // PipeWire churn and on machines with no output device, and the bare
+            // access used to throw TypeErrors.
+            value: Audio.currentVolume()
             scrollable: true
-            onMoved: {
-                if (Audio.sink?.audio)
-                    Audio.sink.audio.volume = value;
-            }
+            onMoved: Audio.setSinkVolume(value)
         }
 
         WPanelIconButton {

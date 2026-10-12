@@ -75,6 +75,62 @@ end
 monitorRule("eDP-1")
 monitorRule("eDP-2")
 
+-- ── X11 apps render NATIVE, not upscaled (2026-10-10) ─────────────────────
+--
+-- Why every X11 app looked pixelated on this panel.
+--
+-- The monitor scale above is 1.5. XWayland cannot hand an X11 client a 1.5x
+-- canvas -- an X11 screen is a whole number of pixels -- so Hyprland picks one
+-- of two bad answers, and this machine was getting the worse one:
+--
+--   force_zero_scaling = false  (what the base config sets, and what was in
+--                                force here until now)
+--     -> XWayland's root window is the LOGICAL size, 1707x1067, and the
+--        compositor blows every X11 window up by 1.5 to fill 2560x1600.
+--        Add xwayland:use_nearest_neighbor (true by default in Hyprland 0.56)
+--        and that upscale drops pixels instead of filtering them, which is
+--        exactly the "terrible pixel quality" report: uneven glyph stems,
+--        1px separators that come out 1px in some places and 2px in others.
+--        Measured before this change, off the composited framebuffer of a GTK
+--        window drawing 1-logical-px on/1-off stripes: the pattern arrived as
+--        1 on / 2 off (period 3, hard edges, no intermediate values) -- the
+--        screen was not showing the pixels the app drew.
+--
+--   force_zero_scaling = true   (this file)
+--     -> XWayland's root window is the PANEL, 2560x1600, and X11 apps draw
+--        straight into it. No scaling, no filtering, no dropped pixels: the
+--        app's pixels reach the panel unchanged. Verified the same way after
+--        the change (see the note in custom/scripts/x11-dpi.sh): the stripe
+--        pattern came back 1 on / 1 off, period 2, i.e. 1:1.
+--
+-- The catch, and why the base config chose false: at 1:1 on a ~198 DPI panel
+-- an X11 app's own UI is drawn at "1x" and looks half-size next to the 1.5x
+-- Wayland desktop. So crisp-only would have traded blur for tiny -- which is
+-- the report that got force_zero_scaling switched off in the first place.
+-- The whole point of this block is that it no longer has to be either:
+--
+--   * custom/env.lua exports the X11-app scale (Steam's own desktop-UI knob,
+--     Qt's rounding policy) for everything Hyprland launches.
+--   * custom/scripts/x11-dpi.sh sets Xft.dpi on the X server at login, which
+--     is where GTK, Qt, Firefox and JetBrains on X11 read their DPI from.
+--
+-- With those two in place an X11 app draws at native resolution AND at 1.5x
+-- size: sharp and the right scale. Wayland apps are untouched by all of this
+-- (they get their scale from the compositor and were already correct), and
+-- Electron/Chromium apps -- which do speak wp_fractional_scale_v1, so this
+-- desk was never blurring them -- are unaffected either way.
+--
+-- A scale change in Settings > Display re-applies Xft.dpi from the new value
+-- (apply-display.sh calls x11-dpi.sh), but force_zero_scaling itself needs
+-- XWayland to restart: it is read when the X server is created. A re-login
+-- does it; `hyprctl eval 'hl.config({xwayland={enabled=false}})'` followed by
+-- the same with `true` restarts it in place.
+hl.config({
+    xwayland = {
+        force_zero_scaling = true,
+    },
+})
+
 -- Keyboard layouts are NOT set here any more. They live in the shell config
 -- (keyboard.layouts) and are written to custom/keyboard.lua by
 -- scripts/keyboard/apply.sh, so the settings app can manage them. That file is
@@ -1734,10 +1790,17 @@ function FIELD_SWIPE(direction)
         local target = neighbourInDirection(me, wins, direction)
         trace("  moveTarget=" .. tostring(target and target.class))
         if target then
-            -- Two windows of the same size: trading them places would move the
-            -- apps without changing a single number, so the swipe gives the
-            -- room to the one that was swiped at instead.
-            local sameSize = math.abs(target.size.x - me.size.x) <= 8
+            -- Two windows of the same size: for an UP/DOWN swipe the original
+            -- behaviour stands -- the pair trades a cell instead of places,
+            -- because trading places would move the apps without changing a
+            -- single number. For a LEFT/RIGHT swipe that reasoning does not
+            -- hold: side-by-side pairs are exactly where the swipe means
+            -- "exchange the two apps", so the test below is false for them
+            -- and the swap just below runs instead. Measured 2026-10-07:
+            -- the same-size transfer fired as "transfer x by 186/187" on
+            -- exactly the side-by-side pairs where a swap was wanted.
+            local sameSize = (direction == "up" or direction == "down")
+                and math.abs(target.size.x - me.size.x) <= 8
                 and math.abs(target.size.y - me.size.y) <= 8
             if sameSize and transferTo(addr, target.address, SWIPE_AXIS[direction], wins) then
                 hl.timer(function() refocus(addr) end, { timeout = 140, type = "oneshot" })
@@ -1825,23 +1888,21 @@ function FIELD_SWIPE(direction)
     if refused and not didSomething then bumpRefusal(direction) end
 end
 
--- ── 3 fingers: wallpaper carousel first, island panel second, field-swipe last
+-- ── 3 fingers: wallpaper carousel first, the bar's own claims second, float attach third, field-swipe last
 
 --
--- The two finger counts share the GUARDS and then decide differently, so the
--- guards are factored out rather than the whole action: the carousel claim,
--- the float attach and the panel close must not be able to drift apart
--- between the two registrations.
+-- The guards are factored out rather than folded into the action so that the
+-- four ways this swipe can be spent -- the carousel, the card's close, the
+-- bar's popup, the float attach -- have ONE order in ONE place. They were
+-- separate branches once, and they drifted: the float attach ended up running
+-- ahead of the bar's popup, and that is the gesture exiting a fullscreen app
+-- instead of opening the card.
 --
 -- Returns true when the swipe has been consumed and means nothing else.
 local function SWIPE_DOWN_GUARDS()
     -- The carousel is up: its own handlers own this swipe entirely
     -- (a decisive down-flick closes the theatre from inside).
     if wallpaperStageOpen() then return true end
-    -- A float that should not be one gets attached, and the swipe is
-    -- spent. Checked before the panel and the field move so the verdict
-    -- is the user's first say about the window under their fingers.
-    if attachFocusedFloat() then return true end
     -- The popped-out card is open: fingers DOWN close it. Closing
     -- wins over everything else; in particular the field-move below must
     -- not act on a window hidden behind the card's dimmer.
@@ -1849,12 +1910,8 @@ local function SWIPE_DOWN_GUARDS()
         hl.dispatch(hl.dsp.global("quickshell:nowbarPanelClose"))
         return true
     end
-    return false
-end
-
--- Three fingers down: the whole gesture, bar or no bar.
-local function SWIPE_DOWN_POP()
-    if SWIPE_DOWN_GUARDS() then return end
+    -- ── THE BAR IS UNDER THE POINTER, SO THIS SWIPE IS THE BAR'S ─────────
+    --
     -- REQUESTED (2026-10-03): THE POPUP OPENS ONLY WITH THE CURSOR OVER THE
     -- MIDDLE TOP BAR. Not over the left island, not over the right one, not
     -- over empty screen -- the middle bar only. Everywhere else this swipe is
@@ -1870,15 +1927,34 @@ local function SWIPE_DOWN_POP()
     -- same file, and refuses to answer "yes" for a bar that is not visible,
     -- so a popup can never be popped for a bar nobody can see.
     --
-    -- Anything not positively known to be over the middle bar falls through
-    -- to the field, including every "cannot know" case -- a shell that is down
-    -- leaves this swipe doing what it did before any of this existed rather
-    -- than going quiet.
-    -- LOGGED BEFORE ANYTHING ELSE, and through gateTrace's own pcall, so
-    -- that a failure anywhere below still leaves a line saying the swipe
-    -- arrived. The trace is not a nicety here: this gate has been wrong in
-    -- three different ways today and "nothing happened" was the only symptom
-    -- every time.
+    -- AND IT IS ANSWERED HERE, AHEAD OF THE FLOAT ATTACH BELOW. That ordering
+    -- is the fix for the reported bug (2026-10-11): "three fingers down over
+    -- the bar while fullscreen exits fullscreen instead of opening the popup."
+    --
+    -- The attach is not a no-op on a fullscreen app, which is the part that
+    -- made this look like the gesture being inverted rather than reordered.
+    -- `attachFocusedFloat` answers a COVERING window with `cover.exit()` --
+    -- see its own cover branch, and cover.owns(), which matches a full-screen
+    -- float as well as a real `fs ~= 0`. So with the bar out over a fullscreen
+    -- app and the pointer parked on the middle island -- the exact position
+    -- this popup asks for -- the swipe was spent exiting the cover before the
+    -- gate below was ever asked, and the popup could not open at all. It also
+    -- explains the empty gate log: the trace sits after this guard, so a swipe
+    -- eaten by the attach left no line saying where it went.
+    --
+    -- The pointer outranks the window behind it: parking it on the middle bar
+    -- is the user's statement about what the swipe was aimed at, and the cover
+    -- is merely what happens to be underneath. A swipe that is not positively
+    -- known to be over the middle bar is untouched -- float attach, then field.
+    --
+    -- LOGGED BEFORE THE BRANCHES THAT CAN SPEND THE SWIPE, and through
+    -- gateTrace's own pcall, so that a failure anywhere below still leaves a
+    -- line saying the swipe arrived. The trace is not a nicety here: this gate
+    -- has been wrong in several different ways already and "nothing happened"
+    -- was the only symptom every time -- including this bug, where the swipe
+    -- was spent by the attach above the trace and so left no line at all.
+    -- Written for every swipe that gets this far; the carousel and the card's
+    -- close return above it, and both are visible states on screen.
     local stripH, midL, midR = barGeometry()
     local cx, cy = cursorXY()
     local onBar = cursorOnMiddleBar()
@@ -1886,11 +1962,23 @@ local function SWIPE_DOWN_POP()
         "3fg-down cursor=(%s,%s) mid=%s..%s stripH=%s visible=%s onMiddleBar=%s -> %s",
         tostring(cx), tostring(cy), tostring(midL), tostring(midR),
         tostring(stripH), tostring(stripH and "yes" or "no"),
-        tostring(onBar), onBar and "POPUP" or "field"))
+        tostring(onBar), onBar and "POPUP" or "float-or-field"))
     if onBar then
         hl.dispatch(hl.dsp.global("quickshell:nowbarPanelToggle"))
-        return
+        return true
     end
+    -- A float that should not be one gets attached, and the swipe is
+    -- spent. The verdict on the window under the user's fingers, but only
+    -- once the bar has declined the swipe.
+    if attachFocusedFloat() then return true end
+    return false
+end
+
+-- Three fingers down: the whole gesture, bar or no bar. Everything the bar
+-- owns -- the card's close and the popup -- is already answered in the guard
+-- above, so what reaches here is the field.
+local function SWIPE_DOWN_POP()
+    if SWIPE_DOWN_GUARDS() then return end
     FIELD_SWIPE("down")
 end
 
@@ -1982,13 +2070,17 @@ hl.gesture({
     disable_inhibit = true,
     action = function()
         if wallpaperStageOpen() then return end
-        if attachFocusedFloat() then return end
         -- Card open: put it away, whichever direction the swipe went. Same
-        -- reasoning as the down handler above.
+        -- reasoning as the down handler above, including the ORDERING: this
+        -- has to come before the attach below, because the attach exits a
+        -- cover. Swiping up to dismiss the card over a fullscreen app used to
+        -- leave fullscreen instead -- the same bug as the down swipe, one
+        -- gesture later, and the card stayed on screen through it.
         if nowBarPanelOpen() then
             hl.dispatch(hl.dsp.global("quickshell:nowbarPanelClose"))
             return
         end
+        if attachFocusedFloat() then return end
         local hovering = readNowBarHover()
         if hovering == false then
             FIELD_SWIPE("up")
@@ -2819,6 +2911,46 @@ function attachFocusedFloat()
     if not w or not w.floating then return false end
     local cls = w.class or w.initialClass
     local title = tostring(w.title or "")
+    -- ── A LIVE COVER IS NOT AN ACCIDENTAL FLOAT ──────────────────────────
+    --
+    -- Checked FIRST, before the dialog exemptions, and it is not a nicety:
+    -- the float this gesture was about to undo is the one cover.enter() makes
+    -- on purpose ("fill the screen", custom/cover.lua), and setFloat(...,
+    -- false) on a covered window is the worst of both worlds -- the cover is
+    -- gone (the tiler re-tiles the window), but the module still THINKS it is
+    -- covering: its memory is not cleared and the bar's strip is never handed
+    -- back through the module's own pairing. That is one of the enter/exit
+    -- imbalances the bar has to defend against by itself (see Bar.qml's long
+    -- note on the flag: "a compositor module whose enter/exit pairs
+    -- demonstrably do not balance"), and it costs the user a wasted SUPER+F
+    -- press -- owns() reads the stale memory, so the next press "exits" a
+    -- cover that is no longer there.
+    --
+    -- MEASURED, and this is how the gesture behaved before this branch:
+    --
+    --   09:45:53 attach-gesture: attaching discord "#casual-chats …"
+    --   09:45:53 4f-up finish: swipe belonged to the attach
+    --
+    -- A four-finger-up swipe over a window that had just been covered
+    -- un-floated it (no exit line in /tmp/hypr-cover.log) -- i.e. the
+    -- touchpad's own face of the "fills the screen" action destroyed the
+    -- cover made a moment earlier.
+    --
+    -- Exiting through the module is the same thing the keyboard does: the
+    -- remembered slot is restored, the strip goes back only when nothing else
+    -- is covering, and the memory is cleared so the NEXT press enters again.
+    -- The gesture becomes a clean toggle, which is what a swipe over a
+    -- covered window should be.
+    --
+    -- Before the dialog test deliberately: a COVERED dialog (the user can
+    -- cover one with SUPER+F like anything else) must go back to being the
+    -- float the rules gave it, never into the tiling layout -- which is what
+    -- setFloat(false) would have done to it at the bottom of this function.
+    if cover and cover.owns and cover.owns(w) then
+        tracef("attach-gesture: exiting the cover on %s \"%s\"", tostring(cls), title)
+        cover.exit(w)
+        return true
+    end
     -- Dialogs first, and alone. See above: this is the one case where
     -- attaching is actively harmful.
     if isDialogClass(cls) then return false end
@@ -2905,6 +3037,47 @@ end
 -- set only after a VERIFIED demote, so a dropped dispatch retries instead
 -- of leaving the window stuck.
 local demotedFullscreen = {}
+-- A USER-REQUESTED fullscreen outlives the launcher demote. The demote below
+-- exists for windows that ARRIVE fullscreen from a launch (Thunderbird), so
+-- it runs once per window and only during the launch window. But the user
+-- can fullscreen a launched app THEMSELVES (SUPER+ALT+Space on Discord, F11
+-- in Thunderbird) while that window is still inside the 45s launch window --
+-- and the sweep then tore it straight back down (measured: fs=2 -> fs=0 one
+-- second after the dispatch), which is the "can't fullscreen Thunderbird or
+-- Discord" report. There is no fullscreen event the sweep could subscribe
+-- to on this build, so instead the sweep itself reconciles against the live
+-- client list: sweepFullscreenMarks() ADopts every address the list reports
+-- CURRENTLY fullscreen and drops the marks that no longer are. Adopting is
+-- the whole trick: by the time the sweep wants to demote "an arrival
+-- fullscreen", the same read already told it the fullscreen is THERE NOW,
+-- and a fullscreen the user took hand-removed nothing -- it is simply on the
+-- list, so it is adopted and respected. A fullscreen the APP closed itself
+-- stops being on the list, so its protection lapses and the sweep resumes
+-- its usual once-per-window demote for any future ARRIVAL fullscreen; the
+-- demote's own table (demotedFullscreen) is untouched by any of this.
+-- Protected only while the window holds the state, so nothing accumulates.
+local userFullscreen = {}
+local function sweepFullscreenMarks(all)
+    local current = {}
+    for _, win in ipairs(all or {}) do
+        if (win.fullscreen or 0) ~= 0 or (win.fullscreenClient or 0) ~= 0 then
+            current[win.address or ""] = true
+        end
+    end
+    -- Drop marks for fullscreen states that are gone...
+    for addr in pairs(userFullscreen) do
+        if not current[addr] then userFullscreen[addr] = nil end
+    end
+    -- ...and ADOPT every fullscreen that is live right now (covers user
+    -- fullscreens taken outside anything this file could hook, including
+    -- client-side F11 and the generic SUPER+ALT+Space bind).
+    for addr in pairs(current) do userFullscreen[addr] = true end
+end
+-- Optional eager marking hook for callers that know a fullscreen dispatch is
+-- about to land; the sweep's adopt makes this redundant, kept for clarity.
+local function markUserFullscreen(addr)
+    if addr then userFullscreen[addr] = true end
+end
 local function isFullscreened(w)
     return (w.fullscreen or 0) ~= 0 or (w.fullscreenClient or 0) ~= 0
 end
@@ -3771,18 +3944,22 @@ local function swipeUpBody()
         -- only then is the bar's strip returned -- the reverse order snaps
         -- the window's height twice in two frames.
         --
-        -- Two shapes of "out" exist now:
-        --   * fs ~= 0 (an app fullscreened itself): anchoredTransition toggles
-        --     it off and re-tiles -- the pre-float-cover path, unchanged.
-        --   * the float-cover THIS module creates (fs == 0, floating at the
-        --     full monitor): anchoredTransition has nothing to toggle, so
-        --     cover.exit does the restore -- un-float, old tile, geometry.
-        --     Calling both would un-float twice and land the window floating.
-        if (active.fullscreen or 0) ~= 0 then
+        -- Three shapes of "out", and the routing matters:
+        --   * the cover THIS module creates -- internal fullscreen, client
+        --     never told (fs == 2, fullscreenClient == 0): cover.exit. It is
+        --     ONE dispatch and the compositor animates the way back, which is
+        --     the whole point of the rewrite in custom/cover.lua. Sending it
+        --     to anchoredTransition instead would hand-play a glide it does not
+        --     need and toggle the CLIENT fullscreen ON -- the tab-strip bug.
+        --   * the float-cover (fs == 0, floating at the full monitor): also
+        --     cover.exit -- it restores the old tile.
+        --   * fs ~= 0 with the client TOLD (an app fullscreened itself):
+        --     anchoredTransition toggles it off and re-tiles, unchanged.
+        if cover.isInternalCover(active) or (active.fullscreen or 0) == 0 then
+            cover.exit(active)
+        else
             anchoredTransition(active.address, false)
             cover.barStrip(active.address, false)
-        else
-            cover.exit(active)
         end
         return
     end
@@ -3930,12 +4107,15 @@ hl.gesture({
             if not w then return end
             if (w.fullscreen or 0) == 0 then popup.rememberSlot(w) end
             -- Same shape as swipeUpBody, and for the same reason: it COVERS
-            -- (float + pin) rather than fullscreens, so this gesture can
-            -- never put an app into its own fullscreen mode (the F11 case --
-            -- a browser losing its tabs). Going out it restores whatever the
-            -- window actually was (cover.exit) or toggles a real fullscreen
-            -- (2) off; the two never stack.
-            if (w.fullscreen or 0) == 2 then
+            -- (the compositor's internal fullscreen, client never told) rather
+            -- than fullscreening the app, so this gesture can never put an app
+            -- into its own fullscreen mode (the F11 case -- a browser losing
+            -- its tabs). Going out it restores whatever the window actually
+            -- was -- cover.exit for our own cover, or a real fullscreen (2)
+            -- toggled off; the two never stack.
+            if cover.isInternalCover(w) then
+                cover.exit(w)
+            elseif (w.fullscreen or 0) == 2 then
                 hl.dispatch(hl.dsp.window.fullscreen({
                     mode = "fullscreen", action = "toggle", address = w.address }))
                 cover.barStrip(w.address, false)
@@ -4013,39 +4193,27 @@ hl.animation({
     style = "slidevert"
 })
 
--- ═══ Desktop switch: anamorphic illusion ══════════════════════════════════
--- Every workspace switch plays the anamorphic-illusion screen pass: the
--- anamorphic.py driver arms the compositor's GLSL shader, dispatches the
--- switch, and clears it; the shader self-terminates at ~0.8 s even if the
--- driver dies. Upstream's plain SUPER+digit / code switchers are unbound
--- here (this file loads after hyprland/keybinds.lua) and re-bound through
--- the driver. Secondary chords (CTRL+SUPER+arrows, Page keys, mouse wheel)
--- keep their plain behaviour so the effect never fires by accident.
-local ANAMORPHIC = HOME .. "/.config/hypr/custom/scripts/anamorphic.py"
-local function ana_switch(target)
-    hl.exec_cmd(ANAMORPHIC .. " focus " .. target)
-end
-
-for i = 1, 10 do
-    hl.unbind("SUPER + " .. (i % 10))
-end
-local numberkeys = { 10, 11, 12, 13, 14, 15, 16, 17, 18, 19 }
-local numpadkeys = { 87, 88, 89, 83, 84, 85, 79, 80, 81, 90 }
-for i = 1, 10 do
-    hl.unbind("SUPER + code:" .. numberkeys[i])
-    hl.unbind("SUPER + code:" .. numpadkeys[i])
-end
-for i = 1, 10 do
-    hl.bind("SUPER + " .. (i % 10), function()
-        ana_switch(workspace_in_group(i))
-    end, { description = "Workspace: Focus " .. i .. " (anamorphic)" })
-    hl.bind("SUPER + code:" .. numberkeys[i], function()
-        ana_switch(workspace_in_group(i))
-    end)
-    hl.bind("SUPER + code:" .. numpadkeys[i], function()
-        ana_switch(workspace_in_group(i))
-    end)
-end
+-- ═══ Desktop switch: straight to the compositor ══════════════════════════
+-- Nothing to do here. SUPER+digit used to be unbound and re-bound through
+-- custom/scripts/anamorphic.py, which armed the anamorphic-illusion screen
+-- shader around the switch. That shader has been off since it tore mid-hold
+-- on this machine (see the driver: unless II_ANAMORPHIC_ON is set it just
+-- dispatches the switch), so the binding bought nothing and cost ~90 ms of
+-- Python startup between the keypress and the dispatch -- precisely the beat
+-- that made a desktop change read as a teleport.
+--
+-- Upstream's binds (hyprland/keybinds.lua, which loads before this file) are
+-- already the right ones: `hl.dispatch(hl.dsp.focus({ workspace =
+-- workspace_in_group(i) }))`, on the number row, the raw keycodes and the
+-- numpad. They are left alone, so the switch starts on the keypress frame and
+-- plays the `workspaces` slide configured above -- the same horizontal glide
+-- the four-finger swipe finishes with, with `fadeSwitch` dimming the desktop
+-- you are leaving. The notification click in the shell (services/
+-- Notifications.qml) goes through that one dispatcher as well, so both ways
+-- of arriving on an app's desktop look alike.
+-- (The bar's desktop clicks and scroll wheel still call the driver; the
+-- indirection is harmless there because the shader is off, it just carries
+-- the same ~90 ms of latency.)
 
 -- ═══ Pinch: open/close the wallpaper carousel ═════════════════════════
 --
@@ -5431,8 +5599,13 @@ local function attachSweep()
     local pids = nil
     pcall(function()
         pids = recentLauncherPids()
+        -- Reconcile the user-fullscreen marks against the live client list
+        -- FIRST, before any demote decision: a fullscreen the APP closed
+        -- itself stops being protected here, on every pass.
+        local allWins = hl.get_windows() or {}
+        sweepFullscreenMarks(allWins)
         local seen = {}
-        for _, win in ipairs(hl.get_windows() or {}) do
+        for _, win in ipairs(allWins) do
             local cls = win.class or win.initialClass
             seen[win.address or ""] = true
             if cls and not isDialogClass(cls) then
@@ -5441,16 +5614,58 @@ local function attachSweep()
                 -- it, ONCE). Everything else is left as it arrived -- a
                 -- popup, a file chooser, a polkit agent, a recorder's
                 -- preview all float or fullscreen on purpose.
+                --
+                -- ONE float is deliberately NOT "broken geometry": the one
+                -- SUPER+F (cover.enter) makes on purpose. That float IS the
+                -- "fills the screen" state -- the window is floated so the
+                -- compositor honours its exact pixel geometry -- and this
+                -- sweep un-floating it is what made fullscreen do nothing on
+                -- the apps it was most wanted on. MEASURED, on Discord:
+                --
+                --   09:33:21 float=1 at=[-425,-23] 1708x1068   <- cover's float
+                --   09:33:21 float=0 at=[1620,6]     81x1055    <- this sweep
+                --   09:33:25 float=0 at=[857,51]     844x1010   <- a half tile
+                --
+                -- Discord is in SELF_FLOATING and is launched through
+                -- open.sh, so `wants` is true for it on every pass and its
+                -- cover was undone within a second of being made -- the
+                -- window flashed and came back a tile, which is the report
+                -- "discord can't be put in fullscreen". The same held for
+                -- every launcher app (Thunderbird included), which is the
+                -- larger half of that report.
+                --
+                -- cover.owns() is the right test, not a geometry check:
+                -- the module REMEMBERS the window it covered, and that
+                -- memory is set before the float is dispatched, so the
+                -- window is protected even in the frames where its geometry
+                -- is still mid-flight (the [-425,-23] read above is exactly
+                -- such a frame -- geometry alone would have called it not a
+                -- cover and the bug would have survived the fix).
+                -- A window that merely ARRIVS floating with broken geometry
+                -- is not owned by the module, so the original job of this
+                -- sweep is unchanged.
                 local wants = SELF_FLOATING[cls] or launchedByLauncher(win, pids)
                 if wants and win.address then
-                    if win.floating then
+                    -- The function guards are not decoration: this sweep is
+                    -- wrapped in a pcall, so a call to a field the module does
+                    -- not have (an older table held by a timer that outlived a
+                    -- config reload) would abort the WHOLE pass silently --
+                    -- floats fixed, demotes, prunes, all of it -- forever.
+                    --
+                    -- (Verified from the outside, on the live config: with a
+                    -- live cover held by the sweep's own module, the guard's
+                    -- owns() answers true and the float survives sweep after
+                    -- sweep -- measured over four consecutive passes.)
+                    if win.floating and not (cover and cover.owns and cover.owns(win)) then
+                        -- Not a live cover -- see the guard above.
                         -- setFloat focuses the window FIRST (the float
                         -- dispatcher is focus-scoped on this build) and only
                         -- reports success once it has read the window back,
                         -- so a lost dispatch is retried on the next pass
                         -- rather than believed.
                         setFloat(win.address, false)
-                    elseif isFullscreened(win) and not demotedFullscreen[win.address] then
+                    elseif isFullscreened(win) and not demotedFullscreen[win.address]
+                        and not userFullscreen[win.address] then
                         demoteFullscreen(win.address)
                     end
                 end
@@ -5458,9 +5673,35 @@ local function attachSweep()
         end
         -- Prune the demote markers of windows that are gone, so the table
         -- cannot grow across a long session (a relaunched app must be
-        -- demotable again, too).
+        -- demotable again, too). The user-fullscreen markers ride the same
+        -- prune: a closed window's mark is meaningless.
         for addr in pairs(demotedFullscreen) do
             if not seen[addr] then demotedFullscreen[addr] = nil end
+        end
+        for addr in pairs(userFullscreen) do
+            if not seen[addr] then userFullscreen[addr] = nil end
+        end
+        -- Drop a cover memory that has stopped being true: a window PARKED in
+        -- the tray vault (special:tray) is not covering anything, by
+        -- cover.lua's own definition (canCoverScreen refuses a special
+        -- workspace), but its memory outlived the park. The vault itself
+        -- un-floats a window on the way back out (see TrayApps.show), so the
+        -- cover it remembered is gone -- and a stale memory is not harmless:
+        -- `owns()` reads the MEMORY as the truth, so the next SUPER+F was
+        -- spent "exiting" a cover that no longer existed and only the press
+        -- after that one actually filled the screen. That is "can't put it in
+        -- fullscreen" for every close-to-tray app: park it, bring it back,
+        -- and the first fullscreen press did nothing.
+        --
+        -- Deliberately the same predicate the cover module uses for "can this
+        -- window be seen covering the screen at all" rather than a second
+        -- copy of it, so the two can never disagree about the vault.
+        if cover and cover.canCoverScreen and cover.forget then
+            for _, win in ipairs(allWins) do
+                if win.address and not cover.canCoverScreen(win) then
+                    cover.forget(win.address)
+                end
+            end
         end
     end)
     hl.timer(attachSweep, { timeout = 1000, type = "oneshot" })

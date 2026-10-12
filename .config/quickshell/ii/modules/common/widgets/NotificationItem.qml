@@ -195,9 +195,9 @@ Item { // Notification item area
         }
     }
 
-    HoverHandler {
-        id: hoverDel
-    }
+    // (A `hoverDel` HoverHandler lived here and existed only to reveal the
+    // popup's delete button. The button is always visible now -- see the note
+    // on it -- so the handler had no reader left and is gone.)
 
     DragManager { // Drag manager
         id: dragManager
@@ -488,12 +488,28 @@ Item { // Notification item area
                     }
                 }
 
-                // The popup's own single delete, unchanged: a ripple button,
-                // not a pair of plain icons.
+                // The popup's own single delete: a ripple button, not a pair
+                // of plain icons.
+                //
+                // ALWAYS THERE, and that is the fix rather than the styling.
+                // It used to be revealed by the pointer -- `visible: root.popup
+                // && (hoverDel.hovered || opacity > 0)`, faded in on `hovered`
+                // -- and a control that appears under the pointer is a control
+                // that takes its own space from the text as it arrives. The row
+                // is one line of body text, so the notification re-flowed the
+                // instant the pointer crossed it: the text elided differently,
+                // the content jumped sideways, and the card read as extending
+                // itself at the pointer even when it had everything it needed
+                // to say on one line already.
+                //
+                // Worse, the reveal was circular: the button is there to
+                // dismiss with, but the only way to see it was to point at the
+                // card -- the one gesture a notification is not asking for.
+                // Visible now, like the sidebar row's plate, so hovering a card
+                // changes nothing at all.
                 RippleButton {
                     Layout.fillWidth: false
-                    visible: root.popup && (hoverDel.hovered || opacity > 0)
-                    opacity: hoverDel.hovered ? 1 : 0
+                    visible: root.popup
                     implicitWidth: 24
                     implicitHeight: 24
                     // The same wash as the sidebar's delete plate, and for the same
@@ -501,9 +517,6 @@ Item { // Notification item area
                     // vanishes into a solid card. See the note on that plate.
                     colRipple: ColorUtils.applyAlpha(Appearance.colors.colPrimary, 0.18)
                     onClicked: root.destroyWithAnimation()
-                    Behavior on opacity {
-                        animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
-                    }
                     MaterialSymbol {
                         anchors.centerIn: parent
                         text: "delete"

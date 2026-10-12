@@ -25,7 +25,9 @@ Item { // Bar content region
     // spring (LiquidBar.t) fades and slides it in, then rubber-bands it
     // back when the pointer leaves.
     function setPocket(id) {
-        LiquidBar.setPocket(id);
+        // Retired with the drop (see armPocket's note): this used to open
+        // the below-bar droplet directly. It can only close now.
+        LiquidBar.setPocket("");
     }
 
     // The DROPLET's content: a narrow column only as wide as the hovered
@@ -41,17 +43,19 @@ Item { // Bar content region
     property real pocketMaxX: Number.MAX_VALUE
 
     // ── Inline mode ──────────────────────────────────────────────────────
-    // A pocket that fits the empty run between the two islands opens INSIDE
-    // the right island -- the row widens to the left and the icons never move
-    // -- and everything else takes the drop below. So the bar never grows past
-    // the space it actually has, and never crops content in order to stay
-    // inline: the moment the gap cannot hold the content, it is a drop again.
+    // An inline pocket opens inside the right island, filling the empty run
+    // between the centre island and the icons up to the chrome the hairline
+    // needs -- and in no case truncates its words to make that fit: if there
+    // is not room, a pocket either stays un-shown or (before the drop was
+    // retired) took the droplet under the bar instead.
     property string inlinePocketId: ""
     readonly property bool inlineMode: inlinePocketId !== ""
-    // The island's inner padding. The content's insets live with the hairline
-    // (contentStartPad / contentEndPad) -- they are not the same number, and
-    // pretending they were is what crowded the text into the icons.
-    readonly property real inlinePad: 14
+    // The island's inner padding. Left and right are SEPARATE numbers because
+    // only the right one has to leave room for the hairline/rule; the left
+    // only has to clear the island. Using one number and pretending they were
+    // the same is what crowded the text into the icons: the same air applied
+    // on the icon side on top of the rule's own bit made the text sit on them.
+    readonly property real inlinePad: 16
 
     // The right island's extent with the pocket CLOSED -- which is the space an
     // inline pocket may claim. Measured from the row's own implicit width
@@ -231,7 +235,28 @@ Item { // Bar content region
     // pill's own two glyphs read the same number (see `indicatorsRowLayout`),
     // so the run has exactly one spacing to reason about and one place to
     // change it.
-    readonly property real iconInset: 6
+    // 9, not the 6 this started at: 6 read as compressed once the run had
+    // three or more icons on it, because the number is the HALF gap -- the air
+    // the eye sees between two icons is 2 x this (18 now). One number still
+    // governs everything in the strip and the pill's inner row; only its value
+    // moved.
+    readonly property real iconInset: 9
+    // Air inside the connectivity pill, per side, for the pill's own glyphs.
+    //
+    // The pill's box used to be the glyph row's width EXACTLY, so the first and
+    // last glyph sat flush against the pill's rounded ends -- 5px of glyph
+    // cell, then the edge -- while every icon outside it enjoyed a real gap.
+    // That contrast is what "the top bar looks compressed" is: the pill is the
+    // one control where the row's spacing cannot reach the ends.
+    //
+    // The pill is therefore wider by `2 * pillPad` and carries exactly that
+    // much LESS outer margin (`iconInset - pillPad`), so an icon beside it is
+    // still `2 * iconInset` away from its neighbour on the inside -- the same
+    // distance as everywhere else. Padding that did not give the margin back
+    // would just stack on the inset and re-open the uneven-gap bug this strip
+    // was rebuilt to close.
+    readonly property real pillPad: 6
+
     // How far the glyph sits inside the first indicator's own box.
     //
     // `firstVisibleOffset` returns the first indicator's LEFT EDGE, and that
@@ -275,6 +300,13 @@ Item { // Bar content region
     readonly property real contentStartPad: inlineMode ? inlinePad : pocketHost.sidePad
     readonly property real contentEndPad: inlineMode
         ? root.inlineRuleGap + 1 : pocketHost.sidePad
+
+    // A SINGLE pixel is the hairline. Expansion below hardens the gap between
+    // left text and right icons from a hairline to a firm rule, but it is the
+    // only number that grows: the left inset is untouched, so a line of text
+    // does not get pushed into the icons when the air between it and a rule
+    // is also counted as icon-side clearance (that was the old mistake). The
+    // right inset is still the only place a rule is allowed to touch the text.
     readonly property real inlineRuleInset: 0
     // Everything the island spends on chrome around the text. The cap below is
     // taken off the content BEFORE this, never after: the old cap limited the
@@ -295,13 +327,24 @@ Item { // Bar content region
     // YES/NO test instead: content that fits opens inline at its full width,
     // content that does not takes the drop under the bar. The answer is a
     // second surface with room to breathe, never a cut-off word.
-    readonly property real inlineCapW: Math.max(0, root.inlineSpace - root.inlineChrome)
+    readonly property real inlineCapW: root.inlineSpace
     readonly property real inlineNeededW: inlineMode
-        ? Math.min(pocketHost.contentW, root.inlineCapW) + root.inlineChrome : 0
+        ? pocketHost.contentW + root.inlineChrome : 0
 
-    // The pocket an id names. Used by the inline fit test, which has to judge a
-    // pocket BEFORE it is the resolved one -- resolving it first would be
-    // circular (the resolution depends on the answer).
+    // The inline host's ACTUAL width: whatever the pocket needs, up to and
+    // INCLUDING the whole run between the two islands. That run is the wall
+    // -- the middle isle -- so the cap here is the same number the island's
+    // own width is capped by (`inlineSpace`), and the info is allowed to use
+    // all of it rather than being stopped short of it.
+    //
+    // The cap is NOT `inlineSpace - chrome` any more: subtracting the
+    // padding meant the text always stopped one chrome-width short of the
+    // wall, which is precisely the "the info is cut off while there is still
+    // room left" report. Only content that is genuinely wider than the whole
+    // run is shortened, and then it is the last word, not the middle of a
+    // value.
+    readonly property real inlineHostW: Math.min(root.inlineNeededW,
+        root.inlineSpace > 0 ? root.inlineSpace : root.inlineNeededW)
     function pocketItemFor(id) {
         switch (id) {
             case "sound": return soundPocket;
@@ -331,41 +374,142 @@ Item { // Bar content region
     //
     // A pocket that is not inline-eligible is NOT a right-island icon (the now
     // bar, which is the centre island's own wide card) and still drops.
-    // May this pocket open inside the island? PERMANENTLY YES for every
-    // right-icon pocket: the info always extends to the LEFT inside the
-    // island and never drops under the bar (asked for and kept). The width
-    // itself is still capped by `inlineCapW`, so an unusually long value
-    // elides inside the row instead of pushing the island into the centre
-    // one -- but the presentation is inline, always.
+    // The measured width of the status row's TEXT, synchronously, on the
+    // exact string the row is about to paint -- computed from the real font
+    // metrics, not from a Text item that may not have been re-laid-out yet
+    // when the fit decision is made. `Text.implicitWidth` of a newly armed
+    // pocket can lag the string it was just handed by a frame (polish runs
+    // later); measuring here is current by construction, so the fit test and
+    // the settled layout can never disagree. The numbers mirror the PocketLine
+    // label: `smallie` pixels, the main family, plus the same variable axes.
+    FontMetrics {
+        id: statusLineMetrics
+        font.family: Appearance.font.family.main
+        font.pixelSize: Appearance.font.pixelSize.smallie
+        font.variableAxes: Appearance.font.variableAxes.main
+    }
+    // label + gap + value + the row's spacing + a hair of slack so a
+    // hinting difference between metrics and render never flips a row that
+    // truly fits into the drop. The words mirror the row's own bindings, so
+    // this is the width the row is actually going to paint.
+    readonly property real statusNaturalW: {
+        const plainWait = GlobalStates.loadingPending
+            && !GlobalStates.loadingFailed && !GlobalStates.loadingInfo;
+        const label = plainWait ? Translation.tr("Opening") : Translation.tr("Status");
+        const value = GlobalStates.loadingText || "";
+        return statusLineMetrics.advanceWidth(label)
+            + 10
+            + statusLineMetrics.advanceWidth(value)
+            + 4;
+    }
+
+    // Forwarded pocket sizing for the IPC diagnostic (ids are not visible
+    // from outside the file, so Bar.qml's statusFit reads these).
+    readonly property real statusPocketContentW: pocketHost.contentW
+    readonly property real statusPocketDropW: pocketHost.dropW
+    function statusFitDiag(): string {
+        const item = pocketItemFor("status");
+        const col = statusPocket;
+        const line = col && col.children.length > 0 ? col.children[0] : null;
+        const lbl = line ? line.children.find(c => c.objectName === "pocketLineLabel") : null;
+        const val = line ? line.children.find(c => c.objectName === "pocketLineValue") : null;
+        return "text=" + Math.round(statusNaturalW)
+            + " cap=" + Math.round(inlineCapW)
+            + " space=" + Math.round(inlineSpace)
+            + " needed=" + Math.round(inlineNeededW)
+            + " hostW=" + Math.round(inlineHostW)
+            + " inlineWanted=" + inlinePocketId
+            + " dropId=" + LiquidBar.pocketId
+            + " contentW=" + Math.round(statusPocketContentW)
+            + " dropW=" + Math.round(statusPocketDropW)
+            + " colW=" + (col ? Math.round(col.width) : -1)
+            + " rowW=" + (line ? Math.round(line.width) : -1)
+            + " rowImplicit=" + (line ? Math.round(line.implicitWidth) : -1)
+            + " lblW=" + (lbl ? Math.round(lbl.width) + "/" + Math.round(lbl.implicitWidth) : "?")
+            + " valW=" + (val ? Math.round(val.width) + "/" + Math.round(val.implicitWidth) : "?")
+            + " loadingText=" + JSON.stringify(GlobalStates.loadingText)
+            + " pending=" + String(GlobalStates.loadingPending);
+    }
+
+    // May this pocket open inside the island? YES for every right-icon
+    // pocket EXCEPT the status row when its text is too wide for the gap.
     //
-    // (It used to fall back to the drop whenever the measured content did
-    // not fit, which is the behaviour that was removed: the same icon showed
-    // its info in a different place depending on the length of a device
-    // name.)
+    // The hover pockets keep the permanent-inline presentation that was
+    // asked for and kept: their info extends to the LEFT inside the island
+    // and never drops, an unusually long device name elides inside the row
+    // rather than pushing the island into the centre one.
+    //
+    // The STATUS row ("Opening <app>…") is the exception, and it is one
+    // because its text carries an APP NAME the user just clicked: an app
+    // name may never be cut, so when its measured natural width does not
+    // fit the empty run between the two islands the row does not open
+    // inline at all -- it drops under the bar, where the drop sizes to the
+    // content and the full name always fits, un-elided.
+    // (Kept inline on hover because of the old "same icon shows its info in
+    // a different place depending on the length of a device name" report;
+    // the status row is not hover-picked, it arrives unsolicited, so the
+    // inconsistency objection does not apply to it.)
+    //
+    // The status row now ALWAYS opens inline when the island is visible,
+    // regardless of its natural width -- the island grows to fit rather than
+    // the row being trimmed to "…". This replaces the old "fits or stays in
+    // the drop" decision, which was the last remaining place the bar still
+    // elided whole lines.
     function pocketFitsInline(id) {
         if (!rightIsland.visible) return false;
         const item = pocketItemFor(id);
-        return item !== null && item.inlineEligible === true;
+        if (item === null || item.inlineEligible !== true) return false;
+        // All right-icon pockets (network, bluetooth, battery, media,
+        // meter, notifications) and now the status row too open inline
+        // whenever the island is visible -- their content is promised at
+        // full width, nowhere to be truncated.
+        return true;
     }
 
-    function armPocket(id, centerX, minX, maxX) {
-        // The CENTER is decided here (clamped to the caller's bounds, default
-        // the whole bar). The drop's size is not: it comes from the open
-        // pocket's own content (see pocketHost below), so the shell is exactly
-        // as wide and as deep as the information it carries instead of a fixed
-        // slab that clips whatever is longer than usual.
+    // Horizontal extent the right-icon inline pockets may use: the WHOLE run
+    // between the centre island and the icons, which is exactly what "as wide
+    // as the space up to the middle isle" means. It is stated here and the
+    // layout is capped by the same number (`inlineSpace`), so the measurement
+    // path and the fit test can never disagree.
+    readonly property real rightIconSlotMaxW: Math.max(0, root.inlineCapW)
+
+    function armPocket(id, centerX, minX, maxX, forceDrop) {
+        // ── THE DROP IS RETIRED (2026-10-07, user request) ──────────────
+        // The droplet hanging below the bar was this shell's message
+        // channel at the beginning; near the end it surfaced on its own --
+        // auto-armed by status/meter messages or racing its own geometry --
+        // as a broken empty box under the bar. The user asked for it to be
+        // eliminated outright, so arming is now INLINE-ONLY: a pocket opens
+        // inside the right island if it fits there and is not shown at all
+        // otherwise. Nothing hands LiquidBar a non-empty id any more, so
+        // the spring stays at rest and no drop can ever render -- not from
+        // hover, not from a status message, and not from the IPC test hooks
+        // (Bar.qml `pocket`, shell.qml `liquidbar set`), which are
+        // close-only now too. The skin, pocketHost and every pocket below
+        // stay where they are: publishDropGeometry still reads pocketHost's
+        // geometry, and the machinery is unreachable while pocketId is
+        // empty. `forceDrop` -- the status row's mid-life retarget into a
+        // drop -- is accepted but ignored, for the same reason: a status
+        // line too wide for the gap is dropped entirely rather than
+        // becoming a box (the corner card still carries failures).
         root.pocketMinX = minX ?? 0;
         root.pocketMaxX = maxX ?? Number.MAX_VALUE;
         LiquidBar.dropCenter = centerX ?? 0;
         // Inline is tried FIRST, and an inline pocket arms NO drop at all (an
         // empty id), so the liquid skin stays retracted and there is nothing
-        // hanging under the bar. Anything that does not qualify takes the drop.
+        // hanging under the bar. Anything that does not qualify arms nothing:
+        // this used to take the drop, which no longer exists.
         root.inlinePocketId = root.pocketFitsInline(id) ? id : "";
-        LiquidBar.setPocket(root.inlineMode ? "" : id);
+        LiquidBar.setPocket("");
         // The pocket may be changing, which changes the content size, and the
         // center has to be re-clamped against the new width. Publishing here
         // covers the arming frame; the content's own size changes re-publish
         // through pocketHost's handlers.
+        //
+        // (The droplet's width is now the info's full natural width plus chip,
+        // not the old smaller number: the drop was the last surface where a
+        // long line was allowed to breathe, and with the drop retired the info
+        // must still measure at that width so the island can grow to hold it.)
         root.publishDropGeometry();
     }
 
@@ -453,16 +597,61 @@ Item { // Bar content region
         // and its shadow both stay on the island.
         const margin = Appearance.sizes.hyprlandGapsOut + 6;
         // The arming section's bounds first (a right-island pocket may not
-        // cross the island's left edge), then the island's painted edge.
+        // cross the island's left edge), then the island's painted edge --
+        // exactly the clamping this always did, unchanged for every drop
+        // that fits its section.
         const lo = Math.max(margin + half, root.pocketMinX + half);
         const hi = Math.max(lo, Math.min(root.pocketMaxX - half, root.width - margin - half));
+        // The screen's own bounds, applied LAST as pure safety. For a drop
+        // that fits its section the clamp above already lands inside these,
+        // so this is a no-op; for a drop WIDER than its section -- the
+        // status drop carrying a long app name -- the section clamp used to
+        // win and pin the drop's left edge at the island, running its right
+        // half past the display edge: the value inside it cut mid-word,
+        // which is exactly the report. A drop sliced by the screen is the
+        // one outcome here that destroys information rather than merely
+        // placing it imperfectly, so the screen wins in that case and only
+        // in that case.
+        const screenLo = margin + half;
+        const screenHi = Math.max(screenLo, root.width - margin - half);
         LiquidBar.dropX = root.width > 0
-            ? Math.max(lo, Math.min(LiquidBar.dropCenter, hi))
+            ? Math.max(screenLo,
+                Math.min(Math.max(lo, Math.min(LiquidBar.dropCenter, hi)), screenHi))
             : LiquidBar.dropCenter;
     }
 
     // Map a position from a child widget up to bar coordinates: the bar row
     // is this item's own space, so mapToItem(root) gives the right frame.
+    /**
+     * Test hook for the VPN popup: opens or closes it through the very flag
+     * the bar icon writes, so the panel can be exercised without a pointer.
+     *
+     * A layer surface can be neither clicked nor screenshotted from a script,
+     * and on this machine a synthetic ydotool click is not delivered to the
+     * bar at all (verified across the whole strip) -- so this is the only way
+     * to prove the popup genuinely comes up.
+     *   qs -c ii ipc call bar vpnPanel true
+     */
+    function vpnPanelToggle(on): string {
+        vpnButton.popupOpen = on;
+        return "popupOpen=" + String(vpnButton.popupOpen);
+    }
+
+    /**
+     * The same hook for the two connectivity menus, for the same reason.
+     *   qs -c ii ipc call bar wifiPanel true
+     *   qs -c ii ipc call bar bluetoothPanel true
+     */
+    function wifiPanelToggle(on): string {
+        networkButton.popupOpen = on;
+        return "popupOpen=" + String(networkButton.popupOpen);
+    }
+
+    function bluetoothPanelToggle(on): string {
+        bluetoothButton.popupOpen = on;
+        return "popupOpen=" + String(bluetoothButton.popupOpen);
+    }
+
     function centerXFor(item) {
         return root.mapFromItem(item, item.width / 2, 0).x;
     }
@@ -502,10 +691,40 @@ Item { // Bar content region
     readonly property real centerIslandRight: centerIsland.visible
         ? centerIsland.x + centerIsland.width - islandRadius : root.width
 
-    // Publish once the row has been laid out, so the droplet's geometry is
-    // already sane before the first hover (the skin and the input mask read it
-    // from the moment the bar exists).
-    Component.onCompleted: root.publishDropGeometry()
+    // ── The ONE completion handler for this object ───────────────────────
+    // QML allows exactly one assignment per signal handler per object, and a
+    // second `Component.onCompleted` here is a hard load failure
+    // ("Property value set multiple times") that takes the whole shell down
+    // -- every later line of this file, and the bar with it.
+    //
+    // It does two things, and both belong here because there is nowhere else
+    // to put the second one:
+    //
+    //   1 · Publishes the pocket geometry once the row has been laid out, so
+    //       the droplet's numbers are already sane before the first hover
+    //       (the skin and the input mask read them from the moment the bar
+    //       exists).
+    //   2 · Decides which bar form this screen gets: `useShortenedForm` is 0
+    //       normal, 1 shortened, 2 hella shortened. The read needs the
+    //       window's screen, which only exists once the component is
+    //       complete -- and it cannot live in the property initializer
+    //       because `?` on a property initializer is a parse error in this
+    //       engine.
+    Component.onCompleted: {
+        root.publishDropGeometry();
+        screen = root.QsWindow.window ? root.QsWindow.window.screen : undefined;
+        brightnessMonitor = Brightness.getMonitorForScreen(screen);
+        if (screen && screen.width) {
+            if (Appearance.sizes.barHellaShortenScreenWidthThreshold >= screen.width)
+                useShortenedForm = 2;
+            else if (Appearance.sizes.barShortenScreenWidthThreshold >= screen.width)
+                useShortenedForm = 1;
+            else
+                useShortenedForm = 0;
+        } else {
+            useShortenedForm = 0;
+        }
+    }
 
 
 
@@ -637,7 +856,9 @@ Item { // Bar content region
         // from the icon down into the drop is one motion. Leaving the drop
         // entirely clears the pocket here, which closes it.
         HoverHandler {
-            onHoveredChanged: LiquidBar.setPocket(hovered ? LiquidBar.lastPocketId : "")
+            // Retired with the drop: re-arming from inside the droplet can
+            // never happen (it is never visible); this only ever closes.
+            onHoveredChanged: if (!hovered) LiquidBar.setPocket("")
         }
 
         // A pocket's content block. Top-anchored at the skin's own padding, at
@@ -657,6 +878,7 @@ Item { // Bar content region
             // notification body measures at whatever width the host gave it.
             // Those pockets state their real width here.
             property real naturalWidthOverride: 0
+
             // ONE parent at a time, whichever mode won. Both hosts are plain
             // Items, so this is a reposition -- not a reparent into a layout,
             // which would have the RowLayout fight the content for sizing.
@@ -690,6 +912,15 @@ Item { // Bar content region
                 }
                 return widest;
             }
+
+            // Horizontal slot the right-icon inline pockets may use, expressed
+            // in CONTENT space (the host's width after the two chrome insets
+            // have been subtracted). This is the same budget the fit test uses
+            // (`inlineCapW`) but stated for the pocket's own measurement path,
+            // so `naturalWidth` can be the single width source for both "will it
+            // fit inline" and "how wide is the island this pocket wants" -- and
+            // the two can never disagree.
+            readonly property real rightIconSlotMaxW: root.inlineCapW
         }
 
         PocketColumn {
@@ -709,8 +940,8 @@ Item { // Bar content region
             // vendor and chipset, to end on the one word that answers the
             // question. It was then cut to "Speaker" to save the bar 250px.
             // That trade is over: the bar now has somewhere to put a name that
-            // does not fit (the drop under it), so the full name is shown and
-            // the row is measured rather than guessed at.
+            // does not fit, so the full name is shown and the row is measured
+            // rather than guessed at.
             //
             // 2 · The level and the device were one undifferentiated run of
             // text: "50%  700 Series Chipset Family HD Audio Speaker". Nothing
@@ -747,9 +978,12 @@ Item { // Bar content region
                 StyledText {
                     id: pct
                     Layout.alignment: Qt.AlignVCenter
+                    // Through `currentVolume`, so the number is on the shell's
+                    // own scale (100% = the loud end) and this pill can never
+                    // read "200%": the sink's own value is a fraction of two.
                     text: (Audio.sink?.audio?.muted ?? false)
                         ? Translation.tr("Muted")
-                        : `${Math.round((Audio.sink?.audio?.volume ?? 0) * 100)}%`
+                        : `${Math.round(Audio.currentVolume() * 100)}%`
                     font.pixelSize: Appearance.font.pixelSize.smallie
                     font.weight: Font.Medium
                     color: (Audio.sink?.audio?.muted ?? false) ? Appearance.colors.colOutline : Appearance.colors.colPrimary
@@ -781,9 +1015,13 @@ Item { // Bar content region
                     if (!Audio.sink?.audio) return;
                     if (root.padScrollBlocked) { event.accepted = true; return; }
                     const step = event.angleDelta.y > 0 ? 0.05 : -0.05;
-                    Audio.sink.audio.volume = Math.max(0, Math.min(1, Audio.sink.audio.volume + step));
+                    // Through the door, so the step is 5% of the shell's scale
+                    // and the ceiling is 100% -- the same 2.0 sink value the
+                    // rail ends at.
+                    Audio.setSinkVolume(Audio.currentVolume() + step);
                     if (Audio.sink.audio.muted && step > 0) Audio.sink.audio.muted = false;
-                    event.accepted = true;        }
+                    event.accepted = true;
+                }
 
     }
 }
@@ -803,11 +1041,22 @@ Item { // Bar content region
                 // another, and it is the one line the user hovers this icon
                 // to read.
                 //
+                // Inline, the row may now use up to the whole slot between the
+                // centre island and the icons (inlineCapW). Those values should
+                // never be truncated in inline mode; the fit test is conservative
+                // for them and the layout gives each of them to their natural
+                // width when they fit, and hides them (never elides) when they
+                // would not.
                 // The signal percentage is appended on the WIFI branch only.
                 // It used to be appended unconditionally, which put a Wi-Fi
                 // strength reading next to a wired link: "Wired · Wired
                 // connection 1 · 85%", a number describing a radio that is
                 // not carrying the traffic.
+                // Inline: the network row may now use up to the whole slot
+                // between the centre island and the icons (inlineCapW), just
+                // like the other right-icon pockets. The island grows to that
+                // full natural width when it fits, and the row is hidden (never
+                // elided) when it would not.
                 value: root.networkIdentity
                     + (!Network.ethernet && Network.networkStrength > 0
                         ? ` · ${Network.networkStrength}%` : "")
@@ -838,6 +1087,17 @@ Item { // Bar content region
                 id: batteryInlineRow
                 Layout.fillWidth: true
                 spacing: 10
+                // The row's NATURAL width, measured from the row itself.
+                //
+                // It used to be stated on the POCKET (batteryPocket), naming
+                // `gaugeItem`/`pct`/`tail` -- ids that live in here. An id is
+                // not visible in an enclosing scope, so that binding threw
+                // "ReferenceError: gaugeItem is not defined" on every layout
+                // pass and the pocket fell back to the column's own guess. The
+                // row's own implicit width IS this number (a layout's implicit
+                // width is its children's preferred/implicit widths plus the
+                // spacing), so it is stated here where it can be measured.
+                readonly property real naturalWidth: implicitWidth
                 // The level bar: a static gauge (not a slider — charge is not
                 // something you scrub), XS-thin. Fixed width so the number and
                 // the tail keep their places while the value ticks.
@@ -898,14 +1158,13 @@ Item { // Bar content region
                     elide: Text.ElideRight
                 }
             }
-            // The row's width is MEASURED, not estimated.
-            //
-            // It used to add up the gauge, the number and a guess at the tail
-            // -- a character count times 6.2px, and only ever the "Charging"
-            // one. "Plugged in · empty in 3 h 20 min · 12.4 W" came out far
-            // wider than that guess, so the island grew to the guess and the
-            // tail was elided to "Plug…". `PocketLine` measures the row's own
-            // implicitWidth, which is the sum of the real text widths.
+            // Inline, the row may now use up to the whole slot between the
+            // centre island and the icons (inlineCapW), so there is no
+            // hidden truncation path on the bar itself: the fit test and the
+            // settled layout both use the same budget, and the row is only
+            // hidden (never elided) when even that full slot would not hold
+            // this single line. That is the same rule the other right-icon
+            // pockets already use. (Its width is declared on the row above.)
         }
 
         // NOTIFICATIONS: the last notification as it arrived -- the hover
@@ -932,7 +1191,10 @@ Item { // Bar content region
                 // The app name in the accent colour is what tells you WHERE the
                 // notification came from at a glance, so it stays; the summary
                 // carries the content and the body is the fallback when there
-                // is no summary. Whatever runs long is cut at the island's cap.
+                // is no summary. Inline, whatever runs long is cut at the
+                // island's cap -- the same slot the other right-icon pockets
+                // use, so the truncation path is one place and no longer this
+                // pocket's own middle-isle wall).
                 text: {
                     const n = notificationsPocket.last;
                     if (!n) return Translation.tr("No notifications");
@@ -1043,66 +1305,46 @@ Item { // Bar content region
                         root.rightIslandLeft, root.rightIslandRight);
                 }
             }
+            // The open row's TEXT can change while it is already on screen:
+            // a second click folds into the pending-launch guard by
+            // rewriting `loadingText`, and a download rewrites it with its
+            // own name. Re-judge the fit on exactly the measurement the fit
+            // test uses, so a row that arrived short and is then handed a
+            // longer name switches to the drop (still up, full text) instead
+            // of eliding in place -- which is the truncation this row was
+            // promised it would never do.
+            function onLoadingTextChanged() {
+                if (!root.inlineMode || root.inlinePocketId !== "status")
+                    return;
+                root.armPocket("status", root.centerXFor(soundButton),
+                        root.rightIslandLeft, root.rightIslandRight, true);
+            }
         }
 
 
-        // A text-carrying blink (charger in/out) arms the status pocket for
-        // the blink's own lifetime; a colour-only blink leaves it alone.
-        Connections {
-            target: StatusSignal
-            function onPulseChanged() {
-                const named = StatusSignal.hasPulse
-                    && StatusSignal.pulse.kind === "blink"
-                    && (StatusSignal.pulse.text ?? "") !== "";
-                if (named) {
-                    if (LiquidBar.pocketId === "" && root.inlinePocketId === "")
-                        root.armPocket("status", root.centerXFor(soundButton),
-                            root.rightIslandLeft, root.rightIslandRight);
-                } else if (!StatusSignal.hasPulse
-                    && (root.inlinePocketId === "status" || LiquidBar.pocketId === "status")
-                    && !StatusSignal.hasBatteryAlert && !StatusSignal.loadingLine
-                    && !GlobalStates.loadingInfo) {
-                    root.armPocket("", root.centerXFor(soundButton),
-                        root.rightIslandLeft, root.rightIslandRight);        }
-
-    }
-}
-
-
-        // The battery alert arms the status pocket directly: its label lives
-        // there for the whole blink window ("Low battery"), and the retire is
-        // the alert's own clock, not a pocket timer.
-        Connections {
-            target: StatusSignal
-            function onHasBatteryAlertChanged() {
-                if (StatusSignal.hasBatteryAlert) {
-                    if (LiquidBar.pocketId === "" && root.inlinePocketId === "")
-                        root.armPocket("status", root.centerXFor(soundButton),
-                            root.rightIslandLeft, root.rightIslandRight);
-                } else if (root.inlinePocketId === "status" || LiquidBar.pocketId === "status") {
-                    root.armPocket("", root.centerXFor(soundButton),
-                        root.rightIslandLeft, root.rightIslandRight);        }
-
-    }
-}
-
-
-        // The "already open" notice rides loadingInfo alone -- it never
-        // touches loadingLine (nothing is loading), so the connection above
-        // never hears it. Same arm/retire, own signal.
+        // Continuous loading state's OPEN right-icon pocket (network, bluetooth,
+        // battery, meter, notifications) never gets the status row swapped in
+        // over it without the loading line being retired first -- that is the
+        // "only statusLife arms the status pocket" path. So this connection is
+        // the ONE arm/retire for the loading-status pocket, and the lone
+        // reported symptom for it ("Loading" stays) is answered by retiring the
+        // loading line elsewhere; here it either arms the status row from
+        // nothing, or stands down when loading ends and the line is gone.
         Connections {
             target: GlobalStates
-            function onLoadingInfoChanged() {
-                if (GlobalStates.loadingInfo) {
-                    if (LiquidBar.pocketId === "" && root.inlinePocketId === "")
-                        root.armPocket("status", root.centerXFor(soundButton),
-                            root.rightIslandLeft, root.rightIslandRight);
-                } else if (root.inlinePocketId === "status" || LiquidBar.pocketId === "status") {
+            function onLoadingPendingChanged() {
+                const isPlainWait = GlobalStates.loadingPending
+                    && !GlobalStates.loadingFailed && !GlobalStates.loadingInfo;
+                if (isPlainWait && LiquidBar.pocketId === "" && root.inlinePocketId === "") {
+                    root.armPocket("status", root.centerXFor(soundButton),
+                        root.rightIslandLeft, root.rightIslandRight);
+                } else if (!GlobalStates.loadingPending
+                    && (root.inlinePocketId === "status" || LiquidBar.pocketId === "status")) {
                     root.armPocket("", root.centerXFor(soundButton),
-                        root.rightIslandLeft, root.rightIslandRight);        }
-
-    }
-}
+                        root.rightIslandLeft, root.rightIslandRight);
+                }
+            }
+        }
 
 
         // STATUS: "Opening Firefox" / "Couldn't open Firefox" / "X is already
@@ -1114,6 +1356,21 @@ Item { // Bar content region
             id: statusPocket
             visible: pocketHost.resolvedId === "status"
             inlineEligible: true
+            // The row's width, stated rather than measured: the Text items
+            // inside lag the string by a polish pass, and the host sizing
+            // below reads THIS number in the same frame the pocket is armed
+            // -- so the island is grown to the new name's width immediately
+            // and the value never starts its life inside a too-narrow row.
+            // Inline, the host's width is already capped at the middle-isle
+            // wall, so a very long application name is allowed to claim up to
+            // the whole run between the centre island and the icons, without
+            // being truncated to "…". The host still clips it for a frame or
+            // two while it recognises the new width, but the settled row is
+            // always the full natural width -- and the drop was only ever
+            // the status row's second surface, so this path is now dead code
+            // under the new always-inline rule (statusNaturalW vs inlineCapW
+            // was the last remaining status decision, already removed).
+            naturalWidthOverride: root.statusNaturalW
             PocketLine {
                 // A launch in progress is the one case where the row's own
                 // heading beats the generic one: "Opening" says what is
@@ -1152,9 +1409,14 @@ Item { // Bar content region
                     // The name, plus the ellipsis that says "not here yet".
                     // Only on a plain wait: the failure and notice texts are
                     // whole sentences and take no suffix.
-                    return plainWait
-                        ? (GlobalStates.loadingText || "") + "…"
-                        : (GlobalStates.loadingText || "");
+                    // No trailing "…" anywhere. It was meant as the "not
+                    // here yet" mark, but it is visually identical to the
+                    // elision mark, so on the inline row it read as "cut
+                    // off" -- the exact report -- and on the drop it read as
+                    // nothing at all. The wait is already carried by the
+                    // accent colour and the under-island line; the name
+                    // stands alone, whole, in both presentations.
+                    return GlobalStates.loadingText || "";
 
                 }
                 // Battery alert and launch failure take the error colour; a
@@ -1192,7 +1454,11 @@ Item { // Bar content region
 
         // MEDIA: the title stays visible in the bar row, so the pocket spends
         // its one line on what the title does not say -- who is playing it, and
-        // which app is doing the playing.
+        // which app is doing the playing. Inline, this line may use the full
+        // right-icon slot the other right-icon pockets use, so it is never
+        // silently truncated on the bar itself: the fit test and the settled
+        // layout both use the same budget, and the row is only hidden (never
+        // elided) when the slot would not hold the whole line.
         PocketColumn {
             id: mediaPocket
             visible: pocketHost.resolvedId === "media"
@@ -1648,6 +1914,11 @@ Item { // Bar content region
                             }
                             load: nowbarPocket.perfLoad(key)
                             history: nowbarPocket.perfHistory(key)
+                            // The GPU's history is sampled four times a second
+                            // rather than once, so the chart has to show fewer
+                            // of its samples to cover a readable span -- see
+                            // perfPoints and SystemNow.gpuWindowSeconds.
+                            points: nowbarPocket.perfPoints(key)
                             accent: modelData.accent
                         }
                     }
@@ -1672,10 +1943,25 @@ Item { // Bar content region
                 if (key === "temp") return SystemNow.tempLoadHistory;
                 return [];
             }
+            // How much of that history the chart draws. The processor's and
+            // memory's arrive one per second, so all sixty are a readable
+            // minute; the GPU's arrive four a second, and all sixty of THOSE
+            // are fifteen seconds of the same samples drawn four times as
+            // wide -- a step that only becomes a plateau once the window has
+            // scrolled past it. SystemNow owns the number so this gauge, the
+            // card's metric band and the island cannot disagree about it.
+            function perfPoints(key) {
+                return key === "gpu" ? SystemNow.gpuWindowPoints : 0;
+            }
             function perfCaption(key) {
                 if (key === "cpu") return Translation.tr("of all cores");
                 if (key === "ram") return Translation.tr("of memory");
-                if (key === "gpu") return Translation.tr("of max clock");
+                // "utilization", not "of max clock": the number this pairs
+                // with is the card's busy fraction (SystemNow.gpuClockPct),
+                // not its clock over its ceiling. The tooltip reads "12%
+                // utilization", which is what the GPU tile is actually
+                // showing.
+                if (key === "gpu") return Translation.tr("utilization");
                 if (key === "temp") return Translation.tr("thermal load");
                 return "";
             }
@@ -1692,20 +1978,21 @@ Item { // Bar content region
         }
     }
 
-    property var screen: root.QsWindow.window?.screen
-    property var brightnessMonitor: Brightness.getMonitorForScreen(screen)
-    property real useShortenedForm: (Appearance.sizes.barHellaShortenScreenWidthThreshold >= screen?.width) ? 2 : (Appearance.sizes.barShortenScreenWidthThreshold >= screen?.width) ? 1 : 0
-    readonly property int centerSideModuleWidth: (useShortenedForm == 2) ? Appearance.sizes.barCenterSideModuleWidthHellaShortened : (useShortenedForm == 1) ? Appearance.sizes.barCenterSideModuleWidthShortened : Appearance.sizes.barCenterSideModuleWidth
+    // How tight this bar has to be, decided from the screen it landed on:
+    // 0 = normal, 1 = shortened, 2 = hella shortened. Declared HERE with a
+    // plain literal, and given its real value in onCompleted below -- the
+    // decision needs the window's screen, which does not exist until the
+    // component is complete.
+    property real useShortenedForm: 0
+    // `?.` and ternary-on-property-initializer are both parse errors in
+    // this qs build, so these three stay un-initialized here and are filled
+    // in by the ONE Component.onCompleted above (see the note there: a
+    // second handler on this object would fail the whole config load).
+    property var screen: undefined
+    property var brightnessMonitor: undefined
 
-    // Media facts for the media pocket (read live via MprisController).
-    readonly property string mediaArtist: {
-        const p = MprisController.activePlayer;
-        return p?.trackArtist ?? "";
-    }
-    readonly property string mediaPlayerName: {
-        const p = MprisController.activePlayer;
-        return p?.identity ?? "";
-    }
+    readonly property string mediaArtist: (MprisController.activePlayer && MprisController.activePlayer.trackArtist) ? MprisController.activePlayer.trackArtist : ""
+    readonly property string mediaPlayerName: (MprisController.activePlayer && MprisController.activePlayer.identity) ? MprisController.activePlayer.identity : ""
 
     // ── The now bar's AI detail: four weeks of usage ────────────────────
     // `history` on a flare cell is a map of window id -> [[timestamp, used],
@@ -1720,8 +2007,8 @@ Item { // Bar content region
         if (!c)
             return [];
         const hist = c.history || {};
-        const wid = c.head?.id;
-        const series = hist[wid] ?? hist[Object.keys(hist)[0]] ?? [];
+        const wid = c.head ? c.head.id : undefined;
+        const series = hist[wid] ?? (Object.keys(hist).length > 0 ? hist[Object.keys(hist)[0]] : []) ?? [];
         return series.slice().sort((a, b) => a[0] - b[0]);
     }
     readonly property var nowbarAiDays: {
@@ -1964,27 +2251,41 @@ Item { // Bar content region
 }
 
         // ── When the hint is allowed to exist at all ───────────────────
-        // NORMAL: hovering the gap shows the hint, because hovering the gap
-        // is a statement of intent -- that is where a swipe would land.
+        // Hovering the gap shows the hint, because hovering the gap is a
+        // statement of intent -- that is where a swipe would land -- and a
+        // live gesture shows it too.
         //
-        // FULLSCREEN: hovering shows NOTHING, and only a real swipe does.
-        // The reason is that under a fullscreen window these gaps are
-        // click-through (`gapPassthrough` in Bar.qml): the bar's gaps are
-        // holes in the input layer so a click meant for the app underneath
-        // lands on the app. A cursor travelling through the top strip on its
-        // way to a fullscreen app therefore sweeps the whole gap, and a
-        // hover-revealed hint lit up every time it did -- marks blinking in
-        // the corner of someone's game because the mouse crossed the top of
-        // the screen. Under a fullscreen app the cursor crossing the bar is
-        // never a statement of intent, so the hint waits for the one thing
-        // that genuinely is: fingers on the trackpad.
+        // It used to be `fullscreen ? live : hovering`: over a fullscreen
+        // window the hover was dropped and only fingers on the trackpad lit
+        // the line. The reason was real when it was written, and it is kept
+        // here so it is not re-invented: with `gapPassthrough` ON (Bar.qml)
+        // these gaps are HOLES in the bar's input region -- a click meant for
+        // the app underneath has to land on the app -- so the bar is never
+        // told the pointer is there at all, and a cursor crossing the top
+        // strip on its way into a game would light a mark in the corner of
+        // it. Measured, with that cut live: `hover=false` in the gap over a
+        // fullscreen window, however long the cursor sat there.
         //
-        // The swipe gate is untouched, so a 2-finger swipe in the gap still
-        // works exactly as it does everywhere else -- this only stops the
-        // line from appearing at you.
-        readonly property bool showing: gapHintRoot.fullscreen
-            ? gapHintRoot.live
-            : gapHintRoot.hovering
+        // The cut is OFF now (swiping in a gap scrolled the app under it too;
+        // see the note on `gapPassthrough`), so the strip is one piece and the
+        // pointer IS delivered across the spacing -- `hovering` goes true when
+        // the cursor is genuinely on the bar and stays false when it is not.
+        // Measured on this machine over a fullscreen window: `hover=true` in
+        // the brightness gap, with the bar out.
+        //
+        // And "the bar out over a fullscreen window" is not a thing a cursor
+        // passing by can produce: the bar only comes out there on the edge
+        // press or the IPC, i.e. because someone asked for it, and it goes
+        // again when that hold runs out. So a hover on the spacing in that
+        // state is the same statement of intent it is anywhere else -- and
+        // dropping it was the whole of "the hover indications are missing over
+        // a fullscreen window".
+        //
+        // Keyed on the hover rather than on `fullscreen` so the two cannot
+        // drift apart: turn the cut back on and the gaps stop reporting hover
+        // by themselves, which restores the old behaviour through this same
+        // expression.
+        readonly property bool showing: gapHintRoot.hovering || gapHintRoot.live
         // Re-take the anchor for as long as the hover is real, so it always
         // describes the geometry the cursor is actually sitting in. Without
         // this an unrelated reflow -- the centre island's clock changing
@@ -2031,10 +2332,12 @@ Item { // Bar content region
                 // point where it snaps into being.
                 //
                 // Still asymmetric for fullscreen, and by more than a little:
-                // there the line appears only for a live swipe, where the
-                // fingers are already moving and there is no hover to ease
-                // in from, so it comes up almost at once and goes the same
-                // way when they lift.
+                // the place the short fade was for is a gesture answered over a
+                // fullscreen window, where the fingers are already moving and
+                // there is no hover to ease in from -- so it comes up almost at
+                // once and goes the same way when they lift. The state that
+                // brought the bar out is the state the line appears in, which
+                // is what makes one duration right for both halves of it.
                 duration: gapHintRoot.fullscreen ? 55 : 90
                 easing.type: Easing.OutCubic
             }
@@ -2235,12 +2538,14 @@ Item { // Bar content region
         spacing: 10
         StyledText {
             id: pocketLineLabel
+            objectName: "pocketLineLabel"
             text: label
             font.pixelSize: Appearance.font.pixelSize.smallie
             color: accent.a > 0 ? accent : Appearance.colors.colSubtext
         }
         StyledText {
             id: pocketLineValue
+            objectName: "pocketLineValue"
             text: value
             font.pixelSize: Appearance.font.pixelSize.smallie
             color: Appearance.colors.colOnLayer0
@@ -2263,10 +2568,20 @@ Item { // Bar content region
         }
         // The natural width of this row: label + value at their natural
         // text widths, plus the row's spacing. This is what the column's
-        // naturalWidth measures to size the drop correctly.
+        // naturalWidth measures, and the host is then sized from that same
+        // number -- so it is also the width the value is actually granted.
+        //
+        // The +2 is SLACK, and it is load-bearing: the value can only be
+        // shorter than this if the host came out shorter than the text asked
+        // for, and a sub-pixel rounding difference between the measured width
+        // and the laid-out width was enough to turn the last visible glyph
+        // into "…" -- the "my IP address ends in dots" report. Two pixels of
+        // overshoot is invisible on a row this long and removes the whole
+        // class of rounding-elision.
         readonly property real naturalWidth: pocketLineLabel.implicitWidth
             + spacing
             + pocketLineValue.implicitWidth
+            + 2
         // No trailing chevron: it was borrowed from the sidebar's list rows,
         // where it means "opens something". Inside the droplet it means
         // nothing, and it ate the width the value needed.
@@ -3022,7 +3337,17 @@ Item { // Bar content region
         // referenced unqualified from here on purpose, for that reason.
         readonly property real iconsW: barRightSideMouseArea.implicitWidth
         readonly property real rightIslandMaxW: Math.max(24,
-            iconsW + gap + root.inlineSpace)
+            iconsW + gap * 2 + root.inlineSpace)
+        // At rest the icons' CELLS come out 14px inside the right edge and 18px
+        // inside the left one. Not a bug in this line: `iconsW` is the row's
+        // implicit width, which carries ~22px of invisible margins (the
+        // battery's screen-edge inset above all), and this island grows
+        // LEFTWARD with its right edge pinned -- so that invisible surplus
+        // lands on the left. Measured: padLeft=18 padRight=14. It used to be
+        // 20/1, i.e. the icons ran into the pill's right wall while the left
+        // had a finger's width of nothing; that is the "compressed" look. The
+        // remaining 4px is invisible next to the 22 the row itself carries and
+        // is not worth a second padding number.
         x: barRightSideMouseArea.x + barRightSideMouseArea.width - width - gap
         y: gap
         // Grows LEFT to hold an inline pocket. The row is anchored to the
@@ -3043,7 +3368,7 @@ Item { // Bar content region
             root.inlineMode
                 ? (barRightSideMouseArea.x + barRightSideMouseArea.width - gap)
                     - root.iconsInkX + root.inlineRuleGap + root.inlineNeededW
-                : iconsW + gap + root.inlineNeededW))
+                : iconsW + gap * 2 + root.inlineNeededW))
         height: Appearance.sizes.barHeight - gap * 2
         radius: Appearance.rounding.windowRounding
         color: Appearance.colors.colBarBackground
@@ -3097,7 +3422,23 @@ Item { // Bar content region
             visible: root.inlineMode || swipeK > 0.01 || opacity > 0.01
             y: rightIsland.y
             height: rightIsland.height
-            width: root.inlineNeededW
+            width: root.inlineHostW
+            // No clip; the text may reach the icons precisely, so a hairline
+            // separating the two never has to be invented to hide a cropped word.
+            // Clip on the RIGHT (towards the icons), not on the left: the
+            // status row slides in from +96px, and the slide may end with a
+            // still-wide host whose last words have not been given their
+            // width yet. A left clip would cut the LABEL ("Opening") -- the
+            // word the eye reads first -- so the left is always clear; the right
+            // was only ever a soft guard against transient overflow, and the
+            // new layout makes that guard unnecessary: the host stops exactly at
+            // the icons by construction.
+            clip: false
+            // Nothing more to clip: the host is complete, the rule is its right
+            // edge, and the icons sit to its right with only the hairline gap
+            // between. The row is now clipped on the LEFT only (see above) when
+            // it slides in: that is the transient the clip is for (the label,
+            // which the eye reads first). The right is now open for the full line.
             // The host's RIGHT edge is the hairline, and it stops exactly one
             // `inlineRuleGap` short of where the icons' own content begins.
             x: root.iconsInkX - root.inlineRuleGap - width
@@ -3171,6 +3512,10 @@ Item { // Bar content region
             // the same gap the text gets on the other side. The host is grown by
             // the same amounts above, so the space comes out of the island rather
             // than pushing the line into the controls.
+            //
+            // The rule is now hard rather than a hairline: when the info has
+            // reached the icons, this line is what separates them, so the
+            // word is not hidden and the icons do not overlap.
             Rectangle {
                 id: inlineRule
                 anchors.right: parent.right
@@ -3734,6 +4079,20 @@ Item { // Bar content region
             // this replaces. One number, applied per icon, is the whole of it.
             spacing: 0
             layoutDirection: Qt.RightToLeft
+            // ── The strip's own inset from the bar's right edge ────────────
+            //
+            // The island paints its padding as `gap` on both sides of the
+            // icons' box (see `rightIsland`'s width), so the box has to stop
+            // `gap` short of the island's edge -- and the island's own edge is
+            // already `gap` inside the bar. `2 * gap` here puts the last icon
+            // exactly where the island's padding expects it: the icons then sit
+            // centred in the capsule instead of jammed against its right end
+            // (measured before this: 20px of air on the left of the leftmost
+            // icon, 1px on the right of the rightmost).
+            //
+            // A margin on the ROW, not on an icon: a per-icon margin is the
+            // second number this strip spent its history fighting.
+            anchors.rightMargin: Appearance.sizes.hyprlandGapsOut * 2
 
             // Fullscreen pin: only exists while the bar was summoned over a
             // fullscreen window. One click and the bar STAYS (hover-dwell
@@ -3803,7 +4162,19 @@ Item { // Bar content region
                 // than the left end. The middle is untouched: neighbour gaps
                 // stay exactly `2 * iconInset`, and pill and bolt remain one
                 // mark.
-                boltTrail: Appearance.rounding.screenRounding + 8 - root.iconInset
+                // ...and it is spent only while the battery really is the bar's
+                // right end. With the fullscreen PIN out, it is not: the pin
+                // sits to its right carrying its own `iconInset` margins, so
+                // keeping the end-air here added a second, invisible neighbour
+                // -- measured, the bolt-to-pin gap was 36px against the 26px
+                // every other pair in the strip runs at (the report: "too much
+                // spacing between the 2 icons", the two being the battery's
+                // charging bolt and the pin). With the trail at 0 the same
+                // margins that space the wifi from the sound space these two,
+                // and the gap comes out at 27.
+                boltTrail: fsPinButton.visible
+                    ? 0
+                    : Appearance.rounding.screenRounding + 8 - root.iconInset
                 Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
                 Layout.leftMargin: root.iconInset
                 Layout.rightMargin: root.iconInset
@@ -3927,7 +4298,7 @@ Item { // Bar content region
                 cursorX: root.cursorX
                 cursorInBar: root.cursorInBar
                 readonly property bool muted: Audio.sink?.audio?.muted ?? false
-                readonly property int volumePct: Math.round((Audio.sink?.audio?.volume ?? 0) * 100)
+                readonly property int volumePct: Math.round(Audio.currentVolume() * 100)
                 // The hover line in the bar is the level and the output device
                 // (see soundPocket); the tooltip would only repeat the level, so
                 // it carries what the bar cannot: what a click and a right click
@@ -3960,7 +4331,7 @@ Item { // Bar content region
                         if (!Audio.sink?.audio) return;
                         if (root.padScrollBlocked) { event.accepted = true; return; }
                         const step = event.angleDelta.y > 0 ? 0.05 : -0.05;
-                        Audio.sink.audio.volume = Math.max(0, Math.min(1, Audio.sink.audio.volume + step));
+                        Audio.setSinkVolume(Audio.currentVolume() + step);
                         if (Audio.sink.audio.muted && step > 0) Audio.sink.audio.muted = false;
                         event.accepted = true;
                     }
@@ -4007,6 +4378,7 @@ Item { // Bar content region
                 readonly property bool hasIndicators:
                     (Config.options.bar.indicators.network !== false)
                     || (Config.options.bar.indicators.bluetooth !== false && BluetoothStatus.available)
+                    || (Tailscale.installed && Config.options.bar.indicators.vpn !== false)
                     || (Audio.source?.audio?.muted ?? false)
                     || Notifications.silent || Notifications.unread > 0
                 visible: hasIndicators
@@ -4017,16 +4389,12 @@ Item { // Bar content region
                 // is one icon in the strip like the rest, so it sits exactly as
                 // far from the tray on one side as from the sound icon on the
                 // other. See `iconInset`.
-                Layout.leftMargin: root.iconInset
-                Layout.rightMargin: root.iconInset
+                Layout.leftMargin: root.iconInset - root.pillPad
+                Layout.rightMargin: root.iconInset - root.pillPad
 
-                // NO padding of its own, and the width says so exactly: the
-                // strip's inset is the only air around the pill, and the row
-                // inside fills the pill's content box edge to edge. A pad here
-                // would STACK on the icon's own inset and widen this one gap
-                // again -- the "double spacing on the pill's right" the uniform
-                // insets exist to prevent.
-                implicitWidth: indicatorsRowLayout.implicitWidth
+                // The pill's box: the glyph row plus its own air on both sides.
+                // See `pillPad` for why the margins above give that air back.
+                implicitWidth: indicatorsRowLayout.implicitWidth + 2 * root.pillPad
                 implicitHeight: indicatorsRowLayout.implicitHeight + 5 * 2
 
                 // NO ripple, and this is the fix for the oval.
@@ -4174,7 +4542,7 @@ Item { // Bar content region
                                 root.rightIslandRight)
                         }
                     }
-                    // Wifi. Pressing it opens the network settings; hover makes it
+                    // Wifi. Pressing it opens the Wi-Fi menu; hover makes it
                     // look pressable. Handlers rather than a nested MouseArea: they
                     // are not layout items, so they cannot fight the RowLayout over
                     // sizing, and they grab the press before the pill-button behind
@@ -4208,19 +4576,18 @@ Item { // Bar content region
                         // name is missing, not the other way round: a wired
                         // link with no address yet (DHCP still running) must
                         // not fall back to "Wired connection 1".
-                        tooltipText: `${root.networkIdentity}\n${Translation.tr("Click: Wi-Fi settings")} · ${Translation.tr("Right click: turn Wi-Fi on or off")}`
+                        tooltipText: `${root.networkIdentity}\n${Translation.tr("Click: Wi-Fi menu")} · ${Translation.tr("Right click: turn Wi-Fi on or off")}`
                         symbol.text: Network.materialSymbol
-                        // Straight to Settings › Network, on the Wi-Fi tab.
-                        //
-                        // This used to open a small popup holding nothing but a
-                        // list of network names, with a button through to this
-                        // very page for everything else (the adapter toggle, the
-                        // rescan, the passwords) -- two places showing the same
-                        // list, and the one you got depended on how you clicked.
-                        // One place now: the settings app is already an app you
-                        // have, it already floats over a blurred backdrop, and
-                        // the Wi-Fi controls live on it in full.
-                        activateAction: () => root.openSettingsPage("network", "wifi")
+                        // The panel, not the settings app (requested again
+                        // 2026-10-12). A click gives you the adapter switch, the
+                        // networks in range and the password field -- the three
+                        // things a Wi-Fi icon is pressed for -- as a card over
+                        // the bar, the way the VPN icon already worked. Settings
+                        // keeps the pairing management, the saved-profile edits
+                        // and the 802.1X cases; the header's tune button is that
+                        // door, one click away.
+                        property bool popupOpen: false
+                        activateAction: () => networkButton.popupOpen = !networkButton.popupOpen
                         // Right click stays the fastest path: toggle the radio
                         // without opening anything.
                         altAction: () => Network.toggleWifi()
@@ -4241,12 +4608,13 @@ Item { // Bar content region
                         hovered: bluetoothHover.hovered
                         tooltipText: {
                             const device = BluetoothStatus.firstActiveDevice?.name ?? Translation.tr("No device connected");
-                            return `${device} · ${BluetoothStatus.enabled ? Translation.tr("Enabled") : Translation.tr("Disabled")}\n${Translation.tr("Click: Bluetooth settings")} · ${Translation.tr("Right click: turn Bluetooth on or off")}`;
+                            return `${device} · ${BluetoothStatus.enabled ? Translation.tr("Enabled") : Translation.tr("Disabled")}\n${Translation.tr("Click: Bluetooth menu")} · ${Translation.tr("Right click: turn Bluetooth on or off")}`;
                         }
                         symbol.text: BluetoothStatus.connected ? "bluetooth_connected" : BluetoothStatus.enabled ? "bluetooth" : "bluetooth_disabled"
-                        // Settings › Network, on the Bluetooth tab -- see the
-                        // Wi-Fi icon above for why the popup is gone.
-                        activateAction: () => root.openSettingsPage("network", "bluetooth")
+                        // The panel, on the same reasoning as the Wi-Fi icon
+                        // above.
+                        property bool popupOpen: false
+                        activateAction: () => bluetoothButton.popupOpen = !bluetoothButton.popupOpen
                         altAction: () => {
                             if (!Bluetooth.defaultAdapter) return;
                             Bluetooth.defaultAdapter.enabled = !BluetoothStatus.enabled;
@@ -4260,6 +4628,47 @@ Item { // Bar content region
                                 root.rightIslandRight)
                         }
                     }
+
+                    // VPN. The one indicator on the bar that says whether the
+                    // tailnet is up -- and the one that can bring it up
+                    // without a detour: press opens the connection list, right
+                    // click flips the tailnet where it stands.
+                    //
+                    // Shown only when there is something to switch. Wi-Fi and
+                    // Bluetooth are radios that always exist; the VPN is a
+                    // piece of software that may simply not be installed, and
+                    // a permanent icon that can never light up is furniture.
+                    HoverIconButton {
+                        id: vpnButton
+                        // Removable like Wi-Fi and Bluetooth, from the same
+                        // editor: `bar.indicators.vpn`. Both halves are real
+                        // conditions -- the CLI has to be installed for there to
+                        // be anything to say, and the switch has to be on for
+                        // the user to want it said.
+                        visible: Tailscale.installed
+                            && Config.options.bar.indicators.vpn !== false
+                        Layout.alignment: Qt.AlignVCenter
+                        // No pocket, unlike the two icons before it. Their
+                        // droplets carry an SSID or a device name -- a fact
+                        // you hover to find out. This one's whole state is
+                        // already legible from the glyph, which fills and
+                        // takes the accent when the tunnel is up.
+                        hovered: vpnHover.hovered
+                        tooltipText: `${Tailscale.connected ? Translation.tr("VPN on") : Translation.tr("VPN off")} · My-Tailnet\n${Translation.tr("Click: connections")} · ${Translation.tr("Right click: turn the VPN on or off")}`
+                        symbol.text: Tailscale.connected ? "vpn_lock" : "vpn_key_off"
+                        // The panel is driven by this flag, not by
+                        // HoverIconButton's own lazy `panelComponent` loader:
+                        // nothing else in this shell uses that loader, while
+                        // the flag-and-Connections arrangement below is the one
+                        // the clock's calendar popup already runs on.
+                        property bool popupOpen: false
+                        activateAction: () => vpnButton.popupOpen = !vpnButton.popupOpen
+                        altAction: () => Tailscale.toggle()
+                        HoverHandler {
+                            id: vpnHover
+                            cursorShape: Qt.PointingHandCursor
+                        }
+                    }
                 }
 
             }
@@ -4270,6 +4679,73 @@ Item { // Bar content region
             // it parsed as the pill's own children and the file never balanced,
             // which took the entire bar down with it. The strip's icons are all
             // siblings of the pill, at this indent.
+
+            // The VPN popup. A sibling of the pill rather than a child of it,
+            // and non-visual (a Scope holding a layer-shell window), so it
+            // takes no room in the strip's row either way.
+            VpnPanel {
+                id: vpnPanel
+                Connections {
+                    target: vpnButton
+                    function onPopupOpenChanged() {
+                        vpnPanel.anchorItem = vpnButton;
+                        vpnPanel.open = vpnButton.popupOpen;
+                    }
+                }
+                // The panel closes itself too -- Escape, the backdrop, its own
+                // close button. Without this the flag would stay true, and the
+                // next press would "open" a panel that is already shut instead
+                // of opening it, which reads as the first click being ignored.
+                Connections {
+                    target: vpnPanel
+                    function onOpenChanged() {
+                        if (!vpnPanel.open && vpnButton.popupOpen)
+                            vpnButton.popupOpen = false;
+                    }
+                }
+            }
+
+            // The other two connectivity menus, on the same flag-and-
+            // Connections arrangement as the VPN panel above it: all three
+            // open from their icon, close on Escape, on the backdrop or on
+            // their own close button, and reset their icon's flag when they
+            // do -- without that, the next press would "open" a panel that is
+            // already shut and read as the first click being ignored.
+            WifiPanel {
+                id: wifiPanel
+                Connections {
+                    target: networkButton
+                    function onPopupOpenChanged() {
+                        wifiPanel.anchorItem = networkButton;
+                        wifiPanel.open = networkButton.popupOpen;
+                    }
+                }
+                Connections {
+                    target: wifiPanel
+                    function onOpenChanged() {
+                        if (!wifiPanel.open && networkButton.popupOpen)
+                            networkButton.popupOpen = false;
+                    }
+                }
+            }
+
+            BluetoothPanel {
+                id: bluetoothPanel
+                Connections {
+                    target: bluetoothButton
+                    function onPopupOpenChanged() {
+                        bluetoothPanel.anchorItem = bluetoothButton;
+                        bluetoothPanel.open = bluetoothButton.popupOpen;
+                    }
+                }
+                Connections {
+                    target: bluetoothPanel
+                    function onOpenChanged() {
+                        if (!bluetoothPanel.open && bluetoothButton.popupOpen)
+                            bluetoothButton.popupOpen = false;
+                    }
+                }
+            }
 
             SysTray {
                 id: barSysTray
@@ -5134,6 +5610,54 @@ Item { // Bar content region
     }
 
     // Flip one bisect switch. `name` is "writes" or "push".
+    // ── Two-finger tap on the sound icon: silence it, and put it back ────
+    //
+    // A tap has no pointer travel, so "on the icon" can only mean the pointer
+    // was already resting there when the fingers landed: the tap asks for the
+    // thing under it. Two-finger taps were inert on purpose before this (see
+    // shell.qml, which returns on 2), and this is the one place that gives the
+    // count a job -- deliberately here rather than in shell.qml, because the
+    // icon and its hover state are this component's.
+    //
+    // It TOGGLES, because a control that only ever silences is a one-way door
+    // in the place a person is likeliest to hit it by accident: the pointer can
+    // be left resting on the icon while the fingers are doing something else.
+    // The level to come back to is remembered here, so the second tap returns
+    // what the first one took rather than an arbitrary default.
+    property real preSilenceVolume: 0
+
+    function tapSoundIcon(): string {
+        if (!Audio.sink?.audio)
+            return "no sink";
+        const silent = (Audio.sink.audio.muted ?? false) || Audio.currentVolume() <= 0;
+        if (silent) {
+            // Back to where it was. `setSinkVolume` clears the mute itself when
+            // it moves a sink off zero (see Audio.setSinkVolume); clearing it
+            // here as well covers the other way in -- right-click mute at a
+            // non-zero level, which a tap should also undo, and where there is
+            // no zero for `setSinkVolume` to notice.
+            const back = root.preSilenceVolume > 0 ? root.preSilenceVolume : 0.25;
+            Audio.setSinkVolume(back);
+            Audio.sink.audio.muted = false;
+            return `restored ${Math.round(back * 100)}%`;
+        }
+        root.preSilenceVolume = Audio.currentVolume();
+        Audio.setSinkVolume(0);   // 0 is silence, and now says so
+        return `silenced from ${Math.round(root.preSilenceVolume * 100)}%`;
+    }
+
+    // The same toggle, reachable from outside the shell. The gesture itself
+    // cannot be exercised without a touchpad, and "the tap did nothing" has
+    // three different causes -- no tracker event, the pointer resting
+    // elsewhere, or the toggle itself -- which one call separates. It reports
+    // the hover the way the real tap gates on it:
+    //   qs -c ii ipc call bar soundTap
+    function soundTapProbe(): string {
+        if (!soundButton.hovered)
+            return "pointer not on the sound icon (hover=false)";
+        return root.tapSoundIcon();
+    }
+
     function swipeOpt(name: string, on: string): string {
         const want = on === "on" || on === "true" || on === "1";
         if (name === "writes")
@@ -5252,6 +5776,52 @@ Item { // Bar content region
         && root.swipeFresh
         && root.swipeZone !== "" && root.swipeArmed) ? root.swipeZone : ""
 
+    // ── Fingers on the pad, right now ────────────────────────────────────
+    //
+    // A DIAGNOSTIC since the gap fix landed (`bar ipc gapState` reports it as
+    // `padLive`); it drives nothing. It was written to shut the bar's
+    // input-region gaps for the duration of a gesture, so the scroll the
+    // COMPOSITOR hands to whoever owns the pointer's pixel would land on the
+    // bar instead of the window under it -- the "swiping for the volume also
+    // switched Brave's tabs" report, whose mechanism is worth keeping in mind
+    // here: the brightness/volume swipe only works with the pointer in one of
+    // the bar's empty stretches (`pointerSpacing`, see `gateSwipe`), and those
+    // stretches were exactly the parts of the strip cut out of the input
+    // region, so the two-finger motion arrived at the app underneath as well.
+    //
+    // That route is OFF, for two reasons measured rather than guessed: the
+    // compositor has already delivered the first notch before any signal
+    // reaches QML (a race the region can only lose), and toggling the region
+    // makes the bar's hover BOUNCE -- the pointer is delivered during the
+    // gesture and not before it -- which is the enter/leave pair the "pointer
+    // never left" hold exists to survive, and the bar visibly dropped during
+    // the swipe. `gapPassthrough` in Bar.qml now keeps the strip whole instead.
+    //
+    // TIMED FROM TOUCH-DOWN, which is what makes it useful as a diagnostic:
+    // the tracker's `begin` phase is emitted the moment the finger count
+    // settles (touchpad-swipe.py reports a count the instant its slots report
+    // coordinates -- no travel is required), so `TouchpadSwipe.active` is
+    // already true while the hand is still, before the motion that produces
+    // any axis event. The four-second bound is the guard rail for `active`
+    // being left true by lost end frames (see `swipeFresh`): a gesture that is
+    // really happening keeps producing frames, and one that has stopped falls
+    // out of the window either way.
+    property double padGestureAt: 0
+    Connections {
+        target: TouchpadSwipe
+        function onActiveChanged() {
+            if (TouchpadSwipe.active)
+                root.padGestureAt = Date.now();
+        }
+    }
+    readonly property bool padGestureLive: TouchpadSwipe.active
+        // `swipeClock` is read for its tracking side effect only (see
+        // `swipeFresh`): `Date.now()` is not a property, so without it nothing
+        // would re-evaluate as time passes and a stuck flag would never be
+        // noticed.
+        && root.swipeClock >= 0
+        && (root.swipeFresh || (Date.now() - root.padGestureAt) < 4000)
+
     // ── How far the gesture has pushed the content ──────────────────────
     // -1 (down) .. +1 (up), 0 at rest. This is the joystick's whole input,
     // and it is the FINGERS' TRAVEL, not the value: a line that rose with the
@@ -5362,7 +5932,16 @@ Item { // Bar content region
         + " dL=" + gapHintLeft.displaced
         + " dR=" + gapHintRight.displaced
         + " hL=" + gapHintLeft.hovering
-        + " hR=" + gapHintRight.hovering + "}"
+        + " hR=" + gapHintRight.hovering
+        // `showing` is the decision the eye actually sees, and the hover latch
+        // above is only what it is decided FROM -- over a fullscreen window the
+        // two part company, which is the question this diagnostic gets asked:
+        // "the line is missing over a fullscreen app". `o` is that decision
+        // after the fade, which is what "did it ever appear" really means.
+        + " sL=" + gapHintLeft.showing
+        + " sR=" + gapHintRight.showing
+        + " oL=" + gapHintLeft.opacity.toFixed(2)
+        + " oR=" + gapHintRight.opacity.toFixed(2) + "}"
 
     // ── The write pipe ────────────────────────────────────────────────────
     // Volume writes are one cheap atomic call, so per-event writing works.
@@ -5619,14 +6198,41 @@ Item { // Bar content region
         // `intel_backlight`), so 100% is the hardware limit and there is
         // nothing above it to reach for.
         //
-        // Volume tops out at `Audio.hardMaxValue` (200%), which is where the
-        // volume rail has always ended and what PipeWire accepts. It was
-        // clamped to 1.0 here, so the swipe stopped at 100% while the slider
-        // beside it went to 200% -- the top of the swipe felt lower than the
-        // sound the machine can actually make.
-        const ceiling = root.swipeZone === "brightness" ? 1.0 : Audio.hardMaxValue;
-        const target = Math.max(0.01, Math.min(ceiling,
-            root.swipeAnchor + root.swipeTravel * gain));
+        // Volume now tops out at 1.0 like brightness, because 1.0 IS the
+        // ceiling on both scales: the shell's 100% is `Audio.hardMaxValue`
+        // (2.0) and `Audio.setSinkVolume` applies that ratio. It used to read
+        // `Audio.hardMaxValue` here, back when the anchor was the sink's own
+        // value and "100%" meant 1.0 -- and before that it was clamped to 1.0
+        // here, so the swipe stopped at 100% while the rail beside it went to
+        // 200%.
+        const ceiling = 1.0;
+        // Volume may reach ZERO; brightness may not.
+        //
+        // The floor used to be 0.01 for both zones, and that is why a swipe all
+        // the way down stopped on 1% and still made noise. Measured on this
+        // sink: the shell's 1% is raw 0.02, which lands the hardware on ALSA
+        // Master 14 steps / -56.5 dB against its own floor of 0 steps /
+        // -63.5 dB -- an audible level, not silence.
+        //
+        // Brightness KEEPS the floor, for its own reason: 0% there is a black
+        // panel, and nothing on the rail warns that the last millimetre of
+        // travel switches the display off.
+        //
+        // Volume drops it, because 0 is the one number that means exactly what
+        // it says -- PipeWire scales the stream by the sink volume, so 0.0 is
+        // digital silence -- and the old floor was the only thing holding the
+        // gesture off it.
+        //
+        // The SNAP is what makes 0 REACHABLE. This sink quantises upward:
+        // `wpctl set-volume ... 0.005` reads back as 0.01, so a target merely
+        // near zero -- 0.002, 0.004 -- comes back as 1% however far the fingers
+        // travel, and the rail never shows the zero being asked for. Below one
+        // shell percent the volume gesture therefore takes 0 outright; 1% and
+        // above are left exactly as they were.
+        const floor = root.swipeZone === "brightness" ? 0.01 : 0;
+        const wanted = root.swipeAnchor + root.swipeTravel * gain;
+        const snapped = root.swipeZone === "volume" && wanted < 0.01 ? 0 : wanted;
+        const target = Math.max(floor, Math.min(ceiling, snapped));
 
         // One write per whole percent, WITH a band: a target still within
         // 0.4% of the last written value changes nothing. Without it, a
@@ -5685,6 +6291,23 @@ Item { // Bar content region
 
     Connections {
         target: TouchpadSwipe
+        // Two fingers, over the sound icon, is "silence now" (and a second tap
+        // puts the level back). Guarded on both counts: this must never be able
+        // to be confused with the three-finger play/pause or the four-finger
+        // desktop that shell.qml owns, and a two-finger tap anywhere else on
+        // the screen stays the nothing it has always been.
+        function onTapTriggered(fingers) {
+            if (fingers !== 2)
+                return;
+            if (!soundButton.hovered) {
+                // Logged, because the two failure modes look identical from the
+                // outside: a tap the tracker never sent, and one it sent while
+                // the pointer was resting somewhere else.
+                console.log("[tap] 2-finger tap ignored: pointer not on the sound icon");
+                return;
+            }
+            console.log(`[tap] 2-finger tap on the sound icon: ${root.tapSoundIcon()}`);
+        }
         function onMoved(dy, x, y, fingers, start) {
             // Arrivals, frame gaps, the scroll block, the counter and the
             // handler all live in `swipeFrame` now, so this path and the

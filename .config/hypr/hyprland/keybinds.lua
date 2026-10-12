@@ -50,9 +50,11 @@ hl.bind("XF86MonBrightnessUp", hl.dsp.exec_cmd(qsIpcCall .. " brightness increme
     { locked = true, repeating = true })
 hl.bind("XF86MonBrightnessDown", hl.dsp.exec_cmd(qsIpcCall .. " brightness decrement || " .. brightnessStep .. " -5"),
     { locked = true, repeating = true })
-hl.bind("XF86AudioRaiseVolume", hl.dsp.exec_cmd("wpctl set-volume @DEFAULT_AUDIO_SINK@ 2%+ -l 1.5"),
+-- 4% of the sink is the shell's own 2% step, and the cap is the sink's 2.0
+-- because that is what the shell calls 100% (see custom/keybinds.lua).
+hl.bind("XF86AudioRaiseVolume", hl.dsp.exec_cmd("wpctl set-volume @DEFAULT_AUDIO_SINK@ 4%+ -l 2.0"),
     { locked = true, repeating = true })
-hl.bind("XF86AudioLowerVolume", hl.dsp.exec_cmd("wpctl set-volume @DEFAULT_AUDIO_SINK@ 2%-"),
+hl.bind("XF86AudioLowerVolume", hl.dsp.exec_cmd("wpctl set-volume @DEFAULT_AUDIO_SINK@ 4%-"),
     { locked = true, repeating = true })
 
 hl.bind("CTRL + SUPER + T", hl.dsp.global("quickshell:wallpaperSelectorToggle"),
@@ -346,12 +348,16 @@ hl.bind("SUPER + ALT + Equal",
 hl.bind("SUPER + L", hl.dsp.global("quickshell:lock"), { description = "Session: Lock (shell lock screen)" })
 hl.bind("SUPER + SHIFT + L", hl.dsp.exec_cmd("systemctl suspend || loginctl suspend"),
     { locked = true, description = "Session: Sleep" }) -- Sleep
--- Lid close: lock the session AND kill the panel (DPMS off). Logind is
--- configured (logind.conf.d/90-lid-no-suspend.conf) to IGNORE the lid, so
--- nothing suspends: every app keeps running and on reopen the lock screen
--- greets you with the session exactly as you left it. Both binds fire on the
--- same switch event; lid open re-enables the output explicitly (plus
--- key_press/mouse_move_enables_dpms as a belt-and-braces wake path).
+-- Lid close. The SLEEP itself is logind's: /etc/systemd/logind.conf.d/
+-- 50-lid-power.conf maps the lid to suspend (it was IGNORED when this pair of
+-- binds was written, which is why they carry a lock of their own). The session
+-- still keeps running in RAM and comes back behind the lock screen. The panel
+-- going dark for those seconds, and the lock being raised behind it, is
+-- hypridle's (custom/scripts/before-sleep.sh, its before_sleep_cmd), which
+-- gates EVERY suspend -- this lid, the power button, and the shell's own Sleep
+-- row are one path, not three. Both binds fire on the same switch event; lid
+-- open re-enables the output explicitly (plus key_press/mouse_move_enables_dpms
+-- as a belt-and-braces wake path).
 -- Verified: hl.dsp.dpms fully blanks eDP-1 (0 lit pixels) -- "completely
 -- off", not a dim.
 hl.bind("switch:on:Lid Switch", hl.dsp.global("quickshell:lock"),

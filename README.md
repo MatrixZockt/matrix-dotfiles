@@ -44,7 +44,15 @@ desktop picks it up. Git is your undo button — any change can be reverted.
 ├── scripts/                   repo tooling (not part of the config)
 ├── extras/                    copied into ~ by install.sh (entries, icons, bin/)
 │   ├── applications/          .desktop files (freebuff, appimage-run handler)
-│   ├── bin/                   appimage-run — launches double-clicked AppImages
+│   ├── bin/                   the ~/.local/bin helpers the config calls:
+│   │                          appimage-run, razer-command-center, the power
+│   │                          stack (power-autoswitch, power-failsafe,
+│   │                          ppd-nvidia-boost), the GPU launch helpers,
+│   │                          the local llama server, session-env/session-doctor
+│   ├── etc/polkit-1/          rules for passwordless mount/lid changes
+│   ├── sbin/                  razer-cc-elevate (the one setuid-ish helper)
+│   ├── share/polkit-1/        the Command Center's polkit actions
+│   ├── systemd/user/          the user units that back all of the above
 │   └── icons/                 hicolor icons for the entries above
 ├── install.sh                 link this repo into ~/.config on a new machine
 ├── Makefile                   make reload / check / keybinds / save / push

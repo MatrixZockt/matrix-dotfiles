@@ -695,8 +695,17 @@ import SddmComponents 2.0
                 ? -Math.round(root.width / 2 - root.columnWidth / 2 - Math.min(90, root.width * 0.08))
                 : 0)
         anchors.verticalCenter: parent.verticalCenter
+        // HALF the height in sheet mode, not all of it: the anchor is the
+        // vertical CENTRE, so moving the column's BOTTOM up to the 8.5% margin
+        // moves the centre up by the margin plus half the column. The full
+        // height parked the form ~107 px above the bottom-left corner it is
+        // drawn for (measured on the offscreen render at 1707x1067) while the
+        // clock kept its own 8.5% from the top, so the two-corner rhythm this
+        // arrangement is built on came out one-sided -- and the password line
+        // was the most visible part of it, being the lowest thing in the form.
+        // LockSurface.qml carries the same expression and the same note.
         anchors.verticalCenterOffset: root.loginSheet
-            ? Math.round(parent.height / 2 - height - parent.height * 0.085)
+            ? Math.round(parent.height / 2 - height / 2 - parent.height * 0.085)
             : Math.round(root.height * root.loginVerticalOffset)
         width: root.loginSheet ? Math.round(root.width * 0.34) : root.columnWidth
         spacing: Math.round(root.height * (root.loginSheet ? 0.013 : 0.018))

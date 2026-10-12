@@ -83,7 +83,7 @@ Singleton {
         ? (root.price - root.openPrice) / root.openPrice * 100 : 0
     readonly property bool up: root.change >= 0
 
-    // ── The day's red-folder events ────────────────────────────────────
+    // ── The day's calendar events, one per folder colour ───────────────
     //
     // FETCHED. Nothing in this list is authored any more.
     //
@@ -122,6 +122,80 @@ Singleton {
     property var events: []
     /** id -> { state: "upcoming" | "released", countdown: string | null } */
     property var eventStates: ({})
+
+    // ── Which folders the list shows ───────────────────────────────────
+    //
+    // The four folder colours are the calendar's own convention -- red High,
+    // orange Medium, yellow Low, and the grey/white of a Holiday or a
+    // Non-Economic note -- and each one is a toggle (drawn in the tab's
+    // header). The STATE lives here rather than in the tab, for the reason
+    // every other piece of view state does: the tab is built per bar card and
+    // this object is one, so a filter set on the card survives the card being
+    // rebuilt -- and the IPC below can read and drive it, which is the only
+    // way it can be checked from a script (the toggles are 18px targets in a
+    // popover).
+    //
+    // Defaults: red and orange ON, yellow and grey OFF. Red is the tab's whole
+    // reason to exist; orange is what was asked for and is the half a
+    // High-only list hides (measured: the USD releases of a quiet day are
+    // routinely all Medium, so "nothing on the calendar" was often really
+    // "nothing HIGH"); yellow and grey are the noise floor -- available, off,
+    // one click each.
+    property bool showHigh: true
+    property bool showMedium: true
+    property bool showLow: false
+    property bool showGrey: false
+
+    /**
+     * The four folder colours, in the market's own order, as the header's
+     * toggles read them: `key` is the impact bucket an event carries, `label`
+     * is the word the header prints. The COLOURS are deliberately not here --
+     * they are market semantics and live in the view (TradingTab.colorForImpact)
+     * so the service stays theme-free.
+     */
+    readonly property var folders: [
+        { key: "high",   label: "Red" },
+        { key: "medium", label: "Orange" },
+        { key: "low",    label: "Yellow" },
+        { key: "grey",   label: "Grey" }
+    ]
+
+    /** The bucket a feed row's impact names. Unknown, blank and Holiday all
+     *  land in `grey`: a row that cannot be named is still a row on the
+     *  calendar, and the fourth folder is exactly where an unnamed one
+     *  belongs -- the alternative (dropping it) is how the feed's own
+     *  Non-Economic entries used to disappear without a trace. */
+    function folderOf(raw) {
+        const s = String(raw ?? "").trim().toLowerCase();
+        if (s === "high") return "high";
+        if (s === "medium") return "medium";
+        if (s === "low") return "low";
+        return "grey";
+    }
+
+    /** Whether the filter keeps an event, by its bucket. */
+    function folderShown(key) {
+        if (key === "high") return root.showHigh;
+        if (key === "medium") return root.showMedium;
+        if (key === "low") return root.showLow;
+        return root.showGrey;
+    }
+
+    /** Flip one folder on/off -- what a header toggle calls. */
+    function toggleFolder(key) {
+        if (key === "high") root.showHigh = !root.showHigh;
+        else if (key === "medium") root.showMedium = !root.showMedium;
+        else if (key === "low") root.showLow = !root.showLow;
+        else root.showGrey = !root.showGrey;
+    }
+
+    /** How many rows each bucket holds today, whether or not it is switched on. */
+    function folderCounts() {
+        const out = { high: 0, medium: 0, low: 0, grey: 0 };
+        for (const e of root.events)
+            out[e.impact] = (out[e.impact] ?? 0) + 1;
+        return out;
+    }
     /** Why the list is what it is: "idle" | "loading" | "ok" | "error". */
     property string feedState: "idle"
     readonly property string feedUrl: "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
@@ -400,10 +474,12 @@ Singleton {
     }
 
     /**
-     * `_lastFF` (+ `_tv`) -> today's red folder, or a throw.
+     * `_lastFF` (+ `_tv`) -> today's calendar rows, or a throw.
      *
-     * Everything that makes the header honest happens in these `continue`s:
-     * impact, instant, name. Nothing else decides what the tab shows. The
+     * Every impact level is kept (see `folders`): what the tab SHOWS is the
+     * view's filter, and this function's job is only to decide which rows are
+     * real -- today, in this machine's zone, with a name. Nothing else decides
+     * what the tab shows. The
      * second pass over the SORTED list is `cmp`: the release before this
      * one, which is what lets the card show today's earlier numbers beside
      * the current ones.
@@ -418,8 +494,15 @@ Singleton {
         const y = now.getFullYear(), mo = now.getMonth(), da = now.getDate();
         const out = [];
         for (const e of list) {
-            if (!e || e.impact !== "High")
-                continue;                       // red folder only
+            if (!e)
+                continue;
+            // ── Every folder, not just the red one ────────────────────
+            // This loop used to drop everything that was not High, at the
+            // service, so the tab could not show an orange folder no matter
+            // what its own filter said. WHICH folders are on screen is the
+            // view's filter now (see `folders` above); this end keeps the
+            // calendar it was handed and names each row's folder.
+            const impact = root.folderOf(e.impact);
             const at = root._parseFeedDate(e.date);
             if (isNaN(at))
                 continue;
@@ -446,7 +529,9 @@ Singleton {
                 time: root._hhmm(at),
                 currency: cur,
                 name: name,
-                min: "high",                    // filtered to High; the rail reads it
+                // "high" | "medium" | "low" | "grey" -- the folder colour.
+                // The rail and the folder toggles both read it.
+                impact: impact,
                 forecast: fc,
                 previous: pv,
                 actual: act,
@@ -863,9 +948,37 @@ Singleton {
          *  drawing: "today" on the active day, else the reversed date. */
         function shownDay(): string { return root.shownDay; }
 
+        /** `qs -c ii ipc call trading folders red=on orange=on yellow=off grey=off`
+         *  -- the header's toggles, without a pointer on a popover.
+         *
+         *  ONE TOKEN PER FOLDER, and that is a constraint of the boundary, not
+         *  a style choice: the IPC splits on whitespace before it calls, so
+         *  `folders red on orange off` arrives as EIGHT arguments and is
+         *  refused ("4 required but 8 were provided") with nothing applied.
+         *  Each token is `name=state`, so the four can come in any order and a
+         *  name that is not a folder is ignored rather than silently mapping to
+         *  the wrong one. "on"/"true"/"1" switch a folder on and anything else
+         *  (including a typo) switches it off -- a filter is read at a glance,
+         *  so half-applying one is worse than applying the wrong one. */
+        function folders(red: string, orange: string, yellow: string, grey: string): void {
+            const on = (v) => v === "on" || v === "true" || v === "1";
+            for (const token of [red, orange, yellow, grey]) {
+                const at = String(token ?? "").indexOf("=");
+                if (at < 0)
+                    continue;                  // not a name=state token; ignore
+                const name = String(token).slice(0, at).trim().toLowerCase();
+                const state = on(String(token).slice(at + 1).trim().toLowerCase());
+                if (name === "red" || name === "high") root.showHigh = state;
+                else if (name === "orange" || name === "medium") root.showMedium = state;
+                else if (name === "yellow" || name === "low") root.showLow = state;
+                else if (name === "grey" || name === "gray") root.showGrey = state;
+            }
+        }
+
         function state(): string {
             const rows = root.events.map(e =>
                 `${e.time} ${e.currency} ${e.name}`
+                + ` [${e.impact ?? "?"}]`
                 + ` [${((root.eventStates[e.id]) ?? {}).state ?? "?"}]`
                 + ` fc=${e.forecast} pv=${e.previous} act=${e.actual}`
                 + (e.bias ? ` ${e.bias === "up" ? "▲" : "▼"}` : "")
@@ -880,7 +993,17 @@ Singleton {
             // `shownDay` is printed WITH the rows because it labels them:
             // the same list reads as "today" or as a reversed date, and a
             // script checking the card must be able to tell which.
+            // `folders`/`counts`/`shown` are printed beside the rows for the
+            // same reason the rows are printed at all: the filter is state,
+            // and "which folders are on, how many rows each holds, and how
+            // many survive the filter" is the whole question the toggles ask.
+            // `shown` is what the tab draws; `count` is what the feed gave.
+            const c = root.folderCounts();
             return `feed=${root.feedState} count=${rows.length} tf=${root.timeframe}`
+                + ` folders[red=${root.showHigh} orange=${root.showMedium}`
+                + ` yellow=${root.showLow} grey=${root.showGrey}]`
+                + ` counts[red=${c.high} orange=${c.medium} yellow=${c.low} grey=${c.grey}]`
+                + ` shown=${root.events.filter(e => root.folderShown(e.impact)).length}`
                 + ` bars=${root.candles.length} rev=${root.rev}`
                 + ` range=${lo.toFixed(5)}..${hi.toFixed(5)} live=${root.live}`
                 + ` shownDay=${root.shownDay}`

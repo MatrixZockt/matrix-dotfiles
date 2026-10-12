@@ -1,0 +1,25 @@
+[Unit]
+Description=Razer Command Center - supervised control app
+# Keeps the machine's control center alive: auto-restart if it ever dies,
+# starts at login (default.target). Close hides the window; this unit owns
+# the process, so nothing the user does to the window can kill it.
+
+[Service]
+Type=simple
+# The wrapper, not the app itself: this unit starts from the systemd user
+# manager, whose environment snapshot is taken once per BOOT while the
+# display number is allocated per LOGIN, so WAYLAND_DISPLAY here is usually
+# a dead socket. GTK fails on it with "Gtk couldn't be initialized" and the
+# unit flapped in 251 ms without the app ever appearing. The wrapper probes
+# for the compositor that is actually listening and hands the app that
+# environment. See razer-command-center-run for the full story.
+ExecStart=%h/.local/bin/razer-command-center-run
+Restart=on-failure
+RestartSec=3
+# A GUI app needs the graphical session bits; the wrapper supplies them from
+# the live session, and GSK_RENDERER=cairo keeps GTK off the GL path (which
+# would also make this a dGPU client and hold the 4070 awake).
+Environment=GSK_RENDERER=cairo
+
+[Install]
+WantedBy=default.target

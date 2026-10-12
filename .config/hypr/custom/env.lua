@@ -58,6 +58,58 @@ hl.config({
 -- FD on it; the internal panel is already driven by the Intel iGPU, so this
 -- costs idle power, not correctness.
 
+-- ── X11 (XWayland) app scale ──────────────────────────────────────────────
+--
+-- The companion to custom/general.lua's xwayland:force_zero_scaling = true
+-- and custom/scripts/x11-dpi.sh's Xft.dpi. Those two give X11 apps a native
+-- 2560x1600 canvas to draw into (crisp) and a DPI to size themselves with;
+-- this block covers the two X11 apps that ignore Xft.dpi and have their own
+-- knob instead.
+--
+-- Why so little is set here, and why nothing toolkit-wide is:
+--
+--   * GDK_SCALE and QT_SCALE_FACTOR MULTIPLY into whatever the compositor
+--     already gives a Wayland app (they are read by the toolkit, not by the
+--     X server). A global 1.5 would draw every Wayland GTK/Qt app at 2.25x;
+--     a global 2 would draw them at 3x. So they are never set globally --
+--     the file used to export GDK_SCALE from the fish login env whenever the
+--     scale's integer part reached 2, which is exactly that bug waiting for
+--     someone to pick 200%. A single X11-locked app that needs one gets it on
+--     its own launcher line instead:  QT_QPA_PLATFORM=xcb QT_SCALE_FACTOR=$s.
+--
+--   * Xft.dpi (x11-dpi.sh) is the safe global one precisely because it is an
+--     X server property: Wayland clients never read it.
+--
+-- QT_SCALE_FACTOR_ROUNDING_POLICY=PassThrough is the one Qt-wide exception,
+-- and it is safe for the same reason: it changes only how Qt ROUNDS a scale
+-- factor, never what the factor is. On Wayland the factor is the integer the
+-- compositor reports (2 here), so passing it through is a no-op. On X11 Qt
+-- derives its factor from Xft.dpi -- 144dpi -> 1.5 -- and without this it
+-- rounds that to 2, drawing a 150%-size UI on a 150% desktop. Verified with a
+-- Qt window on :1: devicePixelRatio 1.5 with this set (2 without it).
+--
+-- Steam's desktop UI is its own thing: STEAM_FORCE_DESKTOPUI_SCALING is
+-- fractional and applies only to Steam, so it gets the exact scale and stays
+-- crisp inside the native canvas. (Steam used to be served by
+-- ~/.config/fish/conf.d/app-scale.fish, which only ever ran for fish logins;
+-- it did not run for a Hyprland-launched Steam at all.)
+--
+-- Not covered on purpose: Java/Swing IDEs (Android Studio) size themselves
+-- from the X11 DPI, which x11-dpi.sh now provides. If one ever comes up at
+-- the wrong size, its own knob is -Dsun.java2d.uiScale=<scale> on that app's
+-- launcher line, not a global JAVA_TOOL_OPTIONS.
+local function displayScale()
+    local f = io.open((os.getenv("HOME") or "") .. "/.cache/display/scale", "r")
+    if not f then return 1.5 end
+    local v = tonumber(f:read("*l"))
+    f:close()
+    if v and v >= 1 and v <= 2.5 then return v end
+    return 1.5
+end
+local xScale = displayScale()
+hl.env("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough")
+hl.env("STEAM_FORCE_DESKTOPUI_SCALING", tostring(xScale))
+
 -- Video decode: VA-API on the Intel iGPU ONLY.
 --
 -- Which render node libva picks as "default" depends on boot order (renderD128

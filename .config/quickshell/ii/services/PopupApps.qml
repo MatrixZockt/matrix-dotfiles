@@ -10,23 +10,26 @@ import QtQuick
 // This singleton used to be the registry of the "popup apps" -- the settings
 // app, the task manager and the file manager were full-screen layer-shell
 // surfaces with presence files, veil rules and a morph into a real window.
-// The settings app and the task manager are ordinary desktop windows now
-// (settings.qml hosts both as faces of one Window), and the registry rows,
-// the window-title table and the yield rules for them are gone.
+// All three are ordinary desktop windows now (settings.qml hosts two faces of
+// one Window, filemanager.qml is the third), so the registry rows, the window
+// title table, the presence files and the morph are gone -- the compositor
+// needs no help closing, tiling or fullscreening a real window.
 //
-// What is left serves the ONE remaining layer-surface app and the desktop
-// gestures that must yield to it:
+// What is left is the ONE layer surface in the group -- the portal's
+// FileChooser dialog (filemanager-picker.qml) -- and the desktop gestures that
+// must yield to it:
 //
-//   * yieldLayer      the file manager drops from Overlay to Top while the
-//                     wallpaper explorer / a portal dialog is up, so the
-//                     picker can rise above it (see filemanager.qml);
-//   * present/unpresent/presencePath
-//                     the file manager's presence file, still read by the
-//                     gesture guards (custom/popup.lua keeps the same
-//                     contract);
-//   * anyPresent      "is any popup app up?", polled from the same files --
-//                     the four-finger swipe handlers consult it before
-//                     acting.
+//   * yieldLayer      the picker drops from Overlay to Top while a layer-shell
+//                     sibling that must sit above it is up (the wallpaper
+//                     explorer), so it rises over that instead of the reverse;
+//   * setYield        how the wallpaper explorer publishes that state (one flag
+//                     file, because these are separate Quickshell processes);
+//   * anyPresent      "is any popup app up?", asked by the wallpaper swipe
+//                     handlers before they act. Nothing writes a presence file
+//                     any more, so this is false by definition -- kept because
+//                     those handlers still ask, and correct either way: a
+//                     gesture now acts on the focused window, which is what
+//                     they want it to do.
 Singleton {
     id: root
 
@@ -95,30 +98,5 @@ Singleton {
                : `rm -f '${root.yieldFlagPath}'`]);
     }
 
-    // Presence file path for a popup app name: the exact file the gesture
-    // guards (custom/popup.lua) read. Kept here so the naming convention
-    // lives in ONE place.
-    function presencePath(name) {
-        return `${Quickshell.env("XDG_RUNTIME_DIR") ?? "/tmp"}/quickshell-popup-${name}`;
-    }
-
-    // Write the presence file. `how` is "live" (the app tracks the swipe
-    // itself) or "plain" (Hyprland's gesture stays in charge).
-    function present(name, pid, how) {
-        Quickshell.execDetached(["sh", "-c",
-            `printf '%s ${how}\\n' ${pid} > '${presencePath(name)}'`]);
-    }
-
-    // Remove the presence file (popup.lua tolerates a stale one, but clean
-    // is better than self-healing).
-    function unpresent(name) {
-        Quickshell.execDetached(["sh", "-c", `rm -f '${presencePath(name)}'`]);
-    }
-
-    // The last row of the old registry, kept only because filemanager.qml's
-    // morph still addresses the Files window by title through it. "Files"
-    // is what modules/filemanager/FilesWindowHost.qml names its Window.
-    function self(name) {
-        return { title: name === "files" ? "Files" : "" };
-    }
 }
+

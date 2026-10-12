@@ -46,26 +46,28 @@ hl.unbind("SUPER + F")
 -- Arrow keys nudge the size while it is up, Esc/Enter release it.
 hl.bind("SUPER + SHIFT + R", hl.dsp.exec_cmd(shellIpc("sizer armFocused")),
     { description = "Window: Visual resize frame (arrow keys nudge, Esc exits)" })
--- SUPER+F now does double duty: with a popup app open it morphs that app into
--- a real fullscreen-capable window (see popup.morph); otherwise it is the
--- "fills the screen" toggle for the focused window.
+-- SUPER+F is the "fills the screen" toggle for the focused window.
 --
--- It is NOT Hyprland's `fullscreen` any more, and that is the point of the
--- change (REQUESTED): real fullscreen tells the client to go fullscreen, which
--- is what makes Chromium hide its tab strip -- so pressing SUPER+F in the
--- browser made the tabs disappear, which is not what "make this fill the
--- screen" is supposed to mean. cover.toggle maximizes the window (it fills the
--- workarea, the app is never told anything) AND has the shell release the
--- bar's exclusive zone, which is the half that was missing everywhere: a
--- maximized window on its own stops at the bar's reserved strip -- measured
--- live at y=51 on a 1000-tall screen -- so the app never reached the top and
--- the gap stayed hoverable.
+-- It is NOT Hyprland's `fullscreen` as the base config defines it, and that is
+-- the point (REQUESTED): the real thing tells the CLIENT to go fullscreen,
+-- which is what makes Chromium hide its tab strip -- pressing it in the browser
+-- made the tabs disappear, which is not what "make this fill the screen" means.
+--
+-- cover.toggle asks the compositor for its OWN expanded state with the client
+-- half left out -- `fullscreen_state({ internal = 2, client = 0 })`: the window
+-- fills the monitor, the app is told nothing, and the bar is asked to yield its
+-- strip so the app really reaches the top edge (a workarea-bound window stops
+-- at the bar's reserved strip). See custom/cover.lua, which also explains why
+-- the window half is no longer a float+pin: a dispatched box change is applied
+-- by this compositor WITHOUT animation, so the window used to teleport while
+-- the rest of the desktop glided -- the "half laggy" transition. The
+-- compositor's expanded state is a layout change, and layout changes animate.
 hl.bind("SUPER + F", function()
-    -- Remember where this window sits BEFORE it goes over the screen. Coming
-    -- back out is played by hand (see anchoredTransition in general.lua), and
-    -- the slot to land in cannot be read back from the tiler once the window
-    -- is out of the layout -- which is why "anchored" used to come back in a
-    -- different place.
+    -- Remember where the window sits before it goes over the screen. The cover
+    -- itself no longer needs this (un-covering restores the tile), but the
+    -- app's OWN fullscreen path -- anchoredTransition in general.lua -- still
+    -- reads the slot from here, and it cannot be read back from the tiler once
+    -- the window is out of the layout.
     local win = hl.get_active_window()
     if win and (win.fullscreen or 0) == 0 then popup.rememberSlot(win) end
     cover.toggle(win)
@@ -267,10 +269,15 @@ hl.bind("SUPER + C",
 -- no longer do). These unbind-and-rebind rows keep the keys on simple,
 -- stateless commands that cannot go stale -- every reload re-runs this
 -- file, so the keys are always freshly wired.
+-- The volume steps are in SINK units, and the shell calls the sink's 2.0
+-- "100%" -- so one press is 4% here (the shell's own 2% step) and the cap is
+-- 2.0, not 1.5. At 2%/-l 1.5 the keys stopped at three quarters of the
+-- desktop's own scale and every press moved the bar's number by one percent:
+-- the keys and the bar disagreed about where the top was.
 do
     local mediaKeys = {
-        { "XF86AudioRaiseVolume", "wpctl set-volume @DEFAULT_AUDIO_SINK@ 2%+ -l 1.5", "Volume up" },
-        { "XF86AudioLowerVolume", "wpctl set-volume @DEFAULT_AUDIO_SINK@ 2%-",        "Volume down" },
+        { "XF86AudioRaiseVolume", "wpctl set-volume @DEFAULT_AUDIO_SINK@ 4%+ -l 2.0", "Volume up" },
+        { "XF86AudioLowerVolume", "wpctl set-volume @DEFAULT_AUDIO_SINK@ 4%-",        "Volume down" },
         { "XF86AudioMute",        "wpctl set-mute @DEFAULT_SINK@ toggle",             "Toggle mute" },
         { "XF86AudioMicMute",     "wpctl set-mute @DEFAULT_SOURCE@ toggle",           "Toggle mic mute" },
         { "XF86AudioPlay",        "playerctl play-pause",                             "Play/pause media" },
@@ -350,9 +357,21 @@ hl.bind("CTRL + SUPER + Backslash", hl.dsp.window.resize({ x = 640, y = 480, "ex
 -- The base config points SUPER+V at the shell's overview, which drags the whole
 -- desktop-summary backdrop and its search bar along with the clipboard; this
 -- replaces that with the dedicated popup.
+--
+-- The popup is a TOGGLE that STAYS OPEN: press SUPER+V once, let go of
+-- everything, and it is still on screen to pick from. No key on this side closes
+-- it on a SUPER edge any more -- see the SUPER_L/SUPER_R binds further down for
+-- what used to and why it fired on the wrong edge -- and the shell dismisses it
+-- when it should: a fresh SUPER press, Escape, a click away, a desktop change.
+--
+-- The release-interrupt fires first, like every other SUPER chord here: SUPER is
+-- still held when V goes down, and an uninterrupted SUPER release would open the
+-- plain-tap app search card a beat after the popup appeared.
 hl.unbind("SUPER + V")
-hl.bind("SUPER + V", hl.dsp.exec_cmd(shellIpc("clipboard toggle")),
-    { description = "Utilities: Clipboard history" })
+hl.bind("SUPER + V", function()
+    hl.exec_cmd(shellIpc("search toggleReleaseInterrupt"))
+    hl.exec_cmd(shellIpc("clipboard toggle"))
+end, { description = "Utilities: Clipboard history" })
 
 --# Failsafe: reload the desktop shell
 -- SUPER+CTRL+B is the "something is stuck" key. The shell is one process that
@@ -374,6 +393,35 @@ hl.bind("SUPER + V", hl.dsp.exec_cmd(shellIpc("clipboard toggle")),
 -- writes is what you want -- this key is the shortcut, not the diagnostic.
 hl.bind("CTRL + SUPER + B", hl.dsp.exec_cmd("$HOME/.config/hypr/custom/scripts/reload-shell.sh"),
     { description = "Shell: Reload the desktop shell" })
+
+--#! Utilities
+--# Failsafe: give the mouse back (SUPER + CTRL + M)
+--
+-- The "I can move the pointer but I cannot CLICK anything" key, in EVERY shape
+-- that failure has -- not only the compositor-grab one it used to clear:
+--
+--   * a button or key left held on ydotoold's virtual device. That device's
+--     state belongs to the session, so a press whose release never went out (a
+--     script killed halfway, a shell that reloaded mid-keystroke) leaves the
+--     button down, and from then on the press has already happened and no new
+--     one lands. This was reset-shell.sh's job alone before; it is step 1 here.
+--   * a compositor-level input grab: while the shell holds a HyprlandFocusGrab,
+--     Hyprland routes input to the grabbing window, so a claimant that stays
+--     active with nothing on screen swallows the session's clicks while the
+--     desktop looks perfectly normal. The shell's own GlobalFocusGrab prunes
+--     dead entrants on a timer; this key is the manual version, over the IPC
+--     the shell already exposes for it.
+--   * a shell that is mapped but MUTE -- it holds its surfaces, it answers
+--     nothing, so every step above is swallowed. That one escalates.
+--
+-- It is deliberately NOT SUPER+CTRL+B. That key reloads the whole shell (kill +
+-- relaunch), which is slow and disturbs every surface; this one drops the held
+-- input and the grab in place, so windows, panels and the bar never move, and
+-- only escalates to the reload when the shell really is the problem.
+--
+-- See custom/scripts/fix-mouse.sh for the whole story.
+hl.bind("CTRL + SUPER + M", hl.dsp.exec_cmd("$HOME/.config/hypr/custom/scripts/fix-mouse.sh"),
+    { description = "Utilities: Fix pointer clicks (clear held input / stuck grab)" })
 
 -- SUPER+CTRL+SHIFT+B is INTENTIONALLY UNBOUND (2026-10-03).
 --
@@ -513,22 +561,31 @@ hl.unbind("SUPER_R")
 -- `SUPER + SUPER_L` release bind (that bind is deliberately left alone, including
 -- its fuzzel fallback for when the shell is not running). These binds stay out of
 -- its way entirely.
+--
+-- DISPATCHERS, one per edge, and NO clipboard dismissal here any more.
+--
+-- The clipboard close used to live in this loop as a Lua FUNCTION body, on the
+-- understanding that a function body is a press bind. In this build it is not:
+-- a function body registers as a plain RELEASE bind -- the same quirk that makes
+-- `{ drag = true }` a no-op (see the note on the resize drag further up) -- so
+-- that "on press" close fired on the way UP. SUPER+V opened the popup, SUPER was
+-- let go, and the popup shut a beat later, which is exactly the reported "you
+-- have to hold SUPER to keep the clipboard open".
+--
+-- The dismissal belongs to the shell now (ClipboardListWindow watches
+-- GlobalStates.superDown, so the edge is the shell's own record of the key
+-- instead of a bind flag), and nothing on this side closes the popup.
+--
+-- The hint is bound on BOTH edges here, not left to the base config, because the
+-- two `hl.unbind`s above took that pair away: numbers while SUPER is held, icons
+-- the moment it is let go.
 for _, superKey in ipairs({ "SUPER_L", "SUPER_R" }) do
-    hl.bind(superKey, function()
-        -- SUPER dismisses the clipboard popup, here on PRESS and not on
-        -- release. That ordering is the whole reason it is safe next to the
-        -- popup's own shortcut: SUPER+V is SUPER down (this fires, the popup
-        -- is closed, so the close is a no-op), V down (the popup opens), V
-        -- up, SUPER up (nothing -- it already fired on the way down). Bound
-        -- on release instead, it would shut the popup a fraction of a second
-        -- after every single time it opened.
-        hl.exec_cmd(shellIpc("clipboard close"))
-        hl.dispatch(hl.dsp.global("quickshell:workspaceNumber"))
-    end, { ignore_mods = true, transparent = true })
-    -- No release-side bind here any more: the old one existed to tear the
-    -- SUPER+Tab peek down, and the peek is gone. The base config's own SUPER
-    -- release bind -- the plain-tap search panel -- is untouched.
+    hl.bind(superKey, hl.dsp.global("quickshell:workspaceNumber"),
+        { ignore_mods = true, transparent = true })
+    hl.bind(superKey, hl.dsp.global("quickshell:workspaceNumber"),
+        { ignore_mods = true, transparent = true, release = true })
 end
+
 
 -- Kept from before: a no-look "next occupied desktop" cycle, for when you do not
 -- want to see anything.
@@ -970,3 +1027,88 @@ hl.unbind("SUPER + SHIFT + G")
 hl.bind("SUPER + SHIFT + G",
     hl.dsp.exec_cmd("gpu-mode toggle"),
     { description = "System: GPU mode (iGPU <-> RTX 4070 for new apps)" })
+
+-- ── Every SUPER chord must silence the bare-SUPER action ──────────────
+--
+-- A bare SUPER tap opens the app search card ON RELEASE, and that release
+-- fires unconditionally: "GlobalShortcut.onReleased in quickshell triggers
+-- whether or not you press something else while holding the key" -- the
+-- shell's own words, from the interrupt shortcut that exists for this reason.
+-- So every chord has to say so out loud. Each chord below carries one extra
+-- bind whose only job is to trip `search toggleReleaseInterrupt`, which clears
+-- the shell's `superReleaseMightTrigger` and with it both the card-on-release
+-- and the pending hold-SUPER-for-the-desktops timer (GlobalStates.qml: the
+-- HOLD that reveals the desktops and the tap that opens the card cannot share
+-- an edge without one of them being cancellable).
+--
+-- TWO BINDS ON ONE CHORD IS SAFE HERE -- verified on this build, not assumed:
+-- a temporary second bind on SUPER+Period ran alongside the original (both
+-- surfaces opened), so nothing below replaces or shadows a chord. An earlier
+-- attempt used one `ignore_mods` bind per KEY to cover every modifier
+-- combination with eight lines; it never fired, neither for the chord nor for
+-- a bare key press, so the chords are listed exactly.
+--
+-- THIS BLOCK MUST STAY AT THE END OF THE FILE. `hl.unbind` takes the chord's
+-- binds away and the re-bind that follows only puts back the action, so a
+-- block placed further up is quietly erased for the twelve chords that are
+-- re-bound later (D, L, R, S, the four arrows, CTRL+SUPER+H/J/K/L) -- measured
+-- at 105 of 117 covered before it was moved down here.
+--
+-- The list is the live bind set: every bind whose modmask contains SUPER,
+-- minus only the bare SUPER_L/SUPER_R holds (they ARE the hold, and cancelling
+-- it from itself would make it impossible).
+--
+-- THE MOUSE CHORDS ARE IN HERE ON PURPOSE, and they matter more than they
+-- look: SUPER+left-drag is a WINDOW RESIZE here, so a drag held past the hold
+-- delay would otherwise raise the grid in the middle of the drag.
+-- Four chords in it (V, Tab, Z, L) already interrupt in place further up;
+-- the duplicate is harmless and keeps this a complete statement of the rule
+-- rather than a list of exceptions to it. Regenerate by listing the same set:
+--
+--   hyprctl binds -j | python3 -c "..."    (modmask & 64, key not SUPER_L/R)
+local SUPER_CHORD_LIST = [[
+ALT + SUPER + A, ALT + SUPER + D, ALT + SUPER + Down, ALT + SUPER + Equal,
+ALT + SUPER + Escape, ALT + SUPER + F, ALT + SUPER + F11, ALT + SUPER + F12,
+ALT + SUPER + H, ALT + SUPER + Left, ALT + SUPER + M, ALT + SUPER + R,
+ALT + SUPER + Right, ALT + SUPER + S, ALT + SUPER + Space, ALT + SUPER + Tab,
+ALT + SUPER + Up, CTRL + ALT + SUPER + Left, CTRL + ALT + SUPER + Right,
+CTRL + ALT + SUPER + Slash, CTRL + ALT + SUPER + T, CTRL + SUPER + B,
+CTRL + SUPER + Backslash, CTRL + SUPER + BracketLeft, CTRL + SUPER + BracketRight,
+CTRL + SUPER + Down, CTRL + SUPER + H, CTRL + SUPER + J, CTRL + SUPER + K,
+CTRL + SUPER + L, CTRL + SUPER + Left, CTRL + SUPER + M, CTRL + SUPER + P,
+CTRL + SUPER + Page_Down, CTRL + SUPER + Page_Up, CTRL + SUPER + R,
+CTRL + SUPER + Right, CTRL + SUPER + S, CTRL + SUPER + T, CTRL + SUPER + Up,
+CTRL + SUPER + V, CTRL + SUPER + mouse_down, CTRL + SUPER + mouse_up,
+SHIFT + ALT + SUPER + Q, SHIFT + ALT + SUPER + R, SHIFT + ALT + SUPER + S,
+SHIFT + ALT + SUPER + Slash, SHIFT + ALT + SUPER + mouse:273,
+SHIFT + ALT + SUPER + mouse:275, SHIFT + ALT + SUPER + mouse:276,
+SHIFT + CTRL + ALT + SUPER + Delete, SHIFT + CTRL + ALT + SUPER + W,
+SHIFT + CTRL + SUPER + B, SHIFT + CTRL + SUPER + D, SHIFT + SUPER + A,
+SHIFT + SUPER + B, SHIFT + SUPER + C, SHIFT + SUPER + Down, SHIFT + SUPER + G,
+SHIFT + SUPER + H, SHIFT + SUPER + L, SHIFT + SUPER + Left, SHIFT + SUPER + M,
+SHIFT + SUPER + N, SHIFT + SUPER + P, SHIFT + SUPER + R, SHIFT + SUPER + Right,
+SHIFT + SUPER + S, SHIFT + SUPER + T, SHIFT + SUPER + Up, SHIFT + SUPER + W,
+SHIFT + SUPER + X, SUPER + 0, SUPER + 1, SUPER + 2, SUPER + 3, SUPER + 4, SUPER + 5,
+SUPER + 6, SUPER + 7, SUPER + 8, SUPER + 9, SUPER + A, SUPER + Apostrophe, SUPER + B,
+SUPER + BracketLeft, SUPER + BracketRight, SUPER + C, SUPER + D, SUPER + Down,
+SUPER + E, SUPER + Equal, SUPER + Escape, SUPER + F, SUPER + G, SUPER + I, SUPER + J,
+SUPER + K, SUPER + L, SUPER + Left, SUPER + M, SUPER + Minus, SUPER + N, SUPER + O,
+SUPER + P, SUPER + Page_Down, SUPER + Page_Up, SUPER + Period, SUPER + Q, SUPER + R,
+SUPER + Return, SUPER + Right, SUPER + S, SUPER + Semicolon, SUPER + Slash, SUPER + T,
+SUPER + Tab, SUPER + Up, SUPER + V, SUPER + W, SUPER + X, SUPER + Z, SUPER + mouse:273,
+SUPER + mouse:275, SUPER + mouse:276, SUPER + mouse_down, SUPER + mouse_up
+]]
+
+for raw in SUPER_CHORD_LIST:gmatch("[^,\n]+") do
+    -- A separate local on purpose: this config runs on Luau, where the loop
+    -- variable is const and trimming it in place is a load-time error (the
+    -- whole file after it silently stops registering -- found the hard way).
+    local chord = raw:gsub("^%s+", ""):gsub("%s+$", "")
+    if chord ~= "" then
+        -- The description is the same on purpose: it makes the whole set one
+        -- greppable answer to "is this chord covered?" in `hyprctl binds` and
+        -- in the shell's own bind listing.
+        hl.bind(chord, hl.dsp.global("quickshell:searchToggleReleaseInterrupt"),
+            { description = "Shell: SUPER chord (cancels the bare-SUPER action)" })
+    end
+end

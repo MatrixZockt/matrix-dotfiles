@@ -1111,8 +1111,69 @@ Scope {
                 //     whole width or resting on the border would not summon
                 //     the bar at all, and the gap would eat the hint's own
                 //     hover.
-                readonly property bool gapPassthrough:
-                    barRoot.hiddenByFullscreen && !barRoot.hideBySlide
+                //
+                //   * `!barContent.padGestureLive` -- NOT while a touchpad
+                //     gesture is on the pad. This is the one hole that has to
+                //     be shut, and it is not about clicks at all.
+                //
+                //     The brightness/volume swipe (BarContent.handleBarSwipe)
+                //     only fires when the pointer is in one of these gaps --
+                //     and a touchpad scroll is delivered by the COMPOSITOR to
+                //     the surface owning the pointer's pixel, so with the gap
+                //     cut out, the same two fingers that the shell is turning
+                //     into volume were ALSO scrolling the app underneath: on a
+                //     fullscreen browser under the bar, swiping for the volume
+                //     switched its tabs. Nothing on the shell side can take
+                //     that event back; the input region is the only place that
+                //     decides who receives it, so while the fingers are down
+                //     the strip is whole and the scroll lands on the bar
+                //     (which ignores it -- `padScrollBlocked` -- and writes the
+                //     device from the gesture itself).
+                //
+                //     A gesture is a few hundred milliseconds, and the gaps
+                //     come back the moment the fingers lift, so click-through
+                //     is untouched for every click. `padGestureLive` is timed
+                //     from TOUCH-DOWN (the tracker reports the finger count
+                //     before any motion, which is what beats the compositor to
+                //     the first notch) and carries a four-second bound, so a
+                //     lost end frame cannot leave this shut either.
+                // ── OFF. The strip is the bar's, always. ─────────────────
+                //
+                // The condition that used to be here -- `hiddenByFullscreen &&
+                // !hideBySlide` -- cut those stretches out of the bar's input
+                // region so clicks could reach the app underneath while the
+                // bar was over a fullscreen window. That is right for a click
+                // and WRONG for a scroll, and the difference is not something
+                // the input region can express: a touchpad scroll is delivered
+                // by the COMPOSITOR to the surface that owns the pointer's
+                // pixel, so the same two fingers the bar turns into brightness
+                // or volume also scrolled the app under the gap -- measured on
+                // this machine as "swiping for the volume switches Brave's
+                // tabs", with the gate's own log showing the pointer in a gap
+                // (`GATE gap ... -> volume`) while the tabs moved.
+                //
+                // Tried first and rejected: cut the gaps on the gesture only,
+                // timed from touch-down (`padGestureLive`). It is a race -- the
+                // compositor has already handed out the first notch by the time
+                // any signal reaches QML -- and toggling the region makes the
+                // bar's hover bounce (the pointer is delivered during the
+                // gesture and not before), which is exactly the enter/leave
+                // pair the bar's "pointer never left" hold exists to survive.
+                // The bar visibly dropped during the swipe.
+                //
+                // A region cannot hold both properties at once: to stop the app
+                // receiving the scroll, the pixel has to be the bar's, and a
+                // pixel that is the bar's cannot deliver a click to the app.
+                // The swipe was asked for and the click-through was not, so the
+                // strip is whole and the app gets nothing. What is given up is
+                // clicks in the bar's empty stretches WHILE the bar is over a
+                // covering window -- the browser-tab/title strip case this cut
+                // was written for.
+                //
+                // Restoring it is this one expression; everything downstream
+                // (`GapCut`, the runs above) is untouched and inert at zero
+                // width, so the two states cannot drift.
+                readonly property bool gapPassthrough: false
                 // ── The click-through runs ─────────────────────────────────
                 // The SPACING between the islands, in bar x: before the first
                 // island, the two runs between the three, and after the last.
@@ -1143,7 +1204,17 @@ Scope {
                 // `gapPassthrough` hands those stretches back to the app
                 // underneath: there is no input region left to deliver the
                 // pointer, so the bar's own hover goes false and the bar
-                // drops out from under a cursor that never moved. That is
+                // drops out from under a cursor that never moved.
+                //
+                // NOTE, with the pass-through OFF (see the note on
+                // `gapPassthrough` above): the strip is whole, so the pointer
+                // IS delivered everywhere on the bar and the case this whole
+                // mechanism exists for can no longer arise -- which is also
+                // why a swipe over the bar can no longer take the bar down
+                // with it. Kept as belt-and-braces: it costs a fork every 90ms
+                // only while a cursor is loitering near the strip, and it is
+                // the thing that would have to be right again if the
+                // pass-through were ever turned back on. That is
                 // the same disappearance the swipe hint just had to be taught
                 // to ignore, one layer up.
                 //
@@ -1432,10 +1503,6 @@ Scope {
                     alwaysRunToEnd: false
                 }
                 onHideBySlideChanged: {
-                    // Sampled BEFORE the animation is re-aimed: this is the
-                    // position the bar is actually leaving from, and it is
-                    // what decides whether there is a slide to wait for.
-                    const wasOut = barRoot.slideShift > 0.5;
                     // ── A WORKSPACE SWITCH IS NOT A SLIDE ──────────────────
                     //
                     // "No animations when switching desktops; only when an app
@@ -1444,16 +1511,14 @@ Scope {
                     // so the slide has nothing to say -- it only draws the
                     // dropdown on every desktop change.
                     //
-                    // Worse, the outbound half of this handler arms
-                    // `stripPending`, which zeroes the exclusive zone for the
-                    // duration. Under a switch that is the neighbour-window
-                    // bug exactly: the arriving desktop's window is re-laid out
-                    // against a workarea with no top band, grows to fill the
-                    // space, and is then squeezed back when the zone returns.
-                    // The strip gate is the enlargement; skipping the slide
-                    // without skipping the gate would have left the bounce in
-                    // place with the animation removed, which is the half-fix
-                    // that looks fixed and is not.
+                    // (This paragraph used to explain why a switch had to skip
+                    // the strip gate as well as the slide: the gate zeroed the
+                    // exclusive zone for the slide's duration, so the arriving
+                    // desktop's window was laid out against a workarea with no
+                    // top band and then squeezed back when the zone returned.
+                    // Nothing zeroes the zone for a slide any more -- see
+                    // `exclusiveZone` below -- so snapping the position is the
+                    // whole of what is left to do here.)
                     //
                     // Snapped, not animated. The bar is already at one extreme
                     // or the other for the whole of a switch, so there is
@@ -1463,7 +1528,6 @@ Scope {
                         barRoot.slideShift = barRoot.hideBySlide
                             ? barRoot.slideDistance
                             : 0;
-                        barRoot.stripPending = false;
                         return;
                     }
                     const spec = barRoot.hideBySlide
@@ -1475,38 +1539,15 @@ Scope {
                     slideAnim.easing.bezierCurve = spec.bezierCurve;
                     slideAnim.to = barRoot.hideBySlide ? barRoot.slideDistance : 0;
                     slideAnim.start();
-                    // Withhold the compositor strip while the bar is on its
-                    // way back IN -- and ONLY for the cover request.
-                    //
-                    // The `barCoverRequested` term is load-bearing, and
-                    // leaving it off is exactly the bug this replaced. Armed
-                    // on every slide-in, this gate also fired leaving REAL
-                    // fullscreen, and measured on that path:
-                    //
-                    //    ms  reserved      window y
-                    //   374  [0, 133, 0, 0]  872
-                    //   648  [0,  88, 0, 0]  849   <- strip dropped mid-slide
-                    //  1096  [0, 133, 0, 0]  872   <- and put back: the shift
-                    //
-                    // which is the reported symptom reproduced by the fix
-                    // meant to remove it. `coverYielding` alone is the cover
-                    // case; the raw flag is the right test HERE because on
-                    // the way out the window has already stopped covering, so
-                    // `coverAlive` is false and would silently drop the gate
-                    // exactly when it is needed.
-                    //
-                    // Outbound needs no gate: the strip has to be released
-                    // promptly in that direction, and `coverYielding` already
-                    // forces it to 0 for the whole outbound cover slide.
-                    //
-                    // Set here rather than in a handler of its own because QML
-                    // refuses a second `onHideBySlideChanged` on one object
-                    // ("Property value set multiple times"), and that error
-                    // takes the whole configuration down as a cascade of
-                    // "Type ... unavailable" from shell.qml outward.
-                    barRoot.stripPending = !barRoot.hideBySlide
-                        && wasOut
-                        && GlobalStates.barCoverRequested;
+                    // (Nothing is withheld from the compositor here any more.
+                    // This used to arm `stripPending` -- withholding the strip
+                    // while the bar slid back in, and only for the cover
+                    // request, so the tiler did not re-lay a window out from
+                    // under a bar still on its way down. The strip no longer
+                    // moves for a cover at all (see `exclusiveZone` below), so
+                    // there is nothing to withhold, and its own side effect is
+                    // gone with it: the strip coming back is what re-tiled
+                    // every window 45px down.)
                 }
                 // ── The slide must FINISH ────────────────────────────────────
                 //
@@ -1964,16 +2005,34 @@ Scope {
                 }
 
                 exclusionMode: ExclusionMode.Ignore
-                // ── The strip comes back only ONCE the bar has landed ──────
+                // ── NOTHING here moves the workarea for a window any more ──
                 //
-                // This used to be a straight `hiddenByFullscreen ? 0 : 45`, and
-                // that is the "the whole desktop app shifts for a second" report.
+                // Two gates used to sit on the `exclusiveZone` below, and both
+                // are gone: `stripPending` (the zone held through the bar's
+                // slide) and `coverYielding` (the cover's own request, spelled
+                // out further down).
                 //
-                // The two halves of "leaving fullscreen" happen on different
-                // clocks. The bar SLIDES back in over `elementMoveEnter`, and
-                // the workarea changes the INSTANT `hiddenByFullscreen` goes
-                // false. Measured on this machine, sampling every 100ms while a
-                // cover was released:
+                // They existed for covers that MAXIMIZED their way to the top
+                // of the screen: a maximized window is laid out inside the
+                // workarea, so the strip genuinely had to be released for it.
+                // custom/cover.lua floats the window instead now, and a float
+                // ignores exclusive zones outright -- measured, handing the
+                // zone back WHILE a cover was still up: the covering window did
+                // not move a pixel, and every OTHER window moved 45px. So the
+                // zone was buying the cover nothing and charging the whole
+                // desktop a re-layout of every window, twice.
+                //
+                // What is left on that line is the one rule that predates all
+                // of it: auto-hide yields the zone, nothing else does.
+                //
+                // The trail, kept because it is why the zone moved at all. This
+                // was once a straight `hiddenByFullscreen ? 0 : 45`, and that is
+                // the "the whole desktop app shifts for a second" report. The
+                // two halves of "leaving fullscreen" run on different clocks:
+                // the bar SLIDES back in over `elementMoveEnter`, and the
+                // workarea changed the INSTANT `hiddenByFullscreen` went false.
+                // Measured on this machine, sampling every 100ms while a cover
+                // was released:
                 //
                 //   ms  reserved        window at/size
                 //    20 [0, 45, 0, 0]  [-1, -1]/[1600, 1000]  f=1
@@ -1982,20 +2041,14 @@ Scope {
                 //
                 // So the strip was re-reserved while the bar was still off the
                 // top of the screen, and the tiler re-laid the window out from a
-                // full-monitor float to its tile UNDERNEATH it. The user sees
-                // the app jump up under a bar that is still descending.
-                //
-                // Holding the strip until the slide has finished inverts the
-                // order: the bar arrives first, and the workarea settles after
-                // it, so nothing moves under a moving bar. `stripPending` is
-                // cleared the moment the bar starts hiding again, so the strip
-                // is released promptly in that direction -- where the bar is
-                // leaving anyway and there is nothing to see.
-                //
-                // Not `readonly`, because the whole point is that the slide
-                // handler writes to it.
-                property bool stripPending: false
-                // ── Only the COVER path gives the strip up ──────────────
+                // full-monitor float to its tile UNDERNEATH it: the app jumps up
+                // under a bar that is still descending. Holding the strip until
+                // the slide finished inverted that order, and was right while
+                // the zone still moved. With the cover no longer moving it, the
+                // hold has nothing left to hold -- and its own cost was the
+                // other half of the same report: the strip coming back is what
+                // re-tiled every window 45px down again.
+                // ── Why real fullscreen does NOT give the strip up ──────────────
                 //
                 // Measured on leaving real fullscreen, sampling `hyprctl
                 // monitors` and the window together:
@@ -2025,25 +2078,36 @@ Scope {
                 // visible, and its only effect is to change the tiler's
                 // reflow arithmetic. Which is the shift.
                 //
-                // So the zone is now given up ONLY for the cover request --
-                // the one case that genuinely needs it, because a maximized
-                // window keeps its own chrome and Hyprland will not let it
-                // reach the top edge otherwise (see the note on
-                // `coverRequested` above). Real fullscreen keeps its strip,
-                // reserved never changes, and the window never re-tiles at
-                // all: it goes straight from the fullscreen rect to the tile
-                // it already had, once, with nothing to animate.
+                // AND THE COVER DOES NOT EITHER -- the case those measurements
+                // were one step short of. The cover request was the last thing
+                // here that moved the zone (`coverYielding`, plus `stripPending`
+                // holding it through the slide), and it was written for a cover
+                // that MAXIMIZED its way to the top edge. custom/cover.lua
+                // floats instead, and a float ignores exclusive zones outright.
+                // Measured on this machine, covering a window and then handing
+                // the strip back WHILE it stayed covered:
                 //
-                // `coverAlive` (not the bare flag) is the test, for the same
-                // reason `hiddenByFullscreen` uses it: the slot can name a
-                // window that is no longer covering, and yielding the strip
-                // for that is precisely the old bug.
-                readonly property bool coverYielding:
-                    GlobalStates.barCoverRequested && barRoot.coverAlive
-                // `stripPending` still gates the COVER case, where the strip
-                // genuinely does toggle and the tiler genuinely would reflow
-                // under a descending bar. It is inert for real fullscreen
-                // now, because that path no longer moves the zone at all.
+                //   cover win: [0, 0] 1707x1067 flt=True      reserved=0
+                //   qs -c ii ipc call barCover onCover false <addr>
+                //   cover win: [0, 0] 1707x1067 flt=True      reserved=45
+                //   other windows: [6, 6] -> [6, 51]
+                //
+                // The covering window did not move a pixel when the strip came
+                // back; every other window moved 45px when it went away. That
+                // is the whole cost of the yield: dropping the zone re-tiles
+                // EVERY window on the monitor 45px up (animated by
+                // `windowsMove`), and giving it back re-tiles them all down
+                // again -- four clients repainting twice, which is the
+                // "resizing and everything feels laggy" report. Out of a
+                // cover, it is also the second 45px move: the window re-tiles
+                // into a strip-less tile first and is then pushed down into
+                // the real one, "the whole window shifts for about a second".
+                //
+                // With the zone left where it is, the covering window is the
+                // only thing that moves, in one step, in each direction.
+                //
+                // The cover still hides the bar: `hiddenByFullscreen` reads the
+                // flag and the geometry, and never the zone.
                 // ── Bar-visibility publisher (the gesture handshake) ───────
                 // A SECOND file, deliberately, not another field in
                 // ii-nowbar-hover.json: that one is written by the island
@@ -2121,33 +2185,8 @@ Scope {
                     onTriggered: publishVisibility()
                 }
 
-                exclusiveZone: (barRoot.coverYielding || barRoot.stripPending || (Config?.options.bar.autoHide.enable && (!mustShow || !Config?.options.bar.autoHide.pushWindows))) ? 0 :
+                exclusiveZone: (Config?.options.bar.autoHide.enable && (!mustShow || !Config?.options.bar.autoHide.pushWindows)) ? 0 :
                     Appearance.sizes.baseBarHeight + (Config.options.bar.cornerStyle === 1 ? Appearance.sizes.hyprlandGapsOut : 0)
-                // Watched by name rather than derived, because "has the slide
-                // finished" is a question about an ANIMATION and not about the
-                // goalposts: `slideAnim.running` is true for the whole travel,
-                // so this goes false on the frame the bar reaches the screen
-                // edge. A repeating tick rather than the animation's own
-                // finished signal, for the same reason `slideSettle` uses one:
-                // a one-shot cannot come back for a state it never observed.
-                Timer {
-                    interval: 60
-                    repeat: true
-                    // Armed by the pending flag alone, NEVER by the zone. The
-                    // zone is 0 for exactly as long as this gate is up, so
-                    // watching the zone instead is a deadlock: first tick
-                    // clears the gate, the zone follows it up, the timer's
-                    // `running` goes false, and nothing is left to ever clear
-                    // it again -- the bar comes back with a permanent zero
-                    // strip and every window overlaps it.
-                    running: barRoot.stripPending
-                    onTriggered: {
-                        if (!slideAnim.running)
-                            barRoot.stripPending = false;
-                    }
-                }
-                // (The "give the strip back on the way out" half of this lives
-                // in the one `onHideBySlideChanged` above -- see the note there.)
                 // Overlay, not top: a fullscreen client renders above every
                 // Top-layer surface. That was the real reason clicks on the bar
                 // did nothing -- with a fullscreen window on the active
@@ -2376,6 +2415,18 @@ Scope {
                     // wins, which is the one the pointer is on anyway.
                     Item {
                         id: gapProxy
+                        function vpnPanel(on: string): string {
+                            return barContent.vpnPanelToggle(on === "true" || on === "1");
+                        }
+                        // Test hooks for the two connectivity menus: see
+                        // `vpnPanelToggle` in BarContent for why a script needs
+                        // them (a layer surface takes no synthetic click here).
+                        function wifiPanel(on: string): string {
+                            return barContent.wifiPanelToggle(on === "true" || on === "1");
+                        }
+                        function bluetoothPanel(on: string): string {
+                            return barContent.bluetoothPanelToggle(on === "true" || on === "1");
+                        }
                         function ask(): string {
                             const span = (a, b) => (b > a ? Math.round(a) + ".." + Math.round(b) : "off");
                             const runs = "[" + Math.round(barContent.leftRunX) + ".."
@@ -2394,7 +2445,16 @@ Scope {
                             // hover state is false there and true over an
                             // island. Region has no readback, and this is the
                             // same thing the compositor answers with.
+                            // `padLive` is the third input to `through`, and it
+                            // is reported with the two halves it is made of so
+                            // a gesture can be seen shutting the gaps from
+                            // outside the shell (the bench drives both):
+                            //   qs -c ii ipc call bar swipeBench volume 20
+                            //   qs -c ii ipc call bar gapState
                             return "through=" + String(barRoot.gapPassthrough)
+                                + " padLive=" + String(barContent.padGestureLive)
+                                + " padActive=" + String(TouchpadSwipe.active)
+                                + " padFresh=" + String(barContent.swipeFresh)
                                 + " fsHidden=" + String(barRoot.hiddenByFullscreen)
                                 + " slidOut=" + String(barRoot.hideBySlide)
                                 + " allowed=" + String(barRoot.fsBarAllowedOpen)
@@ -2439,15 +2499,13 @@ Scope {
                                 + " fsShow=" + String(barRoot.fsShow)
                                 + " stripH=" + barRoot.hiddenStripHeight
                                 + " band=" + barRoot.fsEdgeBand + "]"
-                                // Whether the compositor's strip has been
-                                // re-reserved yet. It is deliberately LATE
-                                // (after the slide lands) so the tiler does
-                                // not re-lay a window out from under a bar
-                                // that is still on its way in -- so
-                                // zone=0 with pending=true is the transient
-                                // this whole mechanism exists to produce.
+                                // The compositor's strip: `zone` is what the
+                                // workarea reserves and `sliding` says whether
+                                // the bar is mid-travel. Nothing here toggles
+                                // the zone for a window any more (see
+                                // `exclusiveZone` below), so zone=0 now means
+                                // exactly "auto-hide is yielding it".
                                 + " strip[zone=" + barRoot.exclusiveZone
-                                + " pending=" + String(barRoot.stripPending)
                                 + " sliding=" + String(slideAnim.running) + "]"
                                 + " islands=" + runs
                                 + " gaps=[" + gaps + "]"
@@ -2505,6 +2563,14 @@ Scope {
                         function askHint(): string {
                             return barContent.gapHintState;
                         }
+                        // The status row's fit arithmetic, live: the measured
+                        // text width next to the cap it must fit, and where the
+                        // row actually went. Answers "why did the Opening line
+                        // elide" in one call --
+                        //   qs -c ii ipc call bar statusFit
+                        function statusFit(): string {
+                            return barContent.statusFitDiag();
+                        }
                         // The swipe's frame diagnostics: arrival gaps,
                         // handler cost, and the event loop's own lateness.
                         // Read after a real gesture to see where it stalled.
@@ -2525,6 +2591,13 @@ Scope {
                         // measurement run without touching the code.
                         function swipeOpt(name: string, on: string): string {
                             return barContent.swipeOpt(name, on);
+                        }
+                        // The sound icon's two-finger tap. Same hover gate as
+                        // the gesture, so a probe run says whether the pointer
+                        // is on the icon before it decides anything:
+                        //   qs -c ii ipc call bar soundTap
+                        function soundTapProbe(): string {
+                            return barContent.soundTapProbe();
                         }
                         // The press-outside-the-bar dismissal, reachable from
                         // the IPC handler above, which is outside the window's
@@ -2838,6 +2911,24 @@ Scope {
             }
         }
 
+        // Diagnostic: the status row's fit arithmetic, live. The "Opening
+        // <app>…" row eliding inside the island was invisible from the
+        // outside -- this reports the three numbers that decide where the
+        // row goes (measured text width, the empty-run cap, and the inline
+        // decision), so the fit test can be verified from a script without
+        // screenshots:
+        //   qs -c ii ipc call bar statusFit
+        function statusFit(): string {
+            const proxy = bar.gapAsker;
+            if (!proxy)
+                return "no bar window (barOpen off?)";
+            try {
+                return proxy.statusFit();
+            } catch (e) {
+                return "threw: " + e;
+            }
+        }
+
         // Test/diagnostic hook: the fullscreen pin, so the down-over-fullscreen
         // state can be held open from a script. Goes through the same proxy as
         // the diagnostic above -- barRoot is panel-local.
@@ -2882,6 +2973,22 @@ Scope {
             const proxy = bar.gapAsker;
             if (proxy)
                 proxy.swipeDiagReset();
+        }
+
+        // The sound icon's two-finger tap, from outside the shell: it silences,
+        // or puts the previous level back, exactly as the gesture does -- the
+        // pointer has to be over the icon either way, which is reported rather
+        // than assumed.
+        //   qs -c ii ipc call bar soundTap
+        function soundTap(): string {
+            const proxy = bar.gapAsker;
+            if (!proxy)
+                return "no bar window (barOpen off?)";
+            try {
+                return proxy.soundTapProbe();
+            } catch (e) {
+                return "threw: " + e;
+            }
         }
 
         // A synthetic swipe (default 300 frames at 8ms) through the real
@@ -2940,6 +3047,81 @@ Scope {
         // whole configuration down on this build: the module fails to
         // resolve and Quickshell reports it as a cascade of unrelated "Type
         // unavailable" errors starting at shell.qml.
+        // Diagnostic: what the shell's Tailscale service believes.
+        //
+        // The sidebar switch and the bar popup both draw from that one
+        // service, so when the switch disagrees with `tailscale status` this
+        // is what says which half is stale -- and it is the only way to read
+        // the parsed peer list back out of the shell, since a layer surface
+        // can be neither screenshotted nor clicked from a script.
+        //   qs -c ii ipc call bar vpnState
+        function vpnState(): string {
+            try {
+                const names = [];
+                for (const peer of Tailscale.peers)
+                    names.push(peer.name + "@" + peer.ip + (peer.online ? " online" : " offline"));
+                return "installed=" + Tailscale.installed
+                    + " state=" + Tailscale.backendState
+                    + " connected=" + Tailscale.connected
+                    + " self=" + Tailscale.selfName + "@" + Tailscale.selfIp
+                    + " peers=[" + names.join(", ") + "]";
+            } catch (error) {
+                return "threw: " + error;
+            }
+        }
+
+        // Test hook: flip the VPN through the very service the switch calls.
+        // A pointer cannot reach a layer surface from a script, and the
+        // command path alone would not prove the shell half works -- this
+        // runs the real `setEnabled`, so the state read back by `vpnState`
+        // above is the shell's own doing.
+        //   qs -c ii ipc call bar vpnSet false
+        function vpnSet(on: string): string {
+            const wanted = on === "true" || on === "1";
+            Tailscale.setEnabled(wanted);
+            return "requested=" + wanted;
+        }
+
+        // Test hook: open or close the bar's VPN popup, through the same flag
+        // the icon itself writes (see BarContent.vpnPanelToggle). barRoot is
+        // panel-local, so this goes through the same proxy as the rest.
+        //   qs -c ii ipc call bar vpnPanel true
+        function vpnPanel(on: string): string {
+            const proxy = bar.gapAsker;
+            if (!proxy)
+                return "no bar window (barOpen off?)";
+            try {
+                return proxy.vpnPanel(on);
+            } catch (e) {
+                return "threw: " + e;
+            }
+        }
+
+        // The same test hooks for the Wi-Fi and Bluetooth menus.
+        //   qs -c ii ipc call bar wifiPanel true
+        //   qs -c ii ipc call bar bluetoothPanel true
+        function wifiPanel(on: string): string {
+            const proxy = bar.gapAsker;
+            if (!proxy)
+                return "no bar window (barOpen off?)";
+            try {
+                return proxy.wifiPanel(on);
+            } catch (e) {
+                return "threw: " + e;
+            }
+        }
+
+        function bluetoothPanel(on: string): string {
+            const proxy = bar.gapAsker;
+            if (!proxy)
+                return "no bar window (barOpen off?)";
+            try {
+                return proxy.bluetoothPanel(on);
+            } catch (e) {
+                return "threw: " + e;
+            }
+        }
+
         function mixerRows(): string {
             try {
                 const parts = [];
@@ -2970,11 +3152,11 @@ Scope {
             }
         }
 
-        // Test/diagnostic hook: open a named pocket ("battery", "sound",
-        // "network", "bluetooth", "media") without pointer hover, so the
-        // drop content can be verified from scripts. Empty id closes it.
+        // Test/diagnostic hook for the below-bar droplet. RETIRED with the
+        // drop (BarContent.armPocket's note): the droplet no longer exists,
+        // so this is close-only -- any id just closes whatever is open.
         function pocket(id: string): void {
-            LiquidBar.setPocket(id)
+            LiquidBar.setPocket("")
         }
 
         // Same, with an explicit centre x (bar coordinates) -- test hook for

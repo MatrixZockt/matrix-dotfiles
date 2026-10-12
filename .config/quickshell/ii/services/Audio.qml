@@ -24,9 +24,26 @@ Singleton {
     property bool ready: Pipewire.defaultAudioSink?.ready ?? false
     property PwNode sink: Pipewire.defaultAudioSink
     property PwNode source: Pipewire.defaultAudioSource
+    // ── One scale for volume, and its end is 100% ─────────────────────────
+    //
+    // `hardMaxValue` is the sink value the shell calls 100%: 2.0, which is what
+    // PipeWire accepts on this machine and what the loud end has always been.
+    // What changed is only the NAME it is called. The sink used to be read as
+    // "1.0 = 100%", so the shell displayed up to 200% and every surface had to
+    // know that its percentage was really a fraction of two -- which is how the
+    // bar could say "200%" at all.
+    //
+    // Now there is ONE scale, 0..1, whose top is `hardMaxValue`, and the two
+    // functions below (`currentVolume` / `setSinkVolume`) are the only places
+    // that know the ratio. Nothing in the UI can read above 100%, and the whole
+    // loud range is still reachable -- rescaled, not capped: "100%" now means
+    // what "200%" used to.
     readonly property real hardMaxValue: 2.00 // People keep joking about setting volume to 5172% so...
     property string audioTheme: Config.options.sounds.theme
-    property real value: sink?.audio.volume ?? 0
+    // The shell's own volume fraction (0..1, 100% = `hardMaxValue`). A MIRROR,
+    // never a write path: the sink is the only thing that reaches PipeWire, so
+    // writes go through `setSinkVolume` and this follows them.
+    property real value: root.currentVolume()
     
     // Both of these are called from bindings while PipeWire is churning -- a
     // device appearing or leaving, the default sink switching. In that window a
@@ -581,8 +598,9 @@ Timer {
         return root.remembered(root.systemSoundsKey);
     }
 
-    // 1.0 until the user actually moves the row, so an untouched system-sounds
-    // row leaves notification sounds exactly as loud as they were.
+    // 1.0 until the user actually moves the row: an untouched row is the
+    // neutral factor, and what the sound actually plays at is then decided by
+    // the overall volume -- see playSystemSoundFile, which multiplies the two.
     function systemSoundVolume(): real {
         const entry = root.systemSoundEntry();
         if (!entry || entry.remembered !== true)
@@ -600,21 +618,38 @@ Timer {
 
     // Play a sound file at the system-sounds volume.
     //
-    // Returns false without spawning anything when the row is muted or at zero:
-    // a slider at zero means "do not play this", and honouring that by spawning
-    // a silent player is both slower and wrong -- the notification still costs a
-    // process spawn and a PipeWire client on the wire.
+    // ONE FACTOR, and it is honestly one factor. This used to multiply
+    // `currentVolume()` in as well, so that "the two sliders compose" -- but
+    // PipeWire already applies the sink's volume to every stream it mixes, so
+    // that factor landed on these sounds a SECOND time. Measured 2026-10-11,
+    // sink at 30%: a music stream carries volume 1.0 and is heard at the
+    // sink's 30%, while the device click was spawned at `--volume 0.151`
+    // (30% / 2, this shell's scale) -- about 16 dB under the music, and ~22 dB
+    // once the click sample's own -6 dBFS headroom is counted. That is the
+    // "sometimes plugging a USB drive in makes no sound" report: the click
+    // was a whisper, and the quieter the desktop, the quieter it got.
+    //
+    // The row stays. It is the one control that is ABOUT these sounds (turning
+    // System Sounds down has to turn them down), and it is a stream volume:
+    // the same scale a music player sits at 100% on. So these sounds at row
+    // 100% are as loud as music at 100%, and the sink governs both.
+    //
+    // Returns false without spawning anything when the row is muted or when
+    // either factor is zero: a slider at zero means "do not play this", and
+    // honouring that by spawning a silent player is both slower and wrong -- the
+    // notification still costs a process spawn and a PipeWire client on the wire.
     function playSystemSoundFile(file: string): bool {
         const path = String(file ?? "").trim();
         if (path.length === 0)
             return false;
-        const volume = root.systemSoundVolume();
+        const row = root.systemSoundVolume();
+        const volume = row;
         if (root.systemSoundMuted() || volume <= 0.001) {
-            print(`[mixer] preview silent: muted=${root.systemSoundMuted()} volume=${volume}`);
+            print(`[mixer] preview silent: muted=${root.systemSoundMuted()} row=${row}`);
             return false;
         }
         const level = volume.toFixed(3);
-        print(`[mixer] preview playing ${path} at ${level}`);
+        print(`[mixer] preview playing ${path} at ${level} (row ${row}, sink applies its own)`);
         // The mark the mixer filters on (see isSystemSoundNode). Set on the
         // pw-* players, which take `--properties`; the fallbacks cannot be
         // marked, but they only run on a machine with no PipeWire tooling at
@@ -883,37 +918,90 @@ Timer {
         Audio.source.audio.muted = !Audio.source.audio.muted
     }
 
-    // The sink's volume, read and written as a plain 0..1 fraction of the
-    // ordinary range. `sink.audio.volume` is the only path that actually
-    // reaches PipeWire -- assigning `Audio.value` moves this singleton's own
-    // mirror -- and `sink` is null until the daemon answers, so callers have
-    // to go through a guard. The bar's two-finger swipe is absolute control
-    // (it anchors on the volume the fingers land over and follows the travel
-    // from there), which a step API cannot express.
+    // The shell's volume, read and written as a plain 0..1 fraction where 1.0
+    // is `hardMaxValue`. `sink.audio.volume` is the only path that actually
+    // reaches PipeWire, and `sink` is null until the daemon answers, so callers
+    // go through these two functions rather than at the node. The bar's
+    // two-finger swipe is absolute control (it anchors on the volume the
+    // fingers land over and follows the travel from there), which a step API
+    // cannot express.
+    //
+    // EVERY surface reads its fraction here and writes it through
+    // `setSinkVolume`: the bar's rail, the swipe band, the OSD, the sidebar
+    // slider, the mixer's system row and the wheel steps all used to touch
+    // `sink.audio.volume` themselves, each with its own idea of what 1.0 meant
+    // -- and once the scale moved, a single missed site would have been a
+    // control that silently stopped at half volume.
     function currentVolume(): real {
-        return Audio.sink?.audio?.volume ?? 0;
+        const raw = Audio.sink?.audio?.volume ?? 0;
+        return Math.max(0, Math.min(1, raw / root.hardMaxValue));
     }
 
     function setSinkVolume(fraction: real): void {
         if (!Audio.sink?.audio) return;
-        // Up to `hardMaxValue`, NOT 1. This function is the bar's two-finger
-        // swipe's only way to reach the sink, and it clamped at 100% while
-        // the rest of the shell is built for 200%: the rail maps 0..1 across
-        // `hardMaxValue`, and the slider writes the sink directly, so both
-        // already went past 1. The swipe alone could not -- which is why the
-        // top of its range felt lower than the panel/sound the shell can
-        // actually produce.
-        //
-        // 2.0 is the amplifier's usable headroom, not an arbitrary number:
-        // PipeWire accepts it (checked on this machine -- `wpctl set-volume
-        // 150%` reads back 1.50) and it is the same ceiling the volume rail
-        // has always drawn. Above the rail's own end there is nothing left to
-        // aim at.
+        // Clamped to 0..1 of the SHELL's scale -- 100%, not 200%. `hardMaxValue`
+        // is 2.0 because that is the amplifier's usable headroom (PipeWire
+        // accepts it: `wpctl set-volume 150%` reads back 1.50) and it is the
+        // same ceiling the volume rail has always drawn; calling it "100%" is
+        // what keeps the UI from ever naming a number above the scale it draws.
         //
         // Sustained maximum is inert: the sink only writes when the value
         // changes, and both the swipe's band and the rail stop at the ceiling
         // rather than queueing against it.
-        Audio.sink.audio.volume = Math.max(0, Math.min(root.hardMaxValue, fraction));
+        const clamped = Math.max(0, Math.min(1, fraction));
+        // Zero is SILENT, and now it says so. The sink's own mute flag goes with
+        // the number, so every surface that reads `muted` -- the bar's icon, the
+        // mixer's row, the sidebar slider -- agrees with the 0% instead of
+        // showing a live-looking control on a silent sink. How the zero was
+        // asked for makes no difference: the two-finger swipe's floor reaches it
+        // now (see BarContent's per-zone floor), and so does a slider dragged to
+        // the bottom or a tap that means "silence now".
+        //
+        // Coming back OFF zero clears the mute again, which is what keeps the
+        // gesture from becoming a dead end: swipe down to 0, swipe back up, and
+        // the level returns AND is audible. Only a write that was at zero BEFORE
+        // it happens is allowed to clear it, so a deliberate mute at 40% is not
+        // undone by a write that moves the level sideways -- the bar's own wheel
+        // handler already draws that line for scrolling up, see its
+        // `if (Audio.sink.audio.muted && step > 0)`.
+        const wasSilent = Audio.currentVolume() <= 0;
+        Audio.sink.audio.volume = clamped * root.hardMaxValue;
+        if (clamped <= 0 && !Audio.sink.audio.muted)
+            Audio.sink.audio.muted = true;
+        else if (clamped > 0 && wasSilent && Audio.sink.audio.muted)
+            Audio.sink.audio.muted = false;
+    }
+
+    // The same scale, for a row that might BE the default sink.
+    //
+    // The waffle mixer builds one slider row from a bare node and hands it
+    // `Audio.sink` for the System row and an app's stream for every row below.
+    // A stream's own volume is PipeWire's own scale (1.0 is its unity gain),
+    // but the default sink's is the shell's -- so a row that read and wrote
+    // `node.audio.volume` itself made the System slider a HALF-length control:
+    // its right end landed on the sink's 1.0, which the shell now calls 50%,
+    // and its tooltip named "200%" at the loud end. These two route a node
+    // through the scale that belongs to what the node is, so one row component
+    // can serve both without knowing which it got.
+    function isDefaultSink(node): bool {
+        return node !== null && node !== undefined && node.id === root.sink?.id;
+    }
+
+    function nodeVolumeFraction(node): real {
+        if (!node?.audio)
+            return 0;
+        return root.isDefaultSink(node)
+            ? root.currentVolume()
+            : node.audio.volume;
+    }
+
+    function setNodeVolumeFraction(node, fraction: real): void {
+        if (!node?.audio)
+            return;
+        if (root.isDefaultSink(node))
+            root.setSinkVolume(fraction);
+        else
+            node.audio.volume = fraction;
     }
 
     // ── Volume-rail math, shared ─────────────────────────────────────────
@@ -924,19 +1012,17 @@ Timer {
     //   fraction 0..1 spans the WHOLE groove, which is the full hardMaxValue
     //   range, exactly like dragging the rail's fill.
     function setVolumeFraction(fraction) {
-        const clamped = Math.max(0, Math.min(1, fraction));
-        Audio.value = clamped * Audio.hardMaxValue;
+        Audio.setSinkVolume(fraction);
     }
 
     function nudgeVolumeBy(deltaFraction) {
-        Audio.value = Math.max(0, Math.min(Audio.hardMaxValue,
-            Audio.value + deltaFraction * Audio.hardMaxValue));
+        Audio.setSinkVolume(Audio.currentVolume() + deltaFraction);
     }
 
     // Pixel y inside the rail's interaction rect -> fraction (top = full).
     function volumeFractionFromY(y, height) {
         if (!(height > 0))
-            return Audio.value / Audio.hardMaxValue;
+            return Audio.currentVolume();
         return Math.max(0, Math.min(1, 1 - y / height));
     }
 
@@ -1016,20 +1102,18 @@ Timer {
         return true;
     }
 
+    // Keybind/mixer wheel steps, in the shell's fractions: fine near silence,
+    // then ordinary 2% steps, and they stop at 100% like every other control
+    // (they used to stop at 100% of the SINK while the rail beside them went to
+    // 200% -- the same split the swipe had, one scale up).
     function incrementVolume() {
-        const currentVolume = Audio.value;
-        const step = currentVolume < 0.1 ? 0.01 : 0.02 || 0.2;
-        // `hardMaxValue`, not 1 -- the same ceiling as the rail and the
-        // swipe. At 1 this keybind simply stopped at 100% while everything
-        // else in the shell could go to 200%.
-        Audio.sink.audio.volume = Math.min(root.hardMaxValue,
-            Audio.sink.audio.volume + step);
+        const step = Audio.currentVolume() < 0.1 ? 0.01 : 0.02;
+        Audio.setSinkVolume(Audio.currentVolume() + step);
     }
-    
+
     function decrementVolume() {
-        const currentVolume = Audio.value;
-        const step = currentVolume < 0.1 ? 0.01 : 0.02 || 0.2;
-        Audio.sink.audio.volume -= step;
+        const step = Audio.currentVolume() < 0.1 ? 0.01 : 0.02;
+        Audio.setSinkVolume(Audio.currentVolume() - step);
     }
 
     function setDefaultSink(node) {
@@ -1063,8 +1147,15 @@ Timer {
                 lastReady = true;
                 return;
             }
-            const maxAllowedIncrease = Config.options.audio.protection.maxAllowedIncrease / 100; 
-            const maxAllowed = Config.options.audio.protection.maxAllowed / 100;
+            // The config's two numbers are percentages of the SHELL's scale
+            // ("max allowed 99" means 99%), so they are scaled into sink units
+            // here: `hardMaxValue` is what 100% means. Without this the guard
+            // would clamp a 100% volume to 99% of the SINK -- half the range
+            // it was written to allow.
+            const maxAllowedIncrease = Config.options.audio.protection.maxAllowedIncrease / 100
+                * root.hardMaxValue;
+            const maxAllowed = Config.options.audio.protection.maxAllowed / 100
+                * root.hardMaxValue;
 
             if (newVolume - lastVolume > maxAllowedIncrease) {
                 sink.audio.volume = lastVolume;

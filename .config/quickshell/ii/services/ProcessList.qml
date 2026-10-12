@@ -140,19 +140,6 @@ Singleton {
         return false;
     }
 
-    // How many TOP-LEVEL rows the table has -- on the grouped Apps page, the
-    // number of applications. The view uses it for the Applications/Advanced
-    // split: everything past this index is background helper territory.
-    readonly property int sectionCount: {
-        const _ = root.revision;
-        if (!root.grouped)
-            return root.filtered.length;
-        let n = 0;
-        for (const row of root.rows)
-            if (row.kind === "group") n++;
-        return n;
-    }
-
     // The desktop-entry icon for a row's app, resolved once per call and
     // cached by Quickshell's own icon path cache. Falls through to the shell's
     // generic app glyph for anything without a desktop entry (AppImages and
@@ -306,9 +293,18 @@ Singleton {
 
         const key = root.sortKey;
         const direction = root.sortAscending ? 1 : -1;
-        // Windows-open first, then the ordinary order inside each tier. The
-        // windowed set comes from the LIVE window list, so this reorders
-        // itself as apps are opened and closed.
+        // The chosen column is the ORDER -- over every application, top to
+        // bottom -- and having a window open only breaks TIES inside it.
+        //
+        // It used to be a TIER: windowed groups were lifted above everything
+        // else and sorted among themselves, so clicking CPU or Memory put
+        // some other application on top. The column said "most used first" and
+        // the page answered "what you have open, then the rest", which reads
+        // as the sort doing nothing -- and when the biggest consumer on the
+        // machine is a background one (a model server, an indexer) it is
+        // buried under every open window. "What am I running" is still
+        // answered by this page, by the rows themselves; it is no longer an
+        // ordering rule that overrides the one the user picked.
         //
         // Resolved ONCE per group, before the sort, for two reasons that are
         // both measured: asking inside the comparator is ~9,000 answers for
@@ -333,10 +329,12 @@ Singleton {
             return ((a[key] ?? 0) - (b[key] ?? 0)) * direction;
         };
         groups.sort((a, b) => {
+            const order = cmp(a, b);
+            if (order !== 0)
+                return order;
             const wa = windowed[a.name] ?? 0;
             const wb = windowed[b.name] ?? 0;
-            if (wa !== wb) return wb - wa;
-            return cmp(a, b);
+            return wb - wa;
         });
 
         const rows = [];

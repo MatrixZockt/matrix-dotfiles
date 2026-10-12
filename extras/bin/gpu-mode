@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# gpu-mode -- one switch for "should newly launched apps use the NVIDIA dGPU?".
+#
+#   gpu-mode            show the current mode
+#   gpu-mode on         new apps go to the RTX 4070
+#   gpu-mode off        new apps stay on the Intel iGPU (default)
+#   gpu-mode toggle     flip it
+#
+# Why this is a switch and not a per-app setting
+# ----------------------------------------------
+# The GPU an app gets is decided by three environment variables in the process
+# that starts it. Linux has no per-application GPU preference database (Windows
+# has one; that is why this feels like it should just work here and does not).
+# So the choice has to be made at launch time. The alternative to one switch is
+# editing a .desktop file per app, which is exactly what nobody wants to do.
+#
+# What each API actually does with the switch -- MEASURED on this machine,
+# 2026-09-29, with eglinfo/glxinfo/vulkaninfo, not inferred:
+#
+#   OpenGL via GLX (X11, XWayland, Wine, most games)
+#       iGPU when off, RTX 4070 when on.            <- works
+#   Vulkan (games, engines, Blender-class tools)
+#       iGPU listed first when off; the 4070 becomes
+#       GPU0 -- the preferred device -- when on.     <- works
+#   CUDA / NVML (Ollama, PyTorch, anything cuInit)
+#       ALWAYS the 4070, in both modes. libcuda never goes through glvnd, so
+#       no variable in this script can affect it.   <- always on the dGPU
+#   Native Wayland EGL (GTK/Qt apps)
+#       ALWAYS the iGPU, in both modes. glvnd resolves EGL_DEFAULT_DISPLAY
+#       from wl_drm, so a Wayland client follows the compositor -- and the
+#       panel is on the Intel GPU, so it always follows it to the iGPU.
+#       There is no lever for this one. Tested: forcing the NVIDIA EGL vendor
+#       per process makes eglInitialize fail outright.               <- no effect
+#   VAAPI / video decode
+#       Intel, always, which is the point of having an iGPU.        <- correct
+#
+# So "on" means: anything that draws through GLX or Vulkan, and all compute,
+# runs on the 4070. It does not move native Wayland EGL apps, and on this
+# hardware it cannot.
+#
+# What it deliberately does NOT touch
+# -----------------------------------
+# Hyprland. The three variables are applied to *launched apps* only:
+#   * never in ~/.config/fish/conf.d/ (read on the way to exec'ing the
+#     compositor -- an earlier attempt to pin the EGL vendor there is what made
+#     the session unbootable; see conf.d.disabled/egl-vendor.fish)
+#   * never in Hyprland's own environment, only in the environment of things
+#     Hyprland launches, via `hyprctl setenv`
+#   * only in ~/.config/fish/config.fish, which fish reads for INTERACTIVE
+#     shells only, so a terminal can never feed the compositor either
+# The desktop keeps drawing on the iGPU in both modes, and login is untouched.
+#
+# Already-running apps are not moved. Close and reopen them, or just start the
+# new one after flipping.
+set -u
+
+state_dir="${XDG_CONFIG_HOME:-$HOME/.config}/gpu-mode"
+state_file="$state_dir/state"
+mkdir -p "$state_dir"
+
+current() {
+    [ -f "$state_file" ] || { echo off; return; }
+    read -r mode <"$state_file" || mode=off
+    case "$mode" in on|off) echo "$mode" ;; *) echo off ;; esac
+}
+
+# What this deliberately does NOT do: push the variables into the environment
+# of things Hyprland launches itself.
+#
+# It would be nice -- it is the one launch path the two real ones miss. On this
+# Hyprland (0.56, Lua config) there is no runtime hook for it that does not
+# either touch the compositor's own already-initialised drivers or need a
+# restart to take effect:
+#   * `hyprctl setenv` does not exist in this version ("unknown request")
+#   * `hyprctl keyword env K,V` is refused outright: the config uses the new
+#     Lua parser, so it answers "keyword can't work with non-legacy parsers"
+#   * `hyprctl eval 'hl.env(K,V)'` does return ok, but that only affects
+#     processes started after a CONFIG (re)load, and there is no way to trigger
+#     a plain reload without briefly re-running the whole config
+# So the two paths that are actually verified -- the launcher's open.sh and
+# interactive terminals -- carry the whole policy, and they cover effectively
+# every app that gets started: everything in the menu, and everything typed in
+# a terminal. Apps started by a keybind that execs a command directly are the
+# only gap, and `gpu-run` is the answer for those.
+
+notify() {
+    command -v hyprctl >/dev/null 2>&1 || return 0
+    [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] || return 0
+    hyprctl notify -i "$2" "$1" >/dev/null 2>&1 || true
+}
+
+set_mode() {
+    printf '%s\n' "$1" >"$state_file"
+    if [ "$1" = on ]; then
+        notify "GPU mode: dGPU" critical-graphics
+        echo "GPU mode: ON  -- newly launched apps use the RTX 4070"
+        echo "  (GLX and Vulkan apps, and all CUDA. Native Wayland EGL apps"
+        echo "   still use the iGPU; there is no lever for those.)"
+    else
+        notify "GPU mode: iGPU" computer
+        echo "GPU mode: OFF -- newly launched apps use the Intel iGPU, and the"
+        echo "  4070 is free to sleep. CUDA apps still use the 4070."
+    fi
+}
+
+case "${1:-status}" in
+    on)    set_mode on ;;
+    off)   set_mode off ;;
+    toggle)
+        if [ "$(current)" = on ]; then set_mode off; else set_mode on; fi ;;
+    status)
+        if [ "$(current)" = on ]; then
+            echo "GPU mode: ON  (dGPU for newly launched apps)"
+        else
+            echo "GPU mode: OFF (iGPU for newly launched apps, 4070 may sleep)"
+        fi ;;
+    *)
+        echo "usage: gpu-mode [on|off|toggle|status]" >&2
+        exit 2 ;;
+esac

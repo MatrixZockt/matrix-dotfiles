@@ -2,6 +2,8 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import QtQuick.Layouts
+// ScrollBar, for the news list's own sidebar.
+import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
 import qs.services
@@ -18,7 +20,7 @@ import qs.modules.common.functions
  *     changes second to second, so it must not shove the list under it
  *     around while it ticks.
  *   * the NEWS fills every remaining pixel and SCROLLS. There are more
- *     red-folder events in a day than fit in a 460px card, and the answer
+ *     calendar events in a day than fit in a 460px card, and the answer
  *     to "too many" is a scroll, never a taller card -- the card's size is
  *     fixed by NowBarPanel and grows for nobody.
  *
@@ -34,9 +36,28 @@ Item {
     // hidden tab costs nothing.
     property bool active: false
 
-    onActiveChanged: root.syncClaim()
-    Component.onCompleted: root.syncClaim()
-    Component.onDestruction: TradingService.release(root)
+    // The card that owns this view, handed down by NowBarPanel. It is how the
+    // view PUBLISHES the scroller a two-finger vertical swipe should drive:
+    // the card's swipe overlay is stacked above every view and is the only
+    // thing that ever sees a wheel event over the card (Qt delivers to the
+    // item under the cursor and then walks its PARENT chain -- never a
+    // sibling), so a scroller inside a view is unreachable unless the view
+    // hands the overlay a target. Published only while this view is the one on
+    // screen: a hidden view that kept its claim would swallow the gesture.
+    property var cardHost: null
+
+    onActiveChanged: {
+        root.syncClaim();
+        root.publishScrollTarget();
+    }
+    Component.onCompleted: {
+        root.syncClaim();
+        root.publishScrollTarget();
+    }
+    Component.onDestruction: {
+        root.clearScrollTarget();
+        TradingService.release(root);
+    }
 
     function syncClaim() {
         if (root.active)
@@ -45,17 +66,72 @@ Item {
             TradingService.release(root);
     }
 
-    // Market semantics, kept out of the theme on purpose: these four mean
-    // the same thing on every terminal in the world.
+    function publishScrollTarget() {
+        if (!root.cardHost)
+            return;
+        root.cardHost.cardScrollTarget = root.active ? newsScroll : null;
+    }
+
+    function clearScrollTarget() {
+        if (root.cardHost && root.cardHost.cardScrollTarget === newsScroll)
+            root.cardHost.cardScrollTarget = null;
+    }
+
+    // Market semantics, kept out of the theme on purpose: these five mean
+    // the same thing on every terminal in the world (the last one is the
+    // calendar's grey -- a Holiday, or a note with no impact at all).
     readonly property color highColor: "#E5484D"
     readonly property color mediumColor: "#E6A23C"
     readonly property color lowColor: "#D4C04A"
+    readonly property color greyColor: "#9AA0A6"
     readonly property color upColor: "#46A758"
     readonly property color downColor: "#E5484D"
 
-    // The chart band. 210 of the ~384px the card has for content leaves the
-    // list about three rows before it scrolls, which is the intent.
-    readonly property real chartBandHeight: 210
+    /** Bucket -> folder colour. ONE function, so the toggles in the header,
+     *  the dot beside the label and the rail down the side of every row can
+     *  never disagree about what "orange" means. */
+    function colorForImpact(impact) {
+        if (impact === "high") return root.highColor;
+        if (impact === "medium") return root.mediumColor;
+        if (impact === "low") return root.lowColor;
+        return root.greyColor;
+    }
+
+    /** What the LIST is: the service's rows, kept by the folder filter
+     *  (whose state lives in the service, so a rebuilt card keeps it). */
+    readonly property var visibleEvents:
+        TradingService.events.filter(e => TradingService.folderShown(e.impact))
+
+    /** The folder names the filter has on, most important first -- what the
+     *  header's label is built from. */
+    readonly property var folderNames: {
+        const on = [];
+        if (TradingService.showHigh) on.push(Translation.tr("Red"));
+        if (TradingService.showMedium) on.push(Translation.tr("Orange"));
+        if (TradingService.showLow) on.push(Translation.tr("Yellow"));
+        if (TradingService.showGrey) on.push(Translation.tr("Grey"));
+        return on;
+    }
+
+    /** The most important folder still on -- the header dot's colour. */
+    readonly property color folderDotColor: TradingService.showHigh
+        ? root.highColor
+        : TradingService.showMedium ? root.mediumColor
+            : TradingService.showLow ? root.lowColor : root.greyColor
+
+    // The chart band, and the number is a trade: the chart is what you look at
+    // while nothing is happening, the news is what you opened the tab for.
+    //
+    // The card's total is fixed (NowBarPanel owns it) and the list gets exactly
+    // `346 - chartBandHeight`, measured rather than assumed, so this is the one
+    // knob that moves the split. At 210 the list was left ~136px -- two
+    // collapsed rows, with nowhere for an expanded card to open -- and the
+    // chart then spent ~36 of its own pixels on a volume strip nobody was
+    // reading. 195 puts THREE rows of news on screen (a collapsed row is 40px
+    // plus 6 of air) while making the candles TALLER than they were: the
+    // volume strip is gone (see showVolume below), and its 30-odd pixels and
+    // the 6px gap under them all go to the price panel.
+    readonly property real chartBandHeight: 195
 
     ColumnLayout {
         anchors.fill: parent
@@ -198,6 +274,13 @@ Item {
                     candles: TradingService.candles
                     rev: TradingService.rev
                     decimals: TradingService.decimals
+                    // No volume strip. The component keeps the option (the
+                    // music/sidebar surfaces may want it) but this band is
+                    // about the candles: `showVolume: false` hands the strip's
+                    // height and the gap under it straight back to the price
+                    // panel, so removing it is what makes the chart thicker
+                    // rather than merely emptier.
+                    showVolume: false
                 }
             }
         }
@@ -213,31 +296,91 @@ Item {
                 implicitWidth: 9
                 implicitHeight: 9
                 radius: 2
-                color: root.highColor
+                // The dot takes the colour of the most important folder still
+                // switched on, and goes with them when none is: a red square
+                // beside a list of orange rows would be the header lying about
+                // the list in the one place a glance lands.
+                visible: root.folderNames.length > 0
+                color: root.folderDotColor
             }
             StyledText {
                 Layout.alignment: Qt.AlignVCenter
-                text: Translation.tr("Red folder · today")
+                // The label names the folders the FILTER keeps -- "Red folder"
+                // alone while red is the only one on, which is exactly what
+                // this read before there was a choice, and the run of them once
+                // more are on. The header can never advertise a folder whose
+                // rows the list below it is hiding.
+                text: root.folderNames.length === 0
+                    ? Translation.tr("No folders selected · today")
+                    : root.folderNames.join(" + ") + " "
+                        + (root.folderNames.length > 1
+                            ? Translation.tr("folders · today")
+                            : Translation.tr("folder · today"))
                 font.pixelSize: Appearance.font.pixelSize.smaller
                 color: Appearance.colors.colOnLayer0
             }
             Item { Layout.fillWidth: true }
             StyledText {
                 Layout.alignment: Qt.AlignVCenter
-                // The count is the FILTERED list's length -- red folder and
-                // today -- so it can never advertise more than the list
-                // holds, and a list whose last refresh failed is labelled
-                // stale rather than presented as current.
-                text: TradingService.events.length + " " + Translation.tr("events")
+                // The count is the FILTERED list's length -- the folders and
+                // today -- so it can never advertise more than the list holds,
+                // and a list whose last refresh failed is labelled stale rather
+                // than presented as current.
+                text: root.visibleEvents.length + " " + Translation.tr("events")
                     + (TradingService.feedState === "error" && TradingService.events.length > 0
                         ? " · " + Translation.tr("stale") : "")
                 font.family: Appearance.font.family.monospace
                 font.pixelSize: Appearance.font.pixelSize.tiny
                 color: ColorUtils.transparentize(Appearance.colors.colOnLayer0, 0.5)
             }
+
+            // ── The folder toggles ─────────────────────────────────────
+            //
+            // The four buckets the list filters on, HORIZONTALLY at the
+            // trailing end of the header row -- one glance, one row, which is
+            // what a set of four switches wants. (They were briefly a rail
+            // down the side of the list; four items side by side is the
+            // shape people already read them in.)
+            //
+            // OFF draws the same folder glyph at a quarter strength instead of
+            // removing it: a folder that vanished when switched off could not
+            // be switched back on. The state is the SERVICE's
+            // (`TradingService.folders` / `toggleFolder`), so it survives this
+            // card being rebuilt -- and is readable from the outside through
+            // `ipc call trading folders`.
+            Row {
+                objectName: "folderToggles"
+                Layout.alignment: Qt.AlignVCenter
+                spacing: 2
+                Repeater {
+                    model: TradingService.folders
+                    delegate: Rectangle {
+                        id: folderToggle
+                        required property var modelData
+                        readonly property bool on: TradingService.folderShown(folderToggle.modelData.key)
+                        readonly property color tint: root.colorForImpact(folderToggle.modelData.key)
+                        property bool hovered: false
+                        width: 17
+                        height: 17
+                        radius: Appearance.rounding.verylarge
+                        color: folderToggle.hovered ? Appearance.colors.colLayer2Hover : "transparent"
+                        HoverHandler {
+                            cursorShape: Qt.PointingHandCursor
+                            onHoveredChanged: folderToggle.hovered = hovered
+                        }
+                        TapHandler { onTapped: TradingService.toggleFolder(folderToggle.modelData.key) }
+                        MaterialSymbol {
+                            anchors.centerIn: parent
+                            text: "folder"
+                            iconSize: 13
+                            color: ColorUtils.transparentize(folderToggle.tint, folderToggle.on ? 0 : 0.72)
+                        }
+                    }
+                }
+            }
         }
 
-        // ── The list: scrolls when there are more than fit ─────────────
+        // ── The list: scrolls when there are more than fit ─────────
         StyledFlickable {
             id: newsScroll
             Layout.fillWidth: true
@@ -246,6 +389,29 @@ Item {
             contentWidth: width
             contentHeight: newsColumn.implicitHeight
             boundsBehavior: Flickable.StopAtBounds
+
+            // ── The sidebar: the thin strip this list scrolls by ───────
+            //
+            // Hairline, and only there when there is somewhere to go: 2px of
+            // ink in a 5px lane while the news overflows, and NOTHING AT ALL
+            // when the day's rows fit -- a full-height bar beside three rows
+            // with nothing below them is a lane of decoration, and the 5px it
+            // reserves is 5px of the news. `visible` is the switch rather than
+            // the policy, because the house bar's own rule is "AlwaysOn keeps
+            // the thumb up whatever the content does" and AsNeeded would hide
+            // it during a gesture too (the pad does not hover).
+            //
+            // It is a SIGNPOST, not the only thing that can be swiped: a
+            // two-finger vertical swipe anywhere over this list reaches the
+            // list's own wheel handler (the card's swipe overlay routes it
+            // here -- see `cardScrollTarget` in NowBarPanel.qml), so scrolling
+            // never depends on hitting a 5px strip.
+            ScrollBar.vertical: StyledScrollBar {
+                policy: ScrollBar.AlwaysOn
+                visible: newsScroll.contentHeight > newsScroll.height + 0.5
+                implicitWidth: 5
+                handleWidth: 2
+            }
 
             Column {
                 id: newsColumn
@@ -258,20 +424,28 @@ Item {
                 // words -- the tab never fills a gap with sample rows, so an
                 // empty calendar here is a fact and not a failure to load.
                 StyledText {
-                    visible: TradingService.events.length === 0
+                    visible: root.visibleEvents.length === 0
                     width: newsColumn.width
-                    text: TradingService.feedState === "ok"
-                        ? Translation.tr("No red-folder events on the calendar for today.")
-                        : TradingService.feedState === "error"
-                            ? Translation.tr("Calendar feed unreachable — nothing is shown rather than guessed.")
-                            : Translation.tr("Fetching today's red-folder events…")
+                    // Four different nothings, and they are not interchangeable:
+                    // the feed is unreachable, the feed answered and today is
+                    // quiet, the answer is still coming, or the folders are
+                    // switched off and the rows are there behind them. That
+                    // last one is NEW here and it is the one that would read as
+                    // a failure if it borrowed the sentence below it.
+                    text: TradingService.feedState === "error"
+                        ? Translation.tr("Calendar feed unreachable — nothing is shown rather than guessed.")
+                        : TradingService.events.length > 0
+                            ? Translation.tr("No events in the folders that are switched on.")
+                            : TradingService.feedState === "ok"
+                                ? Translation.tr("No events on the calendar for today.")
+                                : Translation.tr("Fetching today's events…")
                     font.pixelSize: Appearance.font.pixelSize.smaller
                     color: ColorUtils.transparentize(Appearance.colors.colOnLayer1, 0.35)
                     wrapMode: Text.WordWrap
                 }
 
                 Repeater {
-                    model: TradingService.events
+                    model: root.visibleEvents
 
                     Rectangle {
                         id: eventCard
@@ -284,10 +458,10 @@ Item {
                         // "live" -- which is how this card could disagree with
                         // the clock in the bar above it.
                         readonly property var st: TradingService.eventStates[eventCard.ev.id] ?? { state: "released", countdown: null }
-                        readonly property bool high: eventCard.ev.min === "high"
-                        readonly property color railColor: eventCard.high
-                            ? root.highColor
-                            : (eventCard.ev.min === "medium" ? root.mediumColor : root.lowColor)
+                        // The row's folder colour, from the bucket the service
+                        // put on the event -- the same mapping the header's
+                        // toggles use, so one colour cannot mean two things.
+                        readonly property color railColor: root.colorForImpact(eventCard.ev.impact)
                         readonly property bool printed: eventCard.ev.actual !== "—" && eventCard.ev.actual !== undefined
                         // The release IMMEDIATELY BEFORE this one in the
                         // list. Only the second card of the day has one, so
@@ -399,8 +573,16 @@ Item {
                                         font.family: Appearance.font.family.monospace
                                         font.pixelSize: Appearance.font.pixelSize.tiny
                                         font.weight: Font.DemiBold
-                                        color: eventCard.ev.tone === "down" ? root.downColor
-                                            : eventCard.ev.tone === "up" ? root.upColor
+                                        // The direction is `bias`, which is the
+                                        // field the service actually sets. This
+                                        // read `ev.tone`, which no row has ever
+                                        // carried, so the printed figure was
+                                        // always the neutral colour and only
+                                        // the arrow beside it said which way the
+                                        // number went -- two halves of one
+                                        // reading disagreeing, one of them mute.
+                                        color: eventCard.ev.bias === "down" ? root.downColor
+                                            : eventCard.ev.bias === "up" ? root.upColor
                                             : Appearance.colors.colOnLayer1
                                     }
                                     // The read on that number: actual against
@@ -608,6 +790,7 @@ Item {
                 }
             }
         }
+
     }
 
     // ── IPC: `qs -c ii ipc call tradingTab detail` ───────────────────────
@@ -618,6 +801,72 @@ Item {
     // objectName because an id inside a delegate is not reachable from here.
     IpcHandler {
         target: "tradingTab"
+
+        // Where the news list sits and how far down it is scrolled.
+        //
+        // A two-finger vertical gesture reaches this list through the card's
+        // swipe overlay, not through the list itself, and when that routing
+        // fails there is no error anywhere: the card looks right and the list
+        // simply sits still. So the position and the rectangle are read out
+        // (in the panel window's own coordinates, which is also how the
+        // `scroll` is aimed at from a test), together with the scroller this
+        // view has published upward -- the number that decides whether the
+        // gesture had anywhere to go.
+        function scroll(): string {
+            const at = newsScroll.mapToItem(null, 0, 0);
+            const host = root.cardHost
+                ? (root.cardHost.cardScrollTarget === newsScroll
+                    ? "this list"
+                    : (root.cardHost.cardScrollTarget ? "another scroller" : "null"))
+                : "no host";
+            const bar = newsScroll.ScrollBar.vertical;
+            return `contentY=${newsScroll.contentY.toFixed(1)}`
+                + ` max=${newsScroll.maxScrollY().toFixed(1)}`
+                + ` (content ${newsScroll.contentHeight.toFixed(1)} in ${newsScroll.height.toFixed(1)})`
+                + ` rect=${at.x.toFixed(0)},${at.y.toFixed(0)}`
+                + ` ${newsScroll.width.toFixed(0)}x${newsScroll.height.toFixed(0)}`
+                + ` bar=${bar ? (bar.visible ? "shown " + bar.implicitWidth.toFixed(0) + "px" : "hidden") : "?"}`
+                + ` published=${host}`;
+        }
+
+        // The folder toggles' own geometry. Four switches are meant to be ONE
+        // ROW -- same y, spread in x -- and this is the reading that says so
+        // without a pixel being eyeballed: a rail that crept back would report
+        // itself here as one COLUMN (same x, spread in y) instead.
+        function folders(): string {
+            const rows = [];
+            const walk = item => {
+                if (!item)
+                    return;
+                if (item.objectName === "folderToggles") {
+                    rows.push(item);
+                    return;
+                }
+                const kids = item.children ?? [];
+                for (let i = 0; i < kids.length; i++)
+                    walk(kids[i]);
+            };
+            walk(root);
+            if (rows.length === 0)
+                return "no folder toggle row on screen";
+            const chips = rows[0].children.filter(c => c.width > 0 && c.height > 0)
+                .map(c => {
+                    const at = c.mapToItem(null, 0, 0);
+                    return { x: at.x, y: at.y, w: c.width };
+                });
+            if (chips.length === 0)
+                return "the folder row is on screen but holds no toggles";
+            const xs = chips.map(c => c.x);
+            const ys = chips.map(c => c.y);
+            const lines = new Set(chips.map(c => Math.round(c.y))).size;
+            const columns = new Set(chips.map(c => Math.round(c.x))).size;
+            return `${chips.length} folder(s), ${lines} row(s), ${columns} column(s)`
+                + ` x=${Math.min(...xs).toFixed(0)}..${(Math.max(...xs) + chips[0].w).toFixed(0)}`
+                + ` y=${ys[0].toFixed(0)}`
+                + ` => ${lines === 1 && columns === chips.length && columns > 1
+                    ? "HORIZONTAL row" : "NOT a single row"}`;
+        }
+
         function detail(): string {
             const rows = [];
             const walk = item => {

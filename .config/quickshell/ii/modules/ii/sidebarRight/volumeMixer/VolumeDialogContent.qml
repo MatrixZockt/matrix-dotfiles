@@ -90,8 +90,8 @@ ColumnLayout {
             MaterialSymbol {
                 anchors.centerIn: parent
                 text: systemRow.sink?.audio?.muted ? "volume_off"
-                    : (systemRow.sink?.audio?.volume ?? 0) <= 0.001 ? "volume_mute"
-                    : (systemRow.sink?.audio?.volume ?? 0) < 0.5 ? "volume_down"
+                    : Audio.currentVolume() <= 0.001 ? "volume_mute"
+                    : Audio.currentVolume() < 0.5 ? "volume_down"
                     : "volume_up"
                 iconSize: 22
                 color: Appearance.colors.colOnLayer1
@@ -116,11 +116,11 @@ ColumnLayout {
 
             StyledSlider {
                 id: systemSlider
-                value: systemRow.sink?.audio?.volume ?? 0
-                onMoved: {
-                    if (systemRow.sink?.audio)
-                        systemRow.sink.audio.volume = value;
-                }
+                // The SYSTEM row is on the shell's scale (100% = the loud end,
+                // `Audio.hardMaxValue`); an app's row below is on PipeWire's own
+                // (100% = its unity gain), which is what a stream's node means.
+                value: Audio.currentVolume()
+                onMoved: Audio.setSinkVolume(value)
                 configuration: StyledSlider.Configuration.S
             }
         }

@@ -1,0 +1,24 @@
+[Unit]
+Description=Razer Command Center - re-apply saved settings at login
+# The per-key lighting push talks to the openrazer daemon over its DBus
+# interface, and that daemon is its own user service. Without this
+# ordering the restore can run first, fail against a daemon that is not
+# listening yet, and leave the keyboard on the firmware default for the
+# whole session. --restore-all also retries internally, so this ordering
+# is belt and braces rather than the only defence.
+After=openrazer-daemon.service
+# The panel backlight is a device the graphical session also touches, so
+# do not race the compositor either.
+After=graphical-session.target
+Wants=openrazer-daemon.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/razer-command-center --restore-all
+# A failure here must not block the session; the graphical app re-applies
+# the same settings on its own startup a few seconds later.
+SuccessExitStatus=0 1
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,457 @@
+#!/usr/bin/env bash
+# power-autoswitch -- make the power profile and the CPU package cap follow the
+# wall socket, and make the panel refresh follow the profile.
+#
+# WHY THIS EXISTS
+#   The machine was pinned at PL1 20 W / PL2 30 W with turbo OFF all the time,
+#   on AC and on battery alike. Measured 2026-10-10: switching the Power Mode
+#   between power-saver / balanced / performance changed EPP only -- turbo
+#   stayed off and the RAPL limits stayed 20/30 W in all three, because the
+#   Razer Command Center's fan mode was holding them. So "just pick
+#   Performance" could not work, and the machine idled at ~0.8-2.2 GHz on a
+#   chip whose vendor limits are 120/160 W.
+#
+# WHAT IT DOES
+#   On a change of AC state it selects the power profile the owner asked for:
+#       AC      -> balanced
+#       battery -> power-saver
+#   and then, on EVERY profile change (whoever caused it -- this script, the
+#   shell's quick-switcher, the app, power-failsafe), it applies the two
+#   things a profile ought to mean but did not:
+#
+#     1. THE CPU PACKAGE CAP + TURBO, by choosing the matching FAN MODE in the
+#        Razer Command Center's own config. This is deliberate and it is the
+#        whole trick: the app re-asserts the cap for its saved fan mode on
+#        every tick (pwr_enforce()), so writing RAPL directly would be undone
+#        within seconds. Writing the fan mode means the app AGREES with us
+#        instead of fighting us, and the app stays the single source of truth
+#        for what each mode means. There is no second policy table here.
+#
+#            profile       fan mode    cap            turbo
+#            power-saver   battery     20 /  30 W     off
+#            balanced      quiet       35 /  45 W     on
+#            performance   noisy       vendor (120/160)
+#
+#     2. THE PANEL REFRESH. This panel's EDID advertises a 48-240 Hz range but
+#        DRM exposes exactly one mode (2560x1600@240), so Hyprland's monitor
+#        rule can never reach a lower rate on its own. Verified 2026-10-10
+#        that `hyprctl eval` with hl.monitor() DOES accept a 60 Hz mode, so
+#        power-saver drops the panel to 60 Hz and the others restore the
+#        panel's preferred (240 Hz). `hyprctl keyword` does not work on this
+#        build -- it is a non-legacy (Lua) parser and answers "keyword can't
+#        work with non-legacy parsers. Use eval."
+#
+# WHY IT DOES NOT FLAP
+#   * The profile is only written on an AC transition, never every tick, so a
+#     profile picked by hand stays picked until the wall socket actually
+#     changes. A manual "performance" is not stomped by a timer.
+#   * The refresh is re-asserted only when it has DRIFTED from what the
+#     profile asks for. `hyprctl reload` (which apply-display.sh runs) resets
+#     the output to the config's rule and would otherwise silently undo the
+#     60 Hz for the rest of the session.
+#   * Applying a cap that is already in force is a no-op: the values are read
+#     from sysfs first, and nothing is spawned when they already match.
+#
+# Headless and observable:
+#   power-autoswitch --status     one-shot report, no changes
+#   power-autoswitch --dry-run    log the decisions, change nothing
+#   power-autoswitch --converge   apply the current profile's cap now, exit
+set -uo pipefail
+
+HOME_DIR="${HOME:-/home/user}"
+BAT_PATH="${BAT_PATH:-/sys/class/power_supply/BAT0}"
+
+RAPL="/sys/class/powercap/intel-rapl:0"
+NO_TURBO="/sys/devices/system/cpu/intel_pstate/no_turbo"
+
+ELEVATE="/usr/local/sbin/razer-cc-elevate"
+II_CONFIG="$HOME_DIR/.config/illogical-impulse/config.json"
+MONITOR="${MONITOR:-eDP-1}"
+PANEL_MODE="${PANEL_MODE:-2560x1600}"
+DISPLAY_SCALE_FILE="$HOME_DIR/.cache/display/scale"
+
+# Validated, not merely defaulted: ${VAR:-fallback} trusts any inherited
+# value, and this environment exports a stray PORT=0, so a polluted
+# environment is demonstrably a real hazard here.
+pick_int() {  # value, default, min, max
+    local v="${1:-}" d="$2" lo="$3" hi="$4"
+    case "$v" in
+        ''|*[!0-9]*) echo "$d" ;;
+        *) if [ "$v" -ge "$lo" ] && [ "$v" -le "$hi" ]; then echo "$v"; else echo "$d"; fi ;;
+    esac
+}
+
+INTERVAL="$(pick_int "${INTERVAL:-}" 5 1 300)"           # AC sample period
+REFRESH_CHECK="$(pick_int "${REFRESH_CHECK:-30}" 30 5 3600)"  # refresh drift check
+# Note the ${VAR:-} on every reference: with `set -u`, a bare $AC_PATH that was
+# never set is a hard error that kills the daemon, which is exactly how this
+# first shipped. The default has to be applied through the :- form.
+case "${MONITOR:-}" in ''|*[!A-Za-z0-9_.-]*) MONITOR="eDP-1" ;; esac
+case "${AC_PATH:-}" in ''|*[!A-Za-z0-9_./-]*) AC_PATH="/sys/class/power_supply/AC0/online" ;; esac
+case "${BAT_PATH:-}" in ''|*[!A-Za-z0-9_./-]*) BAT_PATH="/sys/class/power_supply/BAT0" ;; esac
+
+# profile -> fan mode. The fan modes are the app's own; see FAN_POWER_POLICY
+# in razer-command-center. "noisy" and "default" both mean "vendor limits".
+declare -A FANMODE_FOR=(
+    ["power-saver"]="battery"
+    ["balanced"]="quiet"
+    ["performance"]="noisy"
+)
+
+# profile -> panel refresh. Only power-saver drops the panel; the others ask
+# for the panel's preferred mode, which is the 240 Hz the EDID advertises.
+declare -A REFRESH_FOR=(
+    ["power-saver"]="60"
+    ["balanced"]="preferred"
+    ["performance"]="preferred"
+)
+
+# The machine's own package limits, for the modes that mean "vendor limits".
+#
+# They come from battery.powerDefaults once the Command Center has captured
+# them; these are the fallback for when it never managed to, which is the
+# normal case on this machine. Both this daemon and the app are default.target
+# user services, and whichever applies a cap first destroys the only record of
+# the vendor's numbers (RAPL), so the app's capture -- which refuses to guess --
+# usually finds one of our own caps and gives up. With nothing to read here,
+# this function used to log "no captured vendor limits - leaving the CPU cap
+# alone" AND skip the fan mode write with it, so picking Performance left the
+# machine on the previous mode's 20/30 W with turbo off: the mode moved the
+# CPU in no way at all. Measured 2026-10-12.
+#
+# 120/160 W is the pair razer-command-center documents for this machine's
+# vendor limits (the same table records 92.3 C at them with the fan ramped,
+# against 65.4 C at 35/45 W), and the app now persists the same numbers, so a
+# correction only ever has to be made in one place: battery.powerDefaults.
+VENDOR_PL1=120
+VENDOR_PL2=160
+VENDOR_TURBO=1
+
+DRY_RUN=0
+STATUS_ONLY=0
+CONVERGE_NOW=0
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run)   DRY_RUN=1 ;;
+        --status)    STATUS_ONLY=1 ;;
+        --converge)  CONVERGE_NOW=1 ;;
+        -h|--help)   sed -n '2,60p' "$0"; exit 0 ;;
+        *)           echo "unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+
+log() { printf '[power-autoswitch] %s\n' "$*" >&2; }
+
+readfile() { cat "$1" 2>/dev/null; }
+
+# ── what the hardware currently says ────────────────────────────────────────
+# Echoes 1/0 rather than returning a status: the callers compare the value, and
+# `[ "$(fn)" = 1 ]` around a status-only function is silently always false.
+ac_now() { [ "$(readfile "$AC_PATH")" = "1" ] && echo 1 || echo 0; }
+
+battery_state() {
+    printf '%s %s%%' "$(readfile "$BAT_PATH/status")" "$(readfile "$BAT_PATH/capacity")"
+}
+
+ppd_profile() {
+    powerprofilesctl get 2>/dev/null || echo balanced
+}
+
+live_cap() {
+    # (pl1, pl2, turbo) as the hardware holds them right now.
+    local p1 p2 nt
+    p1="$(readfile "$RAPL/constraint_0_power_limit_uw")"
+    p2="$(readfile "$RAPL/constraint_1_power_limit_uw")"
+    nt="$(readfile "$NO_TURBO")"
+    [ -n "$p1" ] && [ -n "$p2" ] || { echo "? ? ?"; return; }
+    printf '%d %d %s' "$((p1 / 1000000))" "$((p2 / 1000000))" \
+        "$([ "$nt" = "1" ] && echo off || echo on)"
+}
+
+# ── the app's own config, which is where the fan mode lives ─────────────────
+ii_read_fanmode() {
+    python3 - "$II_CONFIG" <<'PY' 2>/dev/null
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d.get("battery", {}).get("fanMode", "default"))
+except Exception:
+    print("default")
+PY
+}
+
+ii_read_power_defaults() {
+    # The vendor limits the app captured on its first run: [pl1, pl2, turbo].
+    python3 - "$II_CONFIG" <<'PY' 2>/dev/null
+import json, sys
+try:
+    v = json.load(open(sys.argv[1])).get("battery", {}).get("powerDefaults")
+    if isinstance(v, (list, tuple)) and len(v) == 3:
+        print(int(v[0]), int(v[1]), int(v[2]))
+except Exception:
+    pass
+PY
+}
+
+ii_write_fanmode() {
+    # Read-modify-write of one key, atomically, so a crash cannot leave the
+    # app's config truncated. The app writes this file too and does not share
+    # a lock with us -- which is why this is only called on an AC transition
+    # (a handful of times a day) rather than on every tick, and why the value
+    # is re-read immediately before the write.
+    local want="$1" tmp
+    tmp="$(mktemp "${II_CONFIG}.XXXXXX")" || return 1
+    python3 - "$II_CONFIG" "$tmp" "$want" <<'PY'
+import json, sys
+src, dst, want = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(src) as f:
+        d = json.load(f)
+except Exception:
+    d = {}
+d.setdefault("battery", {})["fanMode"] = want
+with open(dst, "w") as f:
+    json.dump(d, f, indent=2, sort_keys=True)
+PY
+    if [ $? -ne 0 ]; then rm -f "$tmp"; return 1; fi
+    # Preserve the original mode; mv keeps it atomic w.r.t. readers.
+    chmod --reference="$II_CONFIG" "$tmp" 2>/dev/null || chmod 600 "$tmp"
+    mv -f "$tmp" "$II_CONFIG"
+}
+
+# ── applying ────────────────────────────────────────────────────────────────
+apply_cap() {
+    # $1/$2/$3 = pl1, pl2, turbo(0|1). No-op when already in force.
+    local pl1="$1" pl2="$2" turbo="$3" cur
+    cur="$(live_cap)"
+    if [ "$cur" = "$pl1 $pl2 $([ "$turbo" = 1 ] && echo on || echo off)" ]; then
+        log "cap already ${pl1}/${pl2} W turbo=$([ "$turbo" = 1 ] && echo on || echo off)"
+        return 0
+    fi
+    if [ "$DRY_RUN" = 1 ]; then
+        log "DRY-RUN would set cap ${pl1}/${pl2} W turbo=$turbo (currently: $cur)"
+        return 0
+    fi
+    local out
+    if ! out="$(pkexec "$ELEVATE" pwrlimit "$pl1" "$pl2" "$turbo" 2>&1)"; then
+        log "pwrlimit failed: ${out:-no output} (cap left at: $(live_cap))"
+        return 1
+    fi
+    log "cap set ${pl1}/${pl2} W turbo=$([ "$turbo" = 1 ] && echo on || echo off) (was $cur)"
+    local after
+    after="$(live_cap)"
+    [ "$after" = "$pl1 $pl2 $([ "$turbo" = 1 ] && echo on || echo off)" ] \
+        && return 0
+    log "WARNING cap did not stick: wanted ${pl1}/${pl2}, hardware reads $after"
+    return 1
+}
+
+hypr_signature() {
+    # A systemd user service is started from a stale environment, so
+    # HYPRLAND_INSTANCE_SIGNATURE is usually absent here. Discover the live
+    # socket instead of trusting the variable.
+    if [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] \
+        && [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock" ]; then
+        return 0
+    fi
+    local d
+    for d in "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"/hypr/*; do
+        [ -S "$d/.socket.sock" ] || continue
+        export HYPRLAND_INSTANCE_SIGNATURE="$(basename "$d")"
+        return 0
+    done
+    return 1
+}
+
+panel_refresh() {
+    hyprctl monitors 2>/dev/null \
+        | awk -v m="Monitor $MONITOR" '$0 ~ m {f=1} f && /@/ {print $1; exit}'
+}
+
+apply_refresh() {
+    # $1 = "60" or "preferred"
+    local want="$1" cur scale mode
+    hypr_signature || { log "no live Hyprland socket - refresh left alone"; return 1; }
+    cur="$(panel_refresh)"
+    local cur_hz="${cur##*@}"
+    scale="$(readfile "$DISPLAY_SCALE_FILE")"
+    [ -n "$scale" ] || scale="1.5"
+
+    if [ "$want" = "preferred" ]; then
+        case "$cur_hz" in
+            240*|preferred|"") log "refresh already at panel preferred ($cur)"; return 0 ;;
+        esac
+        mode="preferred"
+    else
+        case "$cur_hz" in
+            "${want}.0"*|"${want}.00"*) log "refresh already ${want} Hz ($cur)"; return 0 ;;
+        esac
+        mode="${PANEL_MODE}@${want}"
+    fi
+
+    if [ "$DRY_RUN" = 1 ]; then
+        log "DRY-RUN would set refresh to $mode (currently: $cur)"
+        return 0
+    fi
+    local out
+    out="$(hyprctl eval "hl.monitor({ output=\"$MONITOR\", mode=\"$mode\", position=\"0x0\", scale=$scale })" 2>&1)"
+    if [ "${out:-}" != "ok" ]; then
+        log "refresh eval refused: ${out:-no output} (left at $cur)"
+        return 1
+    fi
+    sleep 1
+    local after
+    after="$(panel_refresh)"
+    log "refresh $cur -> $after (asked for $mode)"
+    case "$after" in
+        *"${want}."*|*"${want}.0"*) return 0 ;;
+    esac
+    if [ "$want" = "preferred" ] && [ "${after##*@}" = "240.00000" ]; then
+        return 0
+    fi
+    log "WARNING refresh did not take (asked $mode, reads $after)"
+    return 1
+}
+
+set_profile() {
+    local want="$1" cur
+    cur="$(ppd_profile)"
+    if [ "$cur" = "$want" ]; then
+        log "profile already $want"
+        return 0
+    fi
+    if [ "$DRY_RUN" = 1 ]; then
+        log "DRY-RUN would set profile $want (currently $cur)"
+        return 0
+    fi
+    if powerprofilesctl set "$want" 2>/dev/null; then
+        log "profile $cur -> $want"
+    else
+        log "powerprofilesctl set $want failed (left at $cur)"
+        return 1
+    fi
+}
+
+# Apply everything a profile implies. Called on every profile change.
+converge() {
+    local profile mode pl1 pl2 turbo defaults
+    profile="$(ppd_profile)"
+    mode="${FANMODE_FOR[$profile]:-quiet}"
+
+    case "$mode" in
+        battery) pl1=20; pl2=30; turbo=0 ;;
+        quiet)   pl1=35; pl2=45; turbo=1 ;;
+        *)       defaults="$(ii_read_power_defaults)"
+                 if [ -n "$defaults" ]; then
+                     set -- $defaults; pl1="$1"; pl2="$2"; turbo="$3"
+                 else
+                     pl1="$VENDOR_PL1"; pl2="$VENDOR_PL2"; turbo="$VENDOR_TURBO"
+                     log "vendor limits never captured - applying the documented ones"
+                 fi ;;
+    esac
+
+    log "profile=$profile -> fan mode=$mode cap=$pl1/$pl2 W turbo=$([ "$turbo" = 1 ] && echo on || echo off)"
+
+    # The fan mode first, and unconditionally. It is the field the app
+    # re-asserts the cap FROM, so it has to be right even when the cap itself
+    # cannot be computed -- the old code wrapped this write in the same
+    # `[ -n "$pl1" ]` guard as the cap, which is how a profile change could
+    # leave the machine on the previous mode with nothing recorded but a line
+    # about vendor limits.
+    local cur_mode
+    cur_mode="$(ii_read_fanmode)"
+    if [ "$cur_mode" != "$mode" ]; then
+        if [ "$DRY_RUN" = 1 ]; then
+            log "DRY-RUN would set fanMode $cur_mode -> $mode"
+        elif ii_write_fanmode "$mode"; then
+            log "fanMode $cur_mode -> $mode (the app now re-asserts this cap)"
+        else
+            log "could not write fanMode; applying the cap anyway"
+        fi
+    fi
+
+    apply_cap "$pl1" "$pl2" "$turbo"
+    apply_refresh "${REFRESH_FOR[$profile]:-preferred}"
+}
+
+# ── one-shot report ─────────────────────────────────────────────────────────
+if [ "$STATUS_ONLY" = 1 ]; then
+    profile="$(ppd_profile)"
+    [ "$(ac_now)" = 1 ] && want_profile=balanced || want_profile=power-saver
+    echo "AC                : $(ac_now) ($(readfile "$AC_PATH"))  (1 = plugged in)"
+    echo "battery           : $(battery_state)"
+    echo "power profile     : $profile   (auto rule on this AC state: $want_profile)"
+    echo "fan mode (config) : $(ii_read_fanmode)"
+    echo "vendor defaults   : $(ii_read_power_defaults)"
+    echo "CPU cap (live)    : $(live_cap)"
+    echo "panel             : $(panel_refresh)"
+    echo "expected refresh  : ${REFRESH_FOR[$profile]:-preferred}"
+    echo "expected fan mode : ${FANMODE_FOR[$profile]:-quiet}"
+    exit 0
+fi
+
+# ── converge now, and exit ──────────────────────────────────────────────────
+# WHY THIS EXISTS. The profile is noticed on the tick below, so a mode switch
+# could sit on the previous cap for up to INTERVAL seconds and then wait for
+# pkexec on top of it -- measured 2026-10-12 as up to 5.3 s from the switch to
+# the CPU holding the new cap. That delay is invisible on the desktop but not
+# in the mode notice, whose rows are hardware measurements taken over the few
+# seconds after a switch: the card measured, read the PREVIOUS mode's numbers,
+# and went away before they changed -- "turbo off in Performance".
+#
+# So the shell, which knows the switch is happening NOW, runs this and the cap
+# lands in about a second. Same converge() the loop would have run a moment
+# later: one policy table, one writer, no second copy of the rules in the UI.
+# The loop stays exactly as it is, because nothing else tells this daemon that
+# the profile moved (the app, power-failsafe and a hand-run
+# `powerprofilesctl set` all go through the poll, and the AC rule needs the
+# poll anyway).
+if [ "$CONVERGE_NOW" = 1 ]; then
+    converge
+    exit $?
+fi
+
+# ── daemon loop ─────────────────────────────────────────────────────────────
+last_profile="$(ppd_profile)"
+last_ac="$(ac_now)"
+log "start: profile=$last_profile ac=$last_ac battery=$(battery_state)"
+
+# Align the caps and the refresh with whatever profile we start under. Do NOT
+# force the profile itself here beyond the AC rule: an explicit choice made
+# before login is the owner's.
+if [ "$last_ac" = 1 ] && [ "$last_profile" = "power-saver" ]; then
+    set_profile balanced && last_profile="$(ppd_profile)"
+elif [ "$last_ac" = 0 ] && [ "$last_profile" != "power-saver" ]; then
+    set_profile power-saver && last_profile="$(ppd_profile)"
+fi
+converge
+
+tick=0
+while :; do
+    sleep "$INTERVAL"
+    tick=$((tick + 1))
+
+    ac="$(ac_now)"
+    if [ "$ac" != "$last_ac" ]; then
+        log "AC changed: $([ "$last_ac" = 1 ] && echo 'on AC -> unplugged' || echo 'on battery -> plugged in')"
+        last_ac="$ac"
+        if [ "$ac" = 1 ]; then set_profile balanced; else set_profile power-saver; fi
+        last_profile="$(ppd_profile)"
+        converge
+        continue
+    fi
+
+    profile="$(ppd_profile)"
+    if [ "$profile" != "$last_profile" ]; then
+        log "profile changed externally: $last_profile -> $profile"
+        last_profile="$profile"
+        converge
+        continue
+    fi
+
+    # Drift check: `hyprctl reload` resets the output to the config's rule,
+    # which silently undoes a 60 Hz panel for the rest of the session.
+    if [ $((tick % (REFRESH_CHECK / INTERVAL > 0 ? REFRESH_CHECK / INTERVAL : 1))) -eq 0 ]; then
+        apply_refresh "${REFRESH_FOR[$profile]:-preferred}" >/dev/null 2>&1 || true
+    fi
+done

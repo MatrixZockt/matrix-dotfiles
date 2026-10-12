@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+# power-failsafe -- anti-lag watchdog for this laptop.
+#
+# WHAT IT WATCHES
+#   /proc/pressure/{cpu,memory,io} -- the kernel's own PSI counters, which
+#   measure "tasks that wanted to run and could not" (cpu/mem) and "tasks
+#   stuck waiting on the disk" (io). This is the machine reporting its own
+#   pain, not a guess from load average.
+#
+# WHAT IT DOES WHEN THE MACHINE HURTS
+#   1. powerprofilesctl set performance   (CPU side: governor, EPP, limits)
+#   2. systemctl start nvidia-powerd       (GPU side: Dynamic Boost raises
+#      the dGPU ceiling 55 -> 115 W, measured +44% prompt processing)
+#   3. notify-send                         (a real notification)
+#   4. qs -c ii ipc call failsafe alert …  (bar blink + corner card)
+#
+# WHY IT CANNOT FIRE ON A BURST -- the fail-safe ladder, all of which must
+# hold before it touches anything:
+#
+#   * The pressure must exceed the threshold for CONSECUTIVE samples
+#     (default 3 x 5 s = 15 s of sustained stall), not one bad 10 s window.
+#     nvidia-smi, browser spells, a compiler warming up -- all of those
+#     spike one sample and are forgotten.
+#   * A minimum COOLDOWN between actions, so a flapping machine cannot get
+#     profile flips every 15 s.
+#   * Once switched, it does not switch back. Returning to power-saver is
+#     the user's call; the daemon never downgrades on its own.
+#   * Every decision is logged to the journal (systemd user service), so
+#     "why did it fire" is always answerable.
+#
+set -uo pipefail
+
+THRESHOLD=${THRESHOLD:-12}      # PSI avg10 "some" percent that counts as pain
+CONSECUTIVE=${CONSECUTIVE:-3}   # samples it must persist (x INTERVAL)
+INTERVAL=${INTERVAL:-5}         # seconds between samples
+COOLDOWN=${COOLDOWN:-300}       # min seconds between actions
+RESTORE_QUIET=${RESTORE_QUIET:-90}  # calm seconds before backing out of performance
+
+# Set the moment WE raise performance; cleared the moment WE stand down.
+# Only our own engagement auto-restores -- a profile the user picked by hand
+# is theirs until they change it.
+engaged=0
+engaged_at=0
+quiet_since=0
+
+count=0
+last_action=0
+
+log() { printf '[power-failsafe] %s\n' "$*" >&2; }
+
+notify() {
+    # $1 = -i <icon>, $2 = title, $3 = body (getopt-free: the only caller is
+    # this script, so a tiny shift-based parse is enough).
+    command -v notify-send >/dev/null 2>&1 || return 0
+    local icon="applications-engineering"
+    if [ "$1" = "-i" ]; then icon=$2; shift 2; fi
+    notify-send -u critical -a "power-failsafe" -i "$icon" "$1" "$2" 2>/dev/null || true
+}
+
+blink() {
+    # $1 = flash kind ("fire" performance engaged, "green" stood down,
+    # "error" generic trouble), $2 = the sentence. Best-effort: the shell may
+    # be reloading or gone; never let this fail the action itself. Direct IPC
+    # only -- routing through shell.sh would risk launching a whole second
+    # shell just to show a blink.
+    #
+    # The pgrep guard is not paranoia: a `qs -c ii ipc call` client that
+    # cannot immediately find the instance can fall back to SPAWNING the
+    # config -- and a second full shell instance segfaults on this build
+    # (2026-10-01: an orphaned backgrounded IPC client did exactly that and
+    # popped the crash dialog). The shell check filters zombies: a Z-state
+    # process still matches a plain pgrep. The shell must be alive AND not a
+    # zombie for the blink to be worth attempting.
+    local alive=0 pid stat
+    for pid in $(pgrep -x quickshell); do
+        stat=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')
+        # Zombies start with Z; anything else (S, R, S<, SNl, ...) is live.
+        [ -n "$stat" ] && [ "${stat:0:1}" != "Z" ] && alive=1
+    done
+    [ "$alive" = "1" ] || { log "shell not alive — skipping blink"; return 0; }
+    qs -c ii ipc call failsafe flash "$1" >/dev/null 2>&1 || true
+    return 0
+}
+
+# PSI "some" avg10, as a whole percent. File format is
+#   some avg10=0.00 avg60=0.00 avg300=0.00 total=...
+#   full avg10=...
+# Split on [= ] the pair "avg10=0.00" becomes TWO fields ("avg10", "0.00"),
+# so the loop matches the literal token and prints its successor -- matching
+# /^avg10=/ matches nothing, and the whole detector reads 0 forever. The line
+# selector is the literal "some" ($1): each /proc/pressure/<res> file only
+# describes its own resource.
+psi_some() {
+    awk -F'[= ]' '$1 == "some" { for (i = 1; i <= NF; i++) if ($i == "avg10") { print $(i+1); exit } }' "/proc/pressure/$1" 2>/dev/null | cut -d. -f1
+}
+
+peak_psi() {
+    c=$(psi_some cpu); m=$(psi_some memory); i=$(psi_some io)
+    worst=$c
+    [ "${m:-0}" -gt "$worst" ] 2>/dev/null && worst=$m
+    [ "${i:-0}" -gt "$worst" ] 2>/dev/null && worst=$i
+    echo "${worst:-0}"
+}
+
+desired_mode() {
+    # The user's own power mode, as the shell's config records it. This is the
+    # source of truth for the CPU profile, NOT the profile PPD happens to be
+    # on: the shell re-asserts this key (services/PowerMode.qml) whenever the
+    # config re-signals, so any profile this daemon writes that disagrees with
+    # it is put back within the minute. Reading it here is what lets the
+    # failsafe raise the machine without stealing the setting.
+    python3 - <<'PY' 2>/dev/null || echo default
+import json, os
+p = os.path.expanduser("~/.config/illogical-impulse/config.json")
+try:
+    with open(p) as f:
+        cfg = json.load(f)
+except Exception:
+    print("default"); raise SystemExit
+print(cfg.get("battery", {}).get("powerMode", "default"))
+PY
+}
+
+apply_performance() {
+    # $1 = the streak length that fired (for the notification's "for how long")
+    local streak=$1
+    # The user's setting wins. If the config already says performance, there is
+    # nothing here to raise: the profile is theirs and the boost is on, so
+    # engaging would only mean standing down later -- which is exactly the "it
+    # jumped back to power saving" this used to cause.
+    if [ "$(desired_mode)" = "performance" ]; then
+        log "pressure sustained (${streak}x >= ${THRESHOLD}%), but the user's mode is already performance — no action"
+        last_action=$(date +%s)
+        return 0
+    fi
+    log "pressure sustained (${streak}x >= ${THRESHOLD}%): acting"
+    powerprofilesctl set performance 2>/dev/null \
+        && log "cpu profile -> performance" \
+        || log "WARN: powerprofilesctl set performance failed"
+    if systemctl is-active --quiet nvidia-powerd.service; then
+        log "gpu dynamic boost already active"
+    else
+        systemctl start nvidia-powerd.service 2>/dev/null \
+            && log "gpu dynamic boost started" \
+            || log "WARN: could not start nvidia-powerd (needs admin? it is boot-enabled, so this should not happen)"
+    fi
+    engaged=1
+    engaged_at=$(date +%s)
+    quiet_since=0
+    notify -i "local_fire_department" "Performance mode engaged" \
+        "System was stalling for ${streak}x${INTERVAL}s. Switched CPU to Performance and enabled GPU Dynamic Boost."
+    blink fire "Power failsafe: machine was stalling — switched to Performance"
+    last_action=$(date +%s)
+}
+
+stand_down() {
+    # Back out of OUR OWN performance engagement: sustained calm (every one
+    # of the last RESTORE_QUIET seconds below threshold), profile still on
+    # performance (do not fight a user who has already moved it), Dynamic
+    # Boost off (it idles at ~5-8 W but it is not ours to keep raising).
+    log "calm for ${RESTORE_QUIET}s: standing down"
+    # What it returns to is the USER'S MODE, not a hardcoded power-saver. The
+    # shell re-asserts battery.powerMode, so writing power-saver here over a
+    # user who picked balanced or performance is undone a minute later anyway --
+    # and getting that wrong is the whole reason this daemon looked like it was
+    # "jumping back". If the mode IS performance, there is nothing of ours to
+    # undo and the correct move is to change nothing at all.
+    local mode target
+    mode=$(desired_mode)
+    case "$mode" in
+        performance) target=performance ;;
+        eco)         target=power-saver ;;
+        *)           target=balanced ;;
+    esac
+    if [ "$target" = "performance" ]; then
+        log "user mode is performance — leaving the profile and the boost as they are"
+        engaged=0
+        quiet_since=0
+        last_action=0
+        notify -i "local_fire_department" "Performance mode is yours" \
+            "Machine has been quiet for ${RESTORE_QUIET}s. Leaving the CPU profile and the GPU boost exactly as your Performance mode set them."
+        blink green "Failsafe: machine calm — Performance mode is yours"
+        return
+    fi
+    if [ "$(powerprofilesctl get 2>/dev/null)" != "$target" ]; then
+        powerprofilesctl set "$target" 2>/dev/null \
+            && log "cpu profile -> $target (the user's mode: $mode)" \
+            || log "WARN: powerprofilesctl set $target failed"
+    else
+        log "cpu profile already $target (the user's mode: $mode)"
+    fi
+    if systemctl is-active --quiet nvidia-powerd.service; then
+        systemctl stop nvidia-powerd.service 2>/dev/null \
+            && log "gpu dynamic boost stopped" \
+            || log "WARN: could not stop nvidia-powerd"
+    fi
+    engaged=0
+    quiet_since=0
+    # The cooldown guards rapid fire-fire repeats, but a stand-down needed 90
+    # s of sustained calm to happen at all -- pressure coming back after that
+    # is genuinely new load, and the CONSECUTIVE-sample streak is the guard
+    # against blips. Leaving last_action set here would blind the re-raise
+    # for up to a full COOLDOWN after the restore (raise at t=0, calm, restore
+    # at t=95, pressure at t=100 -> 200 s of lag with no action). Reset it.
+    last_action=0
+    notify -i "check_circle" "Performance no longer needed" \
+        "Machine has been quiet for ${RESTORE_QUIET}s. Back to ${mode}."
+    blink green "Failsafe: machine calm — back to ${mode}"
+}
+
+log "watching PSI cpu/memory/io: fires after ${CONSECUTIVE} consecutive samples >= ${THRESHOLD}% (interval ${INTERVAL}s, cooldown ${COOLDOWN}s)"
+log "auto-restore: ${RESTORE_QUIET}s of sustained calm while profile is still performance -> back to power-saver"
+
+while true; do
+    p=$(peak_psi)
+    if [ "${p:-0}" -ge "$THRESHOLD" ]; then
+        count=$((count + 1))
+        log "pressure ${p}% (${count}/${CONSECUTIVE})"
+        if [ "$count" -ge "$CONSECUTIVE" ]; then
+            now=$(date +%s)
+            if [ $((now - last_action)) -ge "$COOLDOWN" ]; then
+                apply_performance "$count"
+            else
+                log "still stalling, but cooling down ($((COOLDOWN - (now - last_action)))s left) — no action"
+            fi
+            count=0
+        fi
+    else
+        # A single quiet sample resets the streak: bursts must be consecutive.
+        [ "$count" -gt 0 ] && log "pressure cleared (${p}%), streak reset"
+        count=0
+        # ── Auto-restore: stand down after sustained calm ──
+        if [ "$engaged" = "1" ]; then
+            now=$(date +%s)
+            [ "$quiet_since" = "0" ] && quiet_since=$now
+            profile=$(powerprofilesctl get 2>/dev/null || echo "?")
+            if [ "$profile" != "performance" ]; then
+                log "profile is '$profile' (not ours anymore) — will not auto-restore"
+                engaged=0
+            elif [ $((now - quiet_since)) -ge "$RESTORE_QUIET" ]; then
+                stand_down
+            fi
+        else
+            quiet_since=0
+        fi
+    fi
+    sleep "$INTERVAL"
+done

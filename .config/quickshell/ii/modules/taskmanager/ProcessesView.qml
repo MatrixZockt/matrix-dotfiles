@@ -45,6 +45,9 @@ ColumnLayout {
         // other page has nothing to point at. Clear it rather than leave the
         // highlight on whichever row happens to sort into that slot.
         root.selectedKey = "";
+        // A different row set is a different list: start it at the top rather
+        // than at the offset the previous page happened to be scrolled to.
+        table.resetPosition();
     }
     Component.onCompleted: {
         ProcessList.grouped = groupedByApp;
@@ -106,25 +109,6 @@ ColumnLayout {
         // model is rebuilt every sample, so this binding re-runs for every
         // visible group each time. ProcessList.iconFor memoizes by name.
         return ProcessList.iconFor(row) ?? "";
-    }
-
-    // Windows-open classes, for the section split. The service rebuilds the
-    // set per revision, so this reads it per revision too.
-    // Windows-open classes, for the section split. The service owns the
-    // matching (normalization included) -- the view only asks.
-    function rowSection(row) {
-        if (row.kind !== "group")
-            return "apps";
-        return ProcessList.isWindowed(row.name) ? "apps" : "advanced";
-    }
-
-    // True when this row is the FIRST "advanced" row in the table: exactly
-    // one divider is inserted there.
-    function isAdvancedDivider(index) {
-        if (index === 0) return false;
-        const prev = ProcessList.rows[index - 1];
-        const cur = ProcessList.rows[index];
-        return cur && prev && rowSection(cur) === "advanced" && rowSection(prev) === "apps";
     }
 
     function stateLabel(state) {
@@ -362,7 +346,7 @@ ColumnLayout {
             Layout.fillWidth: true
             columnKey: "name"
             label: root.groupedByApp
-                ? Translation.tr("Applications (%1 + %2 advanced)").arg(root.applicationsCount).arg(root.advancedCount)
+                ? Translation.tr("Applications (%1)").arg(root.applicationsCount)
                 : Translation.tr("Name")
         }
         HeaderCell {
@@ -396,20 +380,16 @@ ColumnLayout {
         Item { Layout.preferredWidth: root.actionWidth }
     }
 
-    // Section split for the header + divider. Computed from rows once per
-    // revision; "apps" = a window is open for that application right now.
+    // The number in the Applications caption: how many applications the page
+    // is showing. It used to read "N + M advanced", counted from the
+    // Applications/Advanced ordering that used to exist -- the sort is in
+    // charge now (see ProcessList: a window open breaks ties instead of
+    // lifting a whole tier), so there is one count left to say.
     readonly property int applicationsCount: {
         const _ = ProcessList.revision;
         let n = 0;
         for (const row of ProcessList.rows)
-            if (root.rowSection(row) === "apps" && row.kind === "group") n++;
-        return n;
-    }
-    readonly property int advancedCount: {
-        const _ = ProcessList.revision;
-        let n = 0;
-        for (const row of ProcessList.rows)
-            if (root.rowSection(row) === "advanced" && row.kind === "group") n++;
+            if (row.kind === "group") n++;
         return n;
     }
 
@@ -456,27 +436,19 @@ ColumnLayout {
             }
             function stepSelection(delta) {
                 const rows = ProcessList.rows;
-                // Step over the divider. It is not a row of its own -- an
-                // ordinary process row is RENDERED as the caption when it sits
-                // at the top of the advanced section -- so it is found by the
-                // same predicate the delegate uses, not by a `kind`.
                 let at = rows.findIndex(row => row.key === root.selectedKey);
                 if (at < 0)
                     at = delta > 0 ? -1 : rows.length;
                 for (let i = at + delta; i >= 0 && i < rows.length; i += delta) {
-                    if (root.isAdvancedDivider(i))
-                        continue;
                     table.selectKey(rows[i].key);
                     return true;
                 }
                 return false;
             }
-            // Home/End: the first/last row that is not a divider caption.
+            // Home/End: the first/last row.
             function selectEdge(dir) {
                 const rows = ProcessList.rows;
                 for (let i = dir > 0 ? 0 : rows.length - 1; i >= 0 && i < rows.length; i += dir) {
-                    if (root.isAdvancedDivider(i))
-                        continue;
                     table.selectKey(rows[i].key);
                     return true;
                 }
@@ -503,11 +475,34 @@ ColumnLayout {
                     return;
                 event.accepted = true;
             }
-            readonly property var rows0: ProcessList.rows
-            // Referenced only so the table re-reads rows when a sample lands;
-            // the selection itself lives in root.selectedKey and needs no help.
-            onRows0Changed: if (root.selectedKey !== "")
-                table.currentIndex = table.rows0.findIndex(row => row.key === root.selectedKey)
+            // Your place in the list survives a sample (see StyledListView):
+            // every sample is a NEW model, and without this the view is back
+            // at the top of the list every two seconds -- the table could not
+            // be read at all below the first screen.
+            preservePositionOnModelChange: true
+
+            // Nothing here re-syncs currentIndex to the selection, on purpose.
+            //
+            // It looks harmless -- "keep the index pointing at the selected
+            // row" -- but ASSIGNING currentIndex scrolls the view to that row,
+            // because a ListView keeps its current item visible. A sample
+            // landing mid-gesture therefore yanked the table back to the
+            // selected row, which is the other half of "it keeps jumping back
+            // up". currentIndex is written by selectKey below and by nothing
+            // else; the row highlight comes from root.selectedKey, so there is
+            // nothing to keep in sync when the model changes.
+            Connections {
+                // A new column is a new list, and the row the click is asking
+                // about -- biggest CPU consumer, biggest memory consumer -- is
+                // the FIRST one: the view goes there rather than leaving the
+                // old scroll position over a table that was just reordered
+                // underneath it. Same for a new search: the answer starts at
+                // the top.
+                target: ProcessList
+                function onSortKeyChanged() { table.resetPosition() }
+                function onSortAscendingChanged() { table.resetPosition() }
+                function onQueryChanged() { table.resetPosition() }
+            }
 
             delegate: Rectangle {
                 id: row
@@ -516,14 +511,11 @@ ColumnLayout {
 
                 readonly property bool isGroup: row.modelData.kind === "group"
                 readonly property bool isSelected: root.selectedKey === row.modelData.key
-                readonly property bool isDivider: root.isAdvancedDivider(row.index)
 
                 width: table.width
-                // Divider rows sit on top of the split; real rows are the
-                // roomy 34px strips. The divider is NOT clickable.
-                height: row.isDivider ? 30 : 34
+                height: 34
                 radius: Appearance.rounding.verysmall
-                color: row.isDivider ? Appearance.colors.colLayer2 : row.isSelected ? Appearance.colors.colSecondaryContainer
+                color: row.isSelected ? Appearance.colors.colSecondaryContainer
                     : rowMouse.containsMouse ? Appearance.colors.colLayer2Hover
                     : "transparent"
 
@@ -531,7 +523,6 @@ ColumnLayout {
                     id: rowMouse
                     anchors.fill: parent
                     hoverEnabled: true
-                    enabled: !row.isDivider
                     acceptedButtons: Qt.LeftButton | Qt.RightButton
                     onEntered: root.hoverKey = row.modelData.key
                     onExited: if (root.hoverKey === row.modelData.key) root.hoverKey = ""
@@ -616,15 +607,13 @@ ColumnLayout {
                             Layout.fillWidth: true
                             text: {
                                 const count = row.modelData.count ?? 0;
-                                if (row.isDivider)
-                                    return Translation.tr("Advanced — background processes (%1)").arg(root.advancedCount);
                                 if (row.isGroup && count > 1)
                                     return `${row.modelData.name} (${count})`;
                                 return row.modelData.name ?? "";
                             }
                             elide: Text.ElideRight
                             font.pixelSize: Appearance.font.pixelSize.smallie
-                            color: row.isDivider ? Appearance.colors.colSubtext : row.isSelected ? Appearance.colors.colOnSecondaryContainer : Appearance.colors.colOnLayer1
+                            color: row.isSelected ? Appearance.colors.colOnSecondaryContainer : Appearance.colors.colOnLayer1
                         }
                     }
 
@@ -632,7 +621,6 @@ ColumnLayout {
                         Layout.preferredWidth: root.statusWidth
                         Layout.leftMargin: 6
                         Layout.rightMargin: 6
-                        visible: !row.isDivider
                         text: row.isGroup ? "" : root.stateLabel(row.modelData.state)
                         elide: Text.ElideRight
                         font.pixelSize: Appearance.font.pixelSize.smaller
@@ -642,7 +630,6 @@ ColumnLayout {
                     StyledText {
                         Layout.preferredWidth: root.cpuWidth
                         Layout.rightMargin: 6
-                        visible: !row.isDivider
                         horizontalAlignment: Text.AlignRight
                         text: (row.modelData.cpu ?? 0).toFixed(1) + "%"
                         font {
@@ -666,7 +653,6 @@ ColumnLayout {
                     StyledText {
                         Layout.preferredWidth: root.memoryWidth
                         Layout.rightMargin: 6
-                        visible: !row.isDivider
                         horizontalAlignment: Text.AlignRight
                         text: SystemFacts.bytes(row.modelData.memory ?? 0)
                         font {
@@ -681,7 +667,6 @@ ColumnLayout {
                         Layout.preferredWidth: root.userWidth
                         Layout.leftMargin: 6
                         Layout.rightMargin: 6
-                        visible: !row.isDivider
                         text: row.modelData.user ?? ""
                         elide: Text.ElideRight
                         font.pixelSize: Appearance.font.pixelSize.smaller
@@ -691,7 +676,6 @@ ColumnLayout {
                     StyledText {
                         Layout.preferredWidth: root.pidWidth
                         Layout.rightMargin: 6
-                        visible: !row.isDivider
                         horizontalAlignment: Text.AlignRight
                         text: String(row.modelData.pid ?? "")
                         font {
@@ -728,9 +712,7 @@ ColumnLayout {
                             // different row -- or the rows may have re-sorted
                             // under it between frames, and the click lands on
                             // whatever process is there now. A permanent,
-                            // correctly-placed target cannot do that. The
-                            // divider is a caption and gets none.
-                            visible: !row.isDivider
+                            // correctly-placed target cannot do that.
                             // Quiet red X normally, tinted chip under the
                             // pointer -- RippleButton tracks its own hover
                             // in `hovered`.
@@ -774,7 +756,6 @@ ColumnLayout {
                             implicitWidth: 26
                             implicitHeight: 22
                             buttonRadius: Appearance.rounding.verysmall
-                            visible: !row.isDivider
                             colBackground: "transparent"
                             colBackgroundHover: Appearance.colors.colError
                             onClicked: {

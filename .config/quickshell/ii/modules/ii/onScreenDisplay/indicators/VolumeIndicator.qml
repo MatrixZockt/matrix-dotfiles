@@ -17,7 +17,10 @@ import qs.modules.ii.onScreenDisplay
 OsdValueIndicator {
     id: osdValues
 
-    readonly property real currentVolume: Audio.sink?.audio.volume ?? 0
+    // The shell's fraction (100% = the loud end), not the sink's raw value:
+    // the sink is a fraction of two, so this indicator used to draw its bar at
+    // half height for an honest 100% and could name "200%".
+    readonly property real currentVolume: Audio.currentVolume()
     readonly property bool muted: Audio.sink?.audio.muted ?? false
 
     // The last step, kept only long enough to be read.

@@ -1,0 +1,24 @@
+#!/bin/bash
+# Stop the local llama-server service
+
+if ! systemctl --user is-active --quiet llama-server-local 2>/dev/null; then
+  echo "ℹ️  llama-server is not running."
+  exit 0
+fi
+
+echo "🛑 Stopping llama-server..."
+systemctl --user stop llama-server-local
+
+# Wait for the port to be released
+for i in $(seq 1 10); do
+  sleep 1
+  if ! ss -tlnp 2>/dev/null | grep -q ":8001 "; then
+    echo "✅ llama-server stopped."
+    exit 0
+  fi
+done
+
+echo "⚠️  Port 8001 may still be in use. Force killing..."
+pkill -f "llama-server.*Qwen3-8B" 2>/dev/null
+sleep 2
+echo "✅ llama-server stopped."

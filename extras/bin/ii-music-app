@@ -916,11 +916,15 @@ class Mark(Gtk.DrawingArea):
     # min-height and background that made the app's transport read heavy.
     __gsignals__ = {"clicked": (GObject.SignalFlags.RUN_FIRST, None, ())}
 
+    # Shuffle/repeat draw their OWN glyphs (crossed arrows / loop arrows) so
+    # they read as modes rather than as transport actions, and keep the same
+    # 25px box, ring hover and outline-at-rest grammar as the transport.
     def __init__(self, kind, tip, playing=False):
-        """kind: "prev" | "play" | "next"."""
+        """kind: "prev" | "play" | "next" | "shuffle" | "repeat"."""
         super().__init__()
         self.kind = kind
         self.playing = playing
+        self.mode_on = False   # lit-while-engaged, for "shuffle"/"repeat"
         self._hover = False
         self._down = False
         self.set_size_request(self.BOX, self.BOX)
@@ -938,6 +942,12 @@ class Mark(Gtk.DrawingArea):
     def set_playing(self, playing):
         if bool(playing) != bool(self.playing):
             self.playing = bool(playing)
+            self.queue_draw()
+
+    def set_mode(self, on):
+        """Lit state for shuffle/repeat marks."""
+        if bool(on) != bool(self.mode_on):
+            self.mode_on = bool(on)
             self.queue_draw()
 
     def _click(self):
@@ -980,8 +990,12 @@ class Mark(Gtk.DrawingArea):
             cr.set_source_rgba(*rgba(LAYER3, 0.32 if not self._down else 1.0))
             cr.fill()
 
-        # the ring is the ONLY hover tell
+        # the ring is the ONLY hover tell -- and for the mode marks, the
+        # ring is ON while the mode is engaged: that is the Spotify-style
+        # "lit dot" in the same 1px language as the hover tells.
         ring_op = 0.0 if self.kind != "play" else 0.28
+        if self.mode_on:
+            ring_op = 0.9
         if self._down:
             ring_op = 0.8
         elif self._hover:
@@ -992,15 +1006,86 @@ class Mark(Gtk.DrawingArea):
             cr.set_line_width(1.0)
             cr.stroke()
 
-        col = rgba(ACCENT if solid else TEXT)
+        col = rgba(ACCENT if (solid or self.mode_on) else TEXT)
 
         if self.kind == "play":
             if self.playing:
                 self._pause(cr, cx, cy, col, solid)
             else:
                 self._triangle(cr, cx, cy, col, solid)
+        elif self.kind == "shuffle":
+            self._shuffle(cr, cx, cy, col, solid)
+        elif self.kind == "repeat":
+            self._repeat(cr, cx, cy, col, solid)
         else:
             self._skip(cr, cx, cy, col, solid)
+
+    # -- mode marks ---------------------------------------------------
+    def _shuffle(self, cr, cx, cy, col, solid):
+        """Two crossed arrows: the universal shuffle glyph, drawn at the
+        transport's ink height (13px) with the same outline-at-rest rule."""
+        h = 6.5
+        s = self.STROKE
+
+        def arrow_head(x, y, direction):
+            # small arrowhead pointing `direction` (+x = right)
+            cr.move_to(x, y - 2.6)
+            cr.line_to(x + 3.4 * direction, y)
+            cr.line_to(x, y + 2.6)
+
+        # path 1: left-mid -> crossing -> right-top
+        cr.move_to(cx - 9, cy + h)
+        cr.line_to(cx - 4, cy)
+        cr.line_to(cx + 6, cy - h)
+        # path 2: left-top -> crossing -> right-mid (the mirror leg)
+        cr.move_to(cx - 9, cy - h)
+        cr.line_to(cx - 4, cy)
+        cr.line_to(cx + 6, cy + h)
+        cr.set_line_width(s)
+        cr.set_line_join(0)
+        if solid or self.mode_on:
+            cr.stroke()
+            arrow_head(cx + 6, cy - h, +1)
+            cr.stroke()
+            arrow_head(cx + 6, cy + h, +1)
+            cr.fill() if False else cr.set_line_width(s)
+            for y in (cy - h, cy + h):
+                arrow_head(cx + 6, y, +1)
+            cr.stroke()
+        else:
+            cr.stroke()
+            for y in (cy - h, cy + h):
+                arrow_head(cx + 6, y, +1)
+            cr.stroke()
+
+    def _repeat(self, cr, cx, cy, col, solid):
+        """Two arrows chasing each other round a loop -- the repeat glyph.
+        Same ink height (13px), outline at rest, solid when lit."""
+        h = 5.2
+        s = self.STROKE
+        # a rounded rectangle *path* (stroke only) as the loop body
+        rx, ry, rw, rh = cx - 8.5, cy - h, 17.0, h * 2
+        cairo_round_rect(cr, rx, ry, rw, rh, 4.0)
+        cr.set_source_rgba(*col)
+        cr.set_line_width(s)
+        if not (solid or self.mode_on):
+            cr.set_line_width(s)
+        cr.stroke()
+        # gap the path on the right side where the arrowhead sits: paint a
+        # small surface-coloured block over the arc, then draw the head.
+        # Simpler and honest at this size: draw the head at the path's right
+        # mid, pointing down, slightly larger than the stroke so it reads.
+        cr.set_source_rgba(*col)
+        cr.move_to(cx + 8.5, cy)
+        cr.line_to(cx + 4.9, cy - 0.5)
+        cr.line_to(cx + 8.6, cy - 3.6)
+        cr.close_path()
+        cr.fill()
+        cr.move_to(cx + 8.5, cy)
+        cr.line_to(cx + 4.9, cy + 0.5)
+        cr.line_to(cx + 8.6, cy + 3.6)
+        cr.close_path()
+        cr.fill()
 
     def _triangle(self, cr, cx, cy, col, solid):
         """`play_arrow`: an OUTLINE triangle at rest, solid on hover."""
@@ -2138,9 +2223,18 @@ scrollbar slider:hover {{ background: {OUTLINE2}; }}
         self._btn_play = self._mark("play", "Play or pause")
         self._playpause_btn = self._btn_play
         self._btn_next = self._mark("next", "Next")
+        # Mode marks, Spotify-style: shuffle before prev, repeat after next,
+        # both lit by a persistent ring while engaged. They are mode, not
+        # transport, so they are drawn smaller-ink and never bold.
+        self._btn_shuffle = self._mark("shuffle", "Shuffle")
+        self._btn_repeat = self._mark("repeat", "Repeat playlist")
+        self._btn_shuffle.connect("clicked", self._on_shuffle_clicked)
+        self._btn_repeat.connect("clicked", self._on_repeat_clicked)
+        tr.append(self._btn_shuffle)
         tr.append(self._btn_prev)
         tr.append(self._btn_play)
         tr.append(self._btn_next)
+        tr.append(self._btn_repeat)
         hrow.append(tr)
         hero.append(hrow)
 
@@ -2228,6 +2322,20 @@ scrollbar slider:hover {{ background: {OUTLINE2}; }}
         else:
             self._playpause()
 
+    def _on_shuffle_clicked(self, *_):
+        self.cfg["shuffle"] = not bool(self.cfg.get("shuffle"))
+        self._btn_shuffle.set_mode(self.cfg["shuffle"])
+        self._persist()
+
+    def _on_repeat_clicked(self, *_):
+        self.cfg["repeat"] = not bool(self.cfg.get("repeat"))
+        self._btn_repeat.set_mode(self.cfg["repeat"])
+        # repeat = loop the WHOLE playlist (matches the daemon default), so a
+        # queue never runs dry. repeat-one did nothing for the "randomly
+        # stops" bug and loop-file vs loop-playlist was the whole confusion.
+        self.mpv.send(["set_property", "loop-playlist", bool(self.cfg["repeat"])])
+        self._persist()
+
     @staticmethod
     def _sinks():
         out = run("pactl", "list", "short", "sinks")
@@ -2247,7 +2355,16 @@ scrollbar slider:hover {{ background: {OUTLINE2}; }}
         a day and reopened must still be the thing that decides the volume.
         """
         self.mpv.send(["set_property", "volume", int(self.cfg["volume"])])
-        self.mpv.send(["set_property", "loop-file", bool(self.cfg["repeat"])])
+        # repeat = loop the playlist (loop-playlist), not repeat-one: the
+        # daemon's unit default is loop-playlist=inf, so an OFF app must say
+        # so explicitly or the app closed-yesterday keeps looping today.
+        self.mpv.send(["set_property", "loop-playlist", bool(self.cfg["repeat"])])
+        # restore the lit state of the mode marks from the persisted config
+        try:
+            self._btn_shuffle.set_mode(bool(self.cfg.get("shuffle")))
+            self._btn_repeat.set_mode(bool(self.cfg.get("repeat")))
+        except AttributeError:
+            pass
         if self.cfg.get("outputDevice"):
             self.mpv.send(["set_property", "audio-device",
                            self.cfg["outputDevice"]])
@@ -2255,22 +2372,9 @@ scrollbar slider:hover {{ background: {OUTLINE2}; }}
     def _persist(self):
         save_config(self.cfg)
 
-    def _on_shuffle(self, btn):
-        self.cfg["shuffle"] = btn.get_active()
-        if btn.get_active():
-            btn.add_css_class("on")
-        else:
-            btn.remove_css_class("on")
-        self._persist()
-
-    def _on_repeat(self, btn):
-        self.cfg["repeat"] = btn.get_active()
-        if btn.get_active():
-            btn.add_css_class("on")
-        else:
-            btn.remove_css_class("on")
-        self.mpv.send(["set_property", "loop-file", bool(self.cfg["repeat"])])
-        self._persist()
+    # (the old _on_shuffle/_on_repeat Gtk.ToggleButton handlers are gone:
+    # the buttons are the Mark-based mode marks on the title row now, and
+    # nothing ever instantiated the toggles)
 
     def _on_device(self, _dd, _pspec):
         idx = self._dev.get_selected()

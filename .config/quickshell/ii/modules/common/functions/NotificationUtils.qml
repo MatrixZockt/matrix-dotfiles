@@ -33,6 +33,16 @@ Singleton {
             'input': 'keyboard_alt',
             'preedit': 'keyboard_alt',
             'startswith:file': 'folder_copy', // Declarative startsWith check
+            // Media notices (services/Volumes.qml) say what was plugged in, so
+            // the notice wears the same drawing the drive has in the file
+            // manager rather than the generic speech bubble.
+            'sd card': 'sd_card',
+            'usb stick': 'usb',
+            'solid-state': 'hard_drive',
+            'hard disk': 'hard_drive_2',
+            // A device that could not be told apart still gets a drive, not a
+            // speech bubble. Last, so the four above win when they match.
+            'drive': 'hard_drive',
         };
 
         const lowerSummary = summary.toLowerCase();

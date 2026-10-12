@@ -99,9 +99,13 @@ Scope {
                         if (cornerWidget.isLeft)
                             Brightness.decreaseBrightness()
                         else if (Audio.sink?.audio) {
-                            const currentVolume = Audio.value;
-                            const step = currentVolume < 0.1 ? 0.01 : 0.02 || 0.2;
-                            Audio.sink.audio.volume -= step;
+                            // The audio service's own scale, and its own write
+                            // path: the corner wheel used to step the SINK, so
+                            // its 2% was 1% of the shell's scale once the
+                            // rescale landed, and its direction had to be read
+                            // from a mirror that only one surface moved.
+                            const step = Audio.currentVolume() < 0.1 ? 0.01 : 0.02;
+                            Audio.setSinkVolume(Audio.currentVolume() - step);
                         }
                     }
                     onScrollUp: {
@@ -110,9 +114,8 @@ Scope {
                         if (cornerWidget.isLeft)
                             Brightness.increaseBrightness()
                         else if (Audio.sink?.audio) {
-                            const currentVolume = Audio.value;
-                            const step = currentVolume < 0.1 ? 0.01 : 0.02 || 0.2;
-                            Audio.sink.audio.volume = Math.min(1, Audio.sink.audio.volume + step);
+                            const step = Audio.currentVolume() < 0.1 ? 0.01 : 0.02;
+                            Audio.setSinkVolume(Audio.currentVolume() + step);
                         }
                     }
                     onMovedAway: {

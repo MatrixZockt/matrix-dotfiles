@@ -740,6 +740,13 @@ Item {
             Layout.fillWidth: true
             Layout.preferredHeight: 30
             clip: true
+            // One line, never a scroller: N chips share the rail evenly, so
+            // the row's width equals the rail's width by construction. Text
+            // wider than its share elides instead of pushing the row past
+            // the edge. (Chips sized from their own text would overflow the
+            // moment two long playlist names met -- the whole reason the
+            // horizontal Flickable was ever needed.)
+            readonly property int chipCount: root.recentList.length
             Flickable {
                 id: playlistFlick
                 anchors.fill: parent
@@ -761,9 +768,16 @@ Item {
                             required property var modelData
                             readonly property bool active: modelData.name === root.selectedPlaylist
 
+                            // Even share of the rail (minus the gaps), clamped
+                            // to [48, 200]: never collapses to nothing with 5
+                            // chips in a narrow rail, never balloons with 1.
                             implicitWidth: Math.min(
                                 200,
-                                Math.max(62, nameText.implicitWidth + 22))
+                                Math.max(
+                                    48,
+                                    (playlistRail.width
+                                        - (playlistRail.chipCount - 1) * playlistRow.spacing)
+                                        / Math.max(1, playlistRail.chipCount)))
                             implicitHeight: 26
                             buttonRadius: Appearance.rounding.full
                             colBackground: active
@@ -786,7 +800,7 @@ Item {
                                     ? Appearance.colors.colOnPrimary
                                     : Appearance.colors.colOnLayer1
                                 elide: Text.ElideRight
-                                width: Math.min(implicitWidth, 178)
+                                width: Math.max(28, chip.implicitWidth - 22)
                             }
                         }
                     }

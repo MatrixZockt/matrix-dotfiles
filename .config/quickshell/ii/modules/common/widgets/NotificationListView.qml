@@ -83,6 +83,11 @@ StyledListView { // Scrollable window
                 : (notifCard.hasMoreToShow()
                     ? Translation.tr("Click to expand")
                     : Translation.tr("Click the name to go to %1").arg(notifCard.notificationGroup?.appName || "the app"))
+            // ...and it stands down while the NAME is the thing being pointed
+            // at. The name carries its own label now, and two tooltips for one
+            // pointer position -- the card's and the name's -- would stack on
+            // top of each other over the same pixels.
+            extraVisibleCondition: !notifCard.appNameHovered
         }
     }
 }

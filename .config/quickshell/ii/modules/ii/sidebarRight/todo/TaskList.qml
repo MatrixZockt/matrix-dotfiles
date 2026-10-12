@@ -33,6 +33,12 @@ Item {
     property string emptyPlaceholderIcon
     property string emptyPlaceholderText
 
+    // Draw when each finished task was completed, as a dim line under its
+    // text. Opted into by the DONE page only: the stamp describes a finished
+    // task, and the Unfinished page has nothing finished to describe, so it
+    // leaves this off and its rows are exactly as they were.
+    property bool showCompletedAt: false
+
     // Forwarded wheel, for the widget's topmost swipe surface.
     //
     // That surface sits above this whole page and has to answer the wheel
@@ -242,6 +248,12 @@ Item {
     // Vertical padding inside the text block, top and bottom.
     property int textPadding: 10
 
+    // Gap between a task's text and the completion stamp under it.
+    //
+    // The row height is the EXACT sum of this plus the caption's own
+    // `implicitHeight`, so the two never disagree about how tall a stamp is.
+    readonly property int captionGap: 2
+
     // Which row is being dragged, and where it would land. -1 means "not
     // dragging". Held on the list rather than the delegate so the drop line
     // can be drawn by the list itself.
@@ -250,6 +262,35 @@ Item {
     // Set by the delegate on release so the list knows the move to commit.
     signal moveRequested(int fromId, int beforeId)
 
+    // ── Pressing outside the editor APPLIES the edit ─────────────────────
+    //
+    // A press anywhere but the field itself is a decision, and the decision is
+    // "keep what I typed": the field's own blur cannot deliver that on its own,
+    // because a press on this page's background, on empty space below the last
+    // task, or on a row's own padding moves no focus at all -- the field never
+    // blurs and the editor simply stayed open with the draft still in it, which
+    // reads as "clicking away did nothing".
+    //
+    // One full-page area UNDER the list is all that is needed: the rows sit
+    // above it, so every press they claim for themselves (the circle, the grip,
+    // the editor's own cancel/save) is answered there and never arrives here,
+    // and every press they do not claim lands here and commits. Escape is the
+    // one other way out, and it cancels instead (see the field's Keys handler).
+    //
+    // Called from three places, all of them "I am done with this row": this
+    // catcher, the circle (ticking a task off while a draft is open), and the
+    // text column of another row (starting to read or drag one).
+    function commitOpenEdit() {
+        if (root.editingId !== -1)
+            root.commitEdit(root.editingId);
+    }
+
+    MouseArea {
+        anchors.fill: parent
+        acceptedButtons: Qt.LeftButton
+        onPressed: root.commitOpenEdit()
+    }
+
     StyledListView {
         id: listView
         anchors.fill: parent
@@ -257,8 +298,27 @@ Item {
         // No flicking while a grip drag is in progress. Without this the list
         // scrolls under the row being dragged, which both fights the reorder
         // and leaves the drop line pointing at the wrong task.
-        interactive: !root.gripHeld
-        animateAppearance: false
+        //
+        // And no mouse flicking while an edit is open, for the reason the
+        // catcher above exists: an interactive Flickable takes the press for
+        // itself, and a press it takes never reaches a sibling underneath, so
+        // pressing the background would never commit. Wheel and touchpad
+        // scrolling do not go through `interactive`, so scrolling a list while
+        // editing still works exactly as before.
+        interactive: !root.gripHeld && root.editingId === -1
+        // ON, so a row that has been ticked can leave.
+        //
+        // This is the removal half of the transition set: `remove` slides the
+        // row out and `removeDisplaced` brings the rows below up to close the
+        // gap it left. It used to be off, and with it off the row simply
+        // stopped existing between one frame and the next -- which is exactly
+        // why the tick now carries a badge (see `exitIds`): the acknowledgement
+        // is the part the instant disappearance did not have.
+        //
+        // `animateMovement` stays off, so the drag's own reorder -- the rows
+        // parting by `shiftY` under the carried card -- is untouched, and no
+        // permutation is eased twice.
+        animateAppearance: true
         // The edge auto-scroll below writes `contentY` on a timer, so the
         // scroll must land 1:1 rather than being eased by the list's
         // `Behavior on contentY`. Easing an already-stepped scroll is what makes
@@ -349,7 +409,21 @@ Item {
             required property var modelData
             required property int index
             property var item: modelData
-            property bool done: item.done
+            // `done` and `content` read through the SERVICE, not off `item`.
+            //
+            // `item` is a plain JS object, and a binding on a field of one of
+            // those never re-evaluates -- nothing emits a change signal for it,
+            // so the row kept whatever it read when its delegate was built.
+            // That still bites without the row ever standing still: ticking and
+            // unticking a task, and editing one, all change what a row must draw
+            // while its delegate can survive the change (an untick puts the row
+            // back on this page, and an edit lands on the row that made it). A
+            // stale `done` is the difference between a task that visibly
+            // finished and one that just stopped responding: the circle stayed
+            // empty and the text stayed bright.
+            readonly property bool done: Todo.isDone(taskId)
+            // For the same reason, so an edit shows up in the row that made it.
+            readonly property string content: Todo.contentOf(taskId)
             // Index in the WHOLE list, so every mutation addresses the real
             // entry even when this view is showing a filtered subset.
             // The task's stable id from Todo.qml. Used instead of a positional index
@@ -357,6 +431,33 @@ Item {
             // position in the file -- and because ids survive a reorder, which
             // a positional index does not.
             readonly property int taskId: item.id
+
+            // The completion stamp, read live through the service for the same
+            // reason `done`/`content` are: a plain-object field never emits a
+            // change, so a row that is ticked while its delegate survives would
+            // keep whatever it read when it was built. 0 means "no stamp".
+            //
+            // `double`, NOT `int`: an epoch-ms stamp does not fit in 32 bits
+            // (see `retentionMs` in Todo.qml), and narrowing it here would
+            // report a wrapped, negative time.
+            readonly property double completedAt: Todo.completedAtOf(taskId)
+
+            // Whether THIS row draws the stamp: only where the page opted in
+            // (the Done page), only for a finished task, and not while the row
+            // is an editor -- edit mode owns the row's height (see the card's
+            // `implicitHeight`) and a stamp would be height the editor does not
+            // account for.
+            readonly property bool showCaption: root.showCompletedAt
+                && todoItem.done && !todoItem.editing
+
+            // Has this row just been ticked, and is it therefore still here?
+            //
+            // The task is DONE the whole time this is true -- `done` above is
+            // already true with it -- and the row is still on this list only
+            // for the length of its own Done badge (see `exitIds`). Drives the
+            // badge, which is what the tick is acknowledged with, and the
+            // controls stepping out from under it.
+            readonly property bool exiting: root.isExiting(todoItem.taskId)
 
             // How far this row has slid to open a gap for the carried row.
             //
@@ -450,7 +551,7 @@ Item {
                 if (textColumnWidth <= 0)
                     return false;
                 return measure.contentWidth > textColumnWidth
-                    || todoItem.item.content.length > root.maxCollapsedChars;
+                    || todoItem.content.length > root.maxCollapsedChars;
             }
 
             // Width actually available to the task text, derived ARITHMETICALLY from
@@ -515,7 +616,7 @@ Item {
                 // Must match textBlock exactly, or the measurement describes a
                 // different layout than the one on screen.
                 font: textBlock.font
-                text: todoItem.item.content
+                text: todoItem.content
                 // NoWrap, so `contentWidth` is the width of the text on ONE line
                 // -- which is exactly the question being asked. With WordWrap on,
                 // contentWidth collapses to the longest word and the fit test
@@ -553,16 +654,37 @@ Item {
                 // `textPadding` above and one below. When the padding lived on
                 // the Text as well this same sum counted it twice and left a
                 // dead band under the last line.
-                implicitHeight: todoItem.editing
-                    // While editing, the field decides the height: a correction
-                    // can be longer than the task it replaces, and a fixed
-                    // row would scroll a caret that has nowhere to go. The
-                    // field is anchored top-aligned like `textBlock` below, so
-                    // the same padding arithmetic applies to both.
-                    ? Math.max(root.rowHeight, editField.implicitHeight + root.textPadding * 2)
-                    : (todoItem.expanded
-                        ? Math.max(root.rowHeight, textBlock.implicitHeight + root.textPadding * 2)
-                        : root.rowHeight)
+                //
+                // Rewritten as a block rather than one nested ternary because
+                // the caption adds a third case: a Done row is the text PLUS
+                // the stamp under it. The branches are otherwise the same sums
+                // as before, and the collapsed/no-caption case is still exactly
+                // `rowHeight`, so nothing but a captioned row changes height.
+                implicitHeight: {
+                    if (todoItem.editing) {
+                        // While editing, the field decides the height: a
+                        // correction can be longer than the task it replaces,
+                        // and a fixed row would scroll a caret that has
+                        // nowhere to go. The field is anchored top-aligned
+                        // like `textBlock`, so the same padding arithmetic
+                        // applies to both.
+                        return Math.max(root.rowHeight,
+                            editField.implicitHeight + root.textPadding * 2)
+                    }
+                    if (todoItem.showCaption) {
+                        // Text, then the stamp, then the same padding top and
+                        // bottom. Works for a collapsed row (one line) and an
+                        // expanded one alike, because `textBlock.implicitHeight`
+                        // is however tall the text actually is.
+                        return Math.max(root.rowHeight,
+                            textBlock.implicitHeight + root.captionGap
+                                + completedLabel.implicitHeight + root.textPadding * 2)
+                    }
+                    if (todoItem.expanded)
+                        return Math.max(root.rowHeight,
+                            textBlock.implicitHeight + root.textPadding * 2)
+                    return root.rowHeight
+                }
                 // Corner radius: `verysmall` (4px).
                 //
                 // Was `rounding.full` -- 9999, which on a 44px row is a ~22px
@@ -762,15 +884,22 @@ Item {
                         readonly property int hoverMs:
                             Math.round(70 * Appearance.animationCurves.motionScale)
 
+                        // `gripWash.hoverMs`, not a bare `hoverMs`: an animation
+                        // nested inside a `Behavior` does not see the enclosing
+                        // object's own properties as unqualified names -- the
+                        // bare form threw "ReferenceError: hoverMs is not
+                        // defined" on every hover of the grip, so the two
+                        // Behaviors fell back to their default duration. The
+                        // id is in scope here whatever the scoping rules say.
                         Behavior on scale {
                             NumberAnimation {
-                                duration: hoverMs
+                                duration: gripWash.hoverMs
                                 easing.type: Easing.OutCubic
                             }
                         }
                         Behavior on opacity {
                             NumberAnimation {
-                                duration: hoverMs
+                                duration: gripWash.hoverMs
                                 easing.type: Easing.OutCubic
                             }
                         }
@@ -982,6 +1111,10 @@ Item {
                         }
 
                         onPressed: (mouse) => {
+                            // Reaching for another row's grip is a press outside
+                            // the editor too, so a draft is applied before the
+                            // drag starts rather than being left open behind it.
+                            root.commitOpenEdit();
                             const o = mapToItem(null, 0, 0);
                             beginDrag(gripMouse, o.x, o.y, mouse.x, mouse.y);
                             mouse.accepted = true;
@@ -1335,10 +1468,12 @@ Item {
 
                         TapHandler {
                             onTapped: {
-                                if (!todoItem.done)
-                                    Todo.markDoneById(todoItem.taskId);
-                                else
-                                    Todo.markUnfinishedById(todoItem.taskId);
+                                // Ticking a task off is a press outside the
+                                // editor, so an open draft is applied first --
+                                // the same "keep what I typed" rule the page's
+                                // catcher keeps. Everything else is `tick`.
+                                root.commitOpenEdit();
+                                root.tick(todoItem.taskId);
                             }
                         }
                     }
@@ -1492,6 +1627,8 @@ Item {
                             // double-click, so it stays narrow on purpose: the
                             // grip, the circle and the buttons must not be
                             // reachable through it.
+                            onPressed: root.commitOpenEdit()
+
                             onClicked: {
                                 if (clickSwallowed) {
                                     clickSwallowed = false;
@@ -1538,16 +1675,24 @@ Item {
                             // true even if a future font or a layout pass
                             // hands this box something unexpected.
                             clip: true
-                            anchors.verticalCenter: todoItem.expanded
+                            // A row is top-aligned when it is expanded (the
+                            // text owns the row's height) OR when it carries a
+                            // caption (the stamp sits under the text, so the
+                            // text must start at the top for the pair to fit).
+                            // Otherwise it is centred in a one-line row, as
+                            // before.
+                            anchors.verticalCenter: (todoItem.expanded || todoItem.showCaption)
                                 ? undefined
                                 : parent.verticalCenter
-                            anchors.top: todoItem.expanded ? parent.top : undefined
+                            anchors.top: (todoItem.expanded || todoItem.showCaption)
+                                ? parent.top
+                                : undefined
                             // The breathing room, as a margin rather than as
                             // padding ON the text. The circle and the buttons
                             // position themselves with the same `textPadding`
                             // from the top of the row, so the first line of an
                             // expanded task stays level with them.
-                            anchors.topMargin: todoItem.expanded
+                            anchors.topMargin: (todoItem.expanded || todoItem.showCaption)
                                 ? root.textPadding
                                 : 0
                             // Wrapping is what makes a full-width sentence fit
@@ -1563,7 +1708,7 @@ Item {
                             elide: todoItem.expanded
                                 ? Text.ElideNone
                                 : Text.ElideRight
-                            text: todoItem.item.content
+                            text: todoItem.content
                             // Hidden while this row is being edited: the
                             // TextField below takes over the same column. Both
                             // are left in the tree rather than swapped by a
@@ -1591,9 +1736,55 @@ Item {
                             // margin below, so `implicitHeight` is the height of
                             // the text and nothing else and the row height is a
                             // plain sum of two known numbers.
-                            verticalAlignment: todoItem.expanded
+                            verticalAlignment: (todoItem.expanded || todoItem.showCaption)
                                 ? Text.AlignTop
                                 : Text.AlignVCenter
+                        }
+
+                        // ── When it was finished ─────────────────────────────
+                        // A dim mono line under the task text, on the Done page
+                        // only (see `showCompletedAt`).
+                        //
+                        // Anchored UNDER `textBlock` rather than centred in the
+                        // row, so it sits with the task it describes and stays
+                        // under the last line when a long task is expanded.
+                        // One line, elided, so a narrow sidebar can never make
+                        // a stamp taller than the height the row reserved for
+                        // it.
+                        //
+                        // MONO because it is a timestamp, not prose: digits in
+                        // a monospace face line up from row to row, which is
+                        // what makes a column of completion times scannable.
+                        // Smaller and dimmer than the task so it reads as a
+                        // footnote to it rather than a second task.
+                        StyledText {
+                            id: completedLabel
+                            visible: todoItem.showCaption
+                            width: parent.width
+                            clip: true
+                            anchors.left: parent.left
+                            anchors.top: textBlock.bottom
+                            anchors.topMargin: todoItem.showCaption ? root.captionGap : 0
+                            wrapMode: Text.NoWrap
+                            elide: Text.ElideRight
+                            maximumLineCount: 1
+                            font.family: Appearance.font.family.monospace
+                            font.pixelSize: Appearance.font.pixelSize.smaller
+                            color: Appearance.m3colors.m3outline
+                            // Formatted with the SAME date and time formats the
+                            // config already uses for the clock, so a completion
+                            // stamp and the clock can never disagree about how a
+                            // date is written.
+                            text: {
+                                const ts = todoItem.completedAt
+                                if (ts <= 0)
+                                    return ""
+                                const d = new Date(ts)
+                                const dateFmt = Config.options?.time.dateWithYearFormat ?? "dd/MM/yyyy"
+                                const timeFmt = Config.options?.time.format ?? "hh:mm"
+                                return Qt.locale().toString(d, dateFmt)
+                                    + " " + Qt.locale().toString(d, timeFmt)
+                            }
                         }
 
                         // ── The editor ──────────────────────────────────────
@@ -1715,6 +1906,31 @@ Item {
                     // vertical middle of an expanded row while the circle stays at
                     // the top, which looks like the row fell apart.
                     RowLayout {
+                        id: actionsBlock
+                        // Stepped out of the way while the row plays its Done
+                        // badge: the badge sits exactly where these three
+                        // controls are, and a live delete button under a "Done"
+                        // pill would be a trap.
+                        //
+                        // Opacity, NOT `visible`: this block's
+                        // `Layout.preferredWidth` reads its own `visible`, so
+                        // hiding it would hand its 90px back to the task text
+                        // and re-elide every row the instant it was ticked -- a
+                        // visible reflow of the whole list as the thanks for
+                        // one click.
+                        opacity: todoItem.exiting ? 0 : 1
+                        // ...and DEAD while it is out of sight. Faded to nothing
+                        // is not the same as gone: the three buttons would still
+                        // be live targets under a pill that says the task is
+                        // finished, and a click landing on an invisible delete
+                        // is the trap the badge is meant to remove. `enabled`
+                        // cascades, so the handlers inside go with it.
+                        enabled: !todoItem.exiting
+
+                        Behavior on opacity {
+                            animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+                        }
+
                         // `editing` is read here so the row REL-AXOUTS around
                         // the save/cancel pair while a task is being edited.
                         // The space is reserved rather than taken, because the
@@ -1817,7 +2033,10 @@ Item {
                                         root.cancelEdit();
                                         return;
                                     }
-                                    root.copyText(todoItem.item.content);
+                                    // Another row's copy button is a press outside
+                                    // the editor: the draft is applied first.
+                                    root.commitOpenEdit();
+                                    root.copyText(todoItem.content);
                                     copyFeedback.flash = true;
                                     copyFeedback.restart();
                                 }
@@ -1875,8 +2094,12 @@ Item {
                                         root.commitEdit(todoItem.taskId);
                                         return;
                                     }
+                                    // Opening ANOTHER row's editor replaces the
+                                    // draft, so the one already open is applied
+                                    // rather than silently thrown away.
+                                    root.commitOpenEdit();
                                     root.beginEdit(todoItem.taskId,
-                                                   todoItem.item.content);
+                                                   todoItem.content);
                                 }
                             }
                         }
@@ -1894,7 +2117,7 @@ Item {
                                 width: 26
                                 height: 26
                                 radius: Appearance.rounding.small
-                                color: deleteHover.containsMouse
+                                color: deleteHover.containsMouse && !todoItem.editing
                                     ? Appearance.colors.colLayer1Hover
                                     : "transparent"
 
@@ -1907,6 +2130,21 @@ Item {
                                 anchors.centerIn: parent
                                 text: "close"
                                 iconSize: 18
+                                // STOOD DOWN while the row is being edited.
+                                //
+                                // Slot 1 already shows a cross in edit mode --
+                                // that is the CANCEL of the cancel/save pair --
+                                // so a second cross here put two ways to abandon
+                                // the draft side by side with one way to keep
+                                // it. An editor is a yes/no question; it gets
+                                // one of each.
+                                //
+                                // The SLOT stays. Its reserved 30px is what
+                                // keeps the task text from reflowing the instant
+                                // the editor opens (see `actionsWidth`); only
+                                // the glyph and its hit area stand down, so
+                                // nothing moves and nothing else changes.
+                                visible: !todoItem.editing
                                 color: deleteHover.containsMouse
                                     ? Appearance.colors.colOnLayer1
                                     : Appearance.m3colors.m3outline
@@ -1923,8 +2161,82 @@ Item {
 
                             TapHandler {
                                 id: deleteMouse
+                                // Inert with the glyph hidden above: the 30px
+                                // would otherwise still be a live delete target
+                                // with nothing drawn on it.
+                                enabled: !todoItem.editing
                                 onTapped: Todo.deleteById(todoItem.taskId)
                             }
+                        }
+                    }
+                }
+
+                // ── The Done badge ────────────────────────────────────────
+                //
+                // A small "Done" pill on a row that has just been ticked,
+                // held for the length of that row's exit and drawn over the
+                // space its own action buttons were using -- they fade out
+                // from underneath it, so the acknowledgement takes the
+                // controls' place rather than covering three live targets.
+                //
+                // It arrives from the RIGHT (`transformOrigin: Item.Right`),
+                // which is the edge it sits on and the direction the row is
+                // about to leave in: the badge grows out of the side the row
+                // exits towards, so the two motions read as one gesture
+                // instead of as a pill appearing in the middle of the row.
+                //
+                // A SIBLING of the layout above, not a fourth child of it.
+                // A child would take its width from the task text, and this
+                // has to cost the row nothing while it animates in.
+                Rectangle {
+                    id: doneBadge
+                    // Gone completely once faded. A 0-opacity rectangle is
+                    // still an item over the buttons, and one that is merely
+                    // invisible is a hit target nobody can see.
+                    visible: opacity > 0
+                    anchors.right: parent.right
+                    anchors.rightMargin: root.cardPad
+                    anchors.top: parent.top
+                    // On the same line as the completion circle and the action
+                    // buttons: centred in a one-line row, and `textPadding`
+                    // down on an expanded one, where the circle is pinned to the
+                    // first line rather than to the middle of the block.
+                    anchors.topMargin: todoItem.expanded
+                        ? root.textPadding + 4
+                        : (root.rowHeight - height) / 2
+                    // Sized by its own contents, so it says "Done" in whatever
+                    // that word is in the active language.
+                    width: badgeRow.implicitWidth + 18
+                    height: 22
+                    radius: height / 2
+                    color: Appearance.colors.colPrimary
+                    opacity: todoItem.exiting ? 1 : 0
+                    scale: todoItem.exiting ? 1 : 0.7
+                    transformOrigin: Item.Right
+
+                    Behavior on opacity {
+                        animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+                    }
+                    Behavior on scale {
+                        animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+                    }
+
+                    RowLayout {
+                        id: badgeRow
+                        anchors.centerIn: parent
+                        spacing: 3
+
+                        MaterialSymbol {
+                            text: "check"
+                            iconSize: 14
+                            color: Appearance.colors.colOnPrimary
+                        }
+                        StyledText {
+                            // The same word, from the same translation, as the
+                            // tab this row is on its way to.
+                            text: Translation.tr("Done")
+                            font.pixelSize: Appearance.font.pixelSize.smaller
+                            color: Appearance.colors.colOnPrimary
                         }
                     }
                 }
@@ -1951,15 +2263,160 @@ Item {
     function toggleExpanded(taskId) {
         if (taskId < 0)
             return;
-        const at = expandedSet.indexOf(taskId);
-        if (at === -1) {
-            // Reassign rather than mutate: ScriptModel watches the reference.
-            expandedSet = expandedSet.concat([taskId]);
-        } else {
-            const next = expandedSet.slice(0);
-            next.splice(at, 1);
-            expandedSet = next;
+        if (isExpanded(taskId)) {
+            collapse(taskId);
+            return;
         }
+        // Reassign rather than mutate: ScriptModel watches the reference.
+        expandedSet = expandedSet.concat([taskId]);
+    }
+
+    // ── The exit, and the badge that covers it ─────────────────────────────
+    //
+    // Ticking a task is now three steps, where it used to be one:
+    //
+    //   1. the task is marked done at once, so the circle fills and the text
+    //      dims in the frame you clicked -- the feedback the click is owed;
+    //   2. the row STAYS where it is for `exitMs` and grows a small "Done"
+    //      badge, so that change is acknowledged where your eye already is;
+    //   3. the row leaves this list, sliding out while the rows below it come
+    //      up to close the gap, and the task is on the Done tab -- where it has
+    //      been since step 1, and where it is now the only copy.
+    //
+    // The set below is what holds step 2 open. It is VIEW state and it lives in
+    // the view, which is where the old `minimizedIds` in Todo.qml should always
+    // have been: it says "this row is still on screen for a beat", not "this
+    // task is still unfinished". The task is done the whole time and the Done
+    // page has it the whole time; the Unfinished page's filter (see TodoWidget)
+    // only keeps the row visible while its id is in here.
+    //
+    // Expiries rather than a Timer per row: a Timer belongs to a DELEGATE, and
+    // delegates are recycled. Scrolling the row out of view -- or the filter
+    // rebuilding -- would destroy the one thing responsible for letting it go,
+    // and the row would be stuck on the Unfinished page until the shell
+    // restarted. One list-level timer reads the deadlines, so the exit always
+    // completes, whoever started it and whatever happens to the row.
+    property var exitIds: []
+    property var exitUntil: ({})
+
+    // How long the badge is held before the row leaves. Scaled by `motionScale`
+    // like every other duration in the shell, so a performance power mode does
+    // not sit through half a second of acknowledgement on every tick.
+    readonly property int exitMs: Math.round(520 * Appearance.animationCurves.motionScale)
+
+    function isExiting(taskId) {
+        return exitIds.indexOf(taskId) !== -1;
+    }
+
+    // Reassigned rather than mutated throughout: the row's badge binding and
+    // the page's filter both re-evaluate on the reference changing, which is
+    // the only signal a plain JS object gives.
+    function beginExit(taskId) {
+        if (isExiting(taskId))
+            return;
+        const deadlines = Object.assign({}, exitUntil);
+        deadlines[taskId] = Date.now() + exitMs;
+        exitUntil = deadlines;
+        exitIds = exitIds.concat([taskId]);
+    }
+
+    // The tick UNDONE inside the badge's window: the task is not finishing
+    // after all, so the row drops the badge and stays where it is instead of
+    // playing "Done" over a task that is no longer done.
+    function cancelExit(taskId) {
+        if (!isExiting(taskId))
+            return;
+        exitIds = exitIds.filter(id => id !== taskId);
+        const deadlines = Object.assign({}, exitUntil);
+        delete deadlines[taskId];
+        exitUntil = deadlines;
+    }
+
+    Timer {
+        id: exitTimer
+        interval: 40
+        repeat: true
+        // Declarative, so it cannot be left running: the only way to have ids
+        // in the set is to have started an exit.
+        running: root.exitIds.length > 0
+        onTriggered: {
+            const now = Date.now();
+            const keep = root.exitIds.filter(id => (root.exitUntil[id] ?? 0) > now);
+            if (keep.length === root.exitIds.length)
+                return;
+            root.exitIds = keep;
+            if (keep.length === 0)
+                root.exitUntil = ({});
+        }
+    }
+
+    // ── The tick ───────────────────────────────────────────────────────────
+    //
+    // Marking a task done puts it on Done, at once -- the Done page has it from
+    // this moment, and it is the only copy that outlives the exit. What this
+    // controls is only how the row on THIS page goes away: with a badge and a
+    // slide, not by blinking out of existence (see `exitIds`).
+    //
+    // It used to do something cleverer and worse. The row was flagged
+    // "minimised" before being marked done, which kept it on this page across
+    // the reassignment and let it fold in place under the hand that ticked it,
+    // retiring to Done only when the page was left. The result was a task that
+    // read as unfinished for as long as you looked at the list -- the row
+    // stayed on the page of things still owed, and Done did not have it --
+    // which is the opposite of what the tick says. The badge is not that: the
+    // task is done and on Done throughout, and this holds nothing but a row.
+    //
+    // The row also FOLDS on its way out -- a task that was expanded to be read,
+    // or that `beginEdit` opened so the caret had room, collapses to one line
+    // as it leaves.
+    //
+    // The task's state is read from the service rather than from a delegate's
+    // `done`, so this can be called by the widget's IPC self-test too, where
+    // there is no delegate in scope.
+    function tick(taskId) {
+        if (taskId === undefined || taskId === null || taskId < 0)
+            return;
+        const item = Todo.list.find(t => t.id === taskId);
+        if (!item)
+            return;
+        if (!item.done) {
+            // ARMED BEFORE THE WRITE, and the order is load-bearing. The write
+            // is what makes the page's filter run, and a filter that ran before
+            // the exit was armed would drop the row -- so the view would be
+            // asked to remove it and, a statement later, to add it back, which
+            // is a flicker at best and a ghosted row at worst.
+            root.beginExit(taskId);
+            Todo.markDoneById(taskId);
+        } else {
+            // The other way round here, for the same reason: unticking first
+            // means the filter keeps the row on its own (`!done`), so cancelling
+            // the exit afterwards cannot drop it either.
+            Todo.markUnfinishedById(taskId);
+            root.cancelExit(taskId);
+        }
+        collapse(taskId);
+    }
+
+    // Fold ONE row back to a single line: the tick's half of `toggleExpanded`.
+    //
+    // Ticking a task off is finishing with the row, and a row that was opened
+    // to be read -- or that `beginEdit` opened so the caret had somewhere to go
+    // -- has no reason to stay open under the hand that just finished it. The
+    // row animates back down to `rowHeight`, the text goes back to being capped
+    // at `collapsedLines`, and the circle returns to the centre of a one-line
+    // row.
+    //
+    // A no-op on a row that is already shut, so the tick can call it
+    // unconditionally.
+    function collapse(taskId) {
+        if (taskId < 0)
+            return;
+        const at = expandedSet.indexOf(taskId);
+        if (at === -1)
+            return;
+        const next = expandedSet.slice(0);
+        next.splice(at, 1);
+        expandedSet = next;
     }
 
     function collapseAll() {
@@ -1969,6 +2426,9 @@ Item {
 
     // ── Inline editing ──────────────────────────────────────────────────
     //
+    // Did the edit field open this row by itself? See `beginEdit`/`commitEdit`.
+    property bool editOpenedRow: false
+
     // Which task is being edited RIGHT NOW, as a task id, -1 for none.
     //
     // Held here for the same reason `expandedSet` is: delegates are recycled
@@ -1993,6 +2453,12 @@ Item {
             return;
         root.editingId = id;
         root.editDraft = String(currentContent ?? "");
+        // Remember whether the EDITOR is the thing opening this row, before
+        // `expandForEditing` asks and the answer changes. The tick that accepts
+        // the edit minimises the row it opened; a row the reader had already
+        // opened stays open, which is the distinction `expandForEditing`
+        // already makes on the way in.
+        root.editOpenedRow = !root.isExpanded(id);
         // Editing and reading the full text are the same view, so make sure the
         // row is expanded: otherwise a one-line task puts the caret in a strip
         // one line tall, which is miserable to type a long correction into.
@@ -2006,12 +2472,20 @@ Item {
         // unchanged; either way leave edit mode so the row goes back to
         // reading normally.
         Todo.editById(id, root.editDraft);
+        // Read before `cancelEdit`, which clears it.
+        const openedByEditor = root.editOpenedRow === true;
         root.cancelEdit();
+        // The tick is a finish: a row that only grew so the caret had room
+        // minimises again the moment the edit is accepted, so accepting a
+        // correction leaves a one-line task behind instead of a paragraph.
+        if (openedByEditor)
+            root.collapse(id);
     }
 
     function cancelEdit() {
         root.editingId = -1;
         root.editDraft = "";
+        root.editOpenedRow = false;
     }
 
     // Expand only if the row is collapsed. Editing an already-expanded row

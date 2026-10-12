@@ -20,8 +20,20 @@
 # Quality lives in ~/.config/hypr/custom/quality.lua, which hyprland.lua
 # requires after every other custom file (same pattern as performance.lua), so
 # writing the file + `hyprctl reload` is the whole application. Scale is read
-# at reload by custom/general.lua from ~/.cache/display/scale; the X11-app
-# half (Steam etc.) reads the same file in the fish login env at next login.
+# at reload by custom/general.lua from ~/.cache/display/scale.
+#
+# The X11-app half follows from the same file, and now follows IMMEDIATELY at
+# the point of change rather than at the next login:
+#
+#   * x11-dpi.sh is called below, which rewrites Xft.dpi on the X server
+#     (96 * scale), so X11 GTK/Qt/Firefox/JetBrains apps pick the new size up
+#     the next time they start.
+#   * custom/env.lua reads the same file, so Steam's desktop-UI scale and Qt's
+#     rounding policy follow on the next app launched from the session.
+#
+# force_zero_scaling (custom/general.lua) is the exception: it is read when
+# XWayland is created, so it needs a re-login or an XWayland restart, not a
+# reload. It does not change with the scale anyway.
 #
 # --quiet skips the desktop notification (for use during login).
 
@@ -200,6 +212,17 @@ if hyprctl reload >/dev/null 2>&1; then
 else
     echo "hyprctl reload failed" >&2
     exit 1
+fi
+
+# Follow the scale change through to the X11 apps. Runs after the reload so a
+# failed reload never leaves the X server on a scale the compositor is not
+# using; the script no-ops when there is nothing to change. Failures here are
+# reported but not fatal -- the compositor scale has already been applied.
+if [[ -n "$NEW_SCALE" ]]; then
+    X11_DPI="$HOME/.config/hypr/custom/scripts/x11-dpi.sh"
+    if [[ -x "$X11_DPI" ]]; then
+        "$X11_DPI" || echo "x11-dpi.sh failed (X11 apps keep the old size)" >&2
+    fi
 fi
 
 msg=""

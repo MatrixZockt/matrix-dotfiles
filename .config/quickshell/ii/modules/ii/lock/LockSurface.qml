@@ -858,10 +858,22 @@ MouseArea {
         // anchored by the horizontal centre, walked out to the left margin
         // and up from the bottom by measuring the column's OWN width/height.
         // Using anything else leaves it stranded mid-screen.
+        //
+        // HALF the height, not all of it. The anchor is the vertical CENTRE,
+        // so walking the column's bottom up to the 8.5% margin means moving the
+        // centre up by "the margin plus HALF the column" -- the half-height is
+        // the distance from the centre to the bottom edge. Subtracting the full
+        // height instead (measured 2026-10-11, greeter rendered offscreen at
+        // 1707x1067: column 214 px tall) parked the whole form -- the account
+        // tile, the password line, the return key -- 107 px above where the
+        // design puts it, while the clock above kept its own 8.5% and the
+        // corner telemetry kept its 22 px. That is the ragged thing the eye
+        // reads as "the input box is not aligned": the form floated, and the
+        // two-corner rhythm this arrangement is drawn around was one-sided.
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.horizontalCenterOffset: -Math.round(parent.width / 2 - width / 2 - Math.round(parent.width * 0.06))
         anchors.verticalCenter: parent.verticalCenter
-        anchors.verticalCenterOffset: Math.round(parent.height / 2 - height - parent.height * 0.085)
+        anchors.verticalCenterOffset: Math.round(parent.height / 2 - height / 2 - parent.height * 0.085)
         width: Math.round(root.width * 0.34)
         spacing: Math.round(root.height * 0.013)
 
@@ -975,37 +987,65 @@ MouseArea {
                 }
             }
 
-            TextInput {
-                id: sheetPassword
+            // The field as the greeter builds it, in the same two parts.
+            //
+            // Main.qml's passwordField is SDDM's PasswordBox: a 64 px FocusScope,
+            // 8 px in from the item's left edge and 0.9 x fieldHeight + 8 in
+            // from its right, its bottom 4 px above the hairline -- holding a
+            // TextBox, whose TextInput is ONE LINE TALL and CENTRED in it
+            // (`width: parent.width - 16; anchors.centerIn: parent`).
+            //
+            // The lock used to be one bare TextInput with none of that: no
+            // left inset, and a line drawn at the TOP of a full-height box,
+            // which left 46 px of air between the value and the hairline where
+            // the login screen leaves 26. Both differences are structural, so
+            // they are undone structurally rather than tuned: the box is the
+            // box, and the field is a one-line field centred in it.
+            //
+            // Rendered offscreen side by side at the sheet's own 1707x1067
+            // geometry (field 64, font 20, both screens' real fonts), the
+            // value's ink lands on the SAME rows on both, relative to the
+            // hairline, and at the same x: -42..-27, 9 px in from the column's
+            // left edge.
+            Item {
+                id: sheetPasswordBox
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
-                height: root.sheetField
-                anchors.rightMargin: Math.round(root.sheetField * 0.9)
+                anchors.leftMargin: 8
+                anchors.rightMargin: Math.round(root.sheetField * 0.9) + 8
                 anchors.bottomMargin: 4
-                clip: true
+                height: root.sheetField
 
-                color: Appearance.colors.colOnSurface
-                font.family: Appearance.font.family.main
-                font.pixelSize: Math.round(root.sheetField * 0.32)
-                font.letterSpacing: 0.8
-                selectionColor: Appearance.colors.colSecondaryContainer
-                selectedTextColor: Appearance.colors.colOnSecondaryContainer
+                TextInput {
+                    id: sheetPassword
+                    width: parent.width
+                    height: implicitHeight
+                    // One line, centred -- TextBox's `anchors.centerIn: parent`.
+                    anchors.centerIn: parent
+                    clip: true
 
-                echoMode: TextInput.Password
-                inputMethodHints: Qt.ImhSensitiveData
-                enabled: root.contextReady && !root.context.unlockInProgress
+                    color: Appearance.colors.colOnSurface
+                    font.family: Appearance.font.family.main
+                    font.pixelSize: Math.round(root.sheetField * 0.32)
+                    selectionColor: Appearance.colors.colSecondaryContainer
+                    selectedTextColor: Appearance.colors.colOnSecondaryContainer
 
-                // The shared LockContext is the single source of the typed
-                // text on every arrangement, so the toolbar's field and this
-                // one can never disagree about what has been typed.
-                onTextChanged: {
-                    if (root.contextReady)
-                        root.context.currentText = text;
+                    echoMode: TextInput.Password
+                    inputMethodHints: Qt.ImhSensitiveData
+                    enabled: root.contextReady && !root.context.unlockInProgress
+
+                    // The shared LockContext is the single source of the typed
+                    // text on every arrangement, so the toolbar's field and this
+                    // one can never disagree about what has been typed.
+                    onTextChanged: {
+                        if (root.contextReady)
+                            root.context.currentText = text;
+                    }
+                    onAccepted: root.context.tryUnlock(root.ctrlHeld)
+                    Keys.onPressed: event => root.context.resetClearTimer()
+                    Keys.onEscapePressed: root.context.currentText = ""
                 }
-                onAccepted: root.context.tryUnlock(root.ctrlHeld)
-                Keys.onPressed: event => root.context.resetClearTimer()
-                Keys.onEscapePressed: root.context.currentText = ""
             }
 
             // The commit control: a return KEYCAP, not the round arrow. The
@@ -1053,6 +1093,49 @@ MouseArea {
                     cursorShape: Qt.PointingHandCursor
                     onClicked: root.context.tryUnlock()
                 }
+            }
+        }
+
+        // ---- status ------------------------------------------------------
+        // A RESERVED line, the same one Main.qml reserves last in its column,
+        // and reserved even when it has nothing to say. The reservation is not
+        // decoration: the height of this row is what puts the password line
+        // where the login screen puts it.
+        //
+        // This column had no such row, so the whole form -- the account tile,
+        // the input box, the return key -- sat one column spacing plus one line
+        // LOWER than the greeter's. Measured offscreen on both at the same size
+        // (844x502): the password baseline was at 91.4% of the height here and
+        // 87.9% on the login screen, which is the "the lock's input box is not
+        // where the login's is" the eye reads as a form that has slipped down
+        // toward the bottom edge. Main.qml's own note on its copy of this row
+        // says the same thing from the other side.
+        //
+        // The greeter reserves the row for a failed login. This one has a
+        // reason of its own: sheet mode reports a wrong password by turning the
+        // line red and nothing else, while the classic arrangement says it in
+        // the field's placeholder. The row is what a claim of "the same" has to
+        // be built out of -- one phrase, one line, elided rather than wrapped,
+        // so the height it reserves is exactly the height Main.qml reserves and
+        // cannot grow when a message appears.
+        Item {
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: parent.width
+            height: sheetStatusLabel.implicitHeight + 2
+
+            StyledText {
+                id: sheetStatusLabel
+                anchors.horizontalCenter: parent.horizontalCenter
+                visible: GlobalStates.screenUnlockFailed
+                text: GlobalStates.screenUnlockFailed
+                    ? Translation.tr("Incorrect password") : ""
+                color: Appearance.colors.colError
+                font.family: Appearance.font.family.main
+                font.pixelSize: Math.round(root.sheetField * 0.26)
+                horizontalAlignment: Text.AlignHCenter
+                width: parent.width
+                maximumLineCount: 1
+                elide: Text.ElideRight
             }
         }
     }

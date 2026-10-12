@@ -45,16 +45,23 @@ import QtQuick
 Item {
     id: root
 
-    // "play_arrow" | "pause" | "skip_previous" | "skip_next"
+    // "play_arrow" | "pause" | "skip_previous" | "skip_next" | "shuffle" | "repeat"
     //
     // `playing` is a convenience over the top of that: it picks pause or
     // play_arrow so a caller does not have to build the string itself and get
     // it subtly wrong.
+    //
+    // `modeOn` is for the two MODE marks (shuffle, repeat): while engaged the
+    // ring is on and the glyph is accented at rest -- the Spotify lit-dot,
+    // expressed with this mark's own 1px ring language instead of a dot.
     property string glyph: "play_arrow"
     property bool playing: false
 
+    property bool modeOn: false
+
     readonly property bool isPause: glyph === "pause"
     readonly property bool isSkip: glyph === "skip_previous" || glyph === "skip_next"
+    readonly property bool isMode: glyph === "shuffle" || glyph === "repeat"
 
     // Only play/pause gets the pad. The bar's skips are bare marks on purpose.
     //
@@ -100,7 +107,7 @@ Item {
     // and the wrong amount of it -- the two marks should share one corner.
     readonly property real radius: Appearance.rounding.small
 
-    readonly property color markColor: (root.hovered || root.pressedMark)
+    readonly property color markColor: (root.hovered || root.pressedMark || root.modeOn)
         ? Appearance.colors.colPrimary
         : Appearance.colors.colOnLayer0
 
@@ -134,7 +141,9 @@ Item {
         // larger play button is an empty rounded rectangle until hovered.
         // Press keeps a brighter ring than hover, so a held press still reads
         // as harder than a pass-over.
-        opacity: root.outlined
+        opacity: root.modeOn
+            ? (root.pressedMark ? 0.95 : (root.hovered ? 0.7 : 0.9))
+            : root.outlined
             ? (root.pressedMark ? 0.95 : (root.hovered ? 0.7 : 0.28))
             : (root.hovered ? 0.55 : (root.pressedMark ? 0.8 : 0))
         Behavior on opacity {
@@ -150,7 +159,10 @@ Item {
         iconSize: root.em
         // WHOLE numbers only. 0 is a clean empty outline at rest, 1 is solid
         // on hover, and anything between them is the shape-inside-a-shape.
-        fill: (root.hovered || root.pressedMark) ? 1 : 0
+        // A LIT mode mark stays filled at rest -- that is the state being
+        // advertised; the ring alone would be too quiet for on/off.
+        fill: (root.hovered || root.pressedMark || (root.modeOn && root.isMode))
+            ? 1 : 0
         color: root.markColor
         // Pressing dips the glyph; hovering does NOT scale it. These are
         // natively rendered, so a scale transform smears the raster -- the

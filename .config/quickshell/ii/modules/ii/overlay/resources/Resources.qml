@@ -120,7 +120,7 @@ StyledOverlayWidget {
     readonly property bool onScreen: GlobalStates.overlayOpen || (root.pinned && root.open)
 
     function syncSampling() {
-        HardwareStats.active = root.onScreen;
+        HardwareStats.setActive("resources", root.onScreen);
         // The process table only runs while it is the page being shown: it is a
         // second interpreter starting up every couple of seconds, which is fine
         // to pay for the table you are reading and silly to pay for a page you
@@ -139,7 +139,7 @@ StyledOverlayWidget {
     // to say so on the way out -- otherwise the last value (`true`) outlives it and
     // the readings carry on in the background for the rest of the session.
     Component.onDestruction: {
-        HardwareStats.active = false;
+        HardwareStats.setActive("resources", false);
         ProcessList.setActive("resources", false);
     }
     Connections {

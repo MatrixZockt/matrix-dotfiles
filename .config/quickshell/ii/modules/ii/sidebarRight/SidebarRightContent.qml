@@ -465,8 +465,9 @@ Item {
             // down). This row's power button is the short, everyday one: the
             // three things you actually do at the end of a session, in the
             // corner you reach for. Sleep is deliberately absent from the
-            // account menu's sense of the word and comes from Session.sleep(),
-            // which keeps the session alive rather than ending it.
+            // account menu's sense of the word and comes from Session.suspend(),
+            // which keeps the session alive rather than ending it -- and is the
+            // same suspend closing the lid performs.
         }
 
         // The power menu, built on first click and dropped on close, for the

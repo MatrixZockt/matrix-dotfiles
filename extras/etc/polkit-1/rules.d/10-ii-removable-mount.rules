@@ -1,0 +1,53 @@
+// Removable media: passwordless mounting for the desktop session user.
+//
+// WHAT THIS ANSWERS. There is no udisks2 on this desktop, so the file manager
+// mounts a USB stick or an SD card with
+// `pkexec /usr/bin/mount --mkdir -t <fs> -o uid=… /dev/sdX1 /run/media/<user>/…`
+// (see mountVolume in modules/filemanager/FileManagerContent.qml). With no
+// rule for it, polkit falls back to auth_admin on the generic exec action, so
+// every stick and every card cost the admin password -- a prompt from the
+// shell's own polkit agent, arriving in the middle of plugging something in.
+// That prompt is the entire reason this file exists.
+//
+// THE COMMANDS WERE SHAPED FOR IT. The file manager runs mount, umount and
+// blockdev as NAMED PROGRAMS with their own argv, never
+// `pkexec bash -c "…"`, because a rule that allows bash allows everything.
+// This is the rule those commands were written for, at the path the file
+// manager's own note names, and the same reason the shell's Volumes service
+// can auto-mount a device the moment it is plugged in without asking anybody.
+//
+// THE HONEST LIMIT OF THE SCOPE. polkit can see the PROGRAM, not its
+// arguments, so this cannot say "removable media only". What it grants is: the
+// local, active session user in `wheel` may run these three binaries without
+// authenticating -- and their argv is theirs to choose, which is the power a
+// root `mount` invocation carries (mounting anything anywhere, over any
+// path). That is the trade the request asked for, and it is why the grant is
+// narrowed where it honestly can be: `subject.local && subject.active`, so
+// allow_inactive stays false and the same commands still require
+// authentication from a remote or background caller.
+//
+// NOT INCLUDED, on purpose: mkfs (format), the label tools (rename), fsck
+// (check) and fstrim (optimise). Those are deliberate, destructive operations
+// on somebody's drive, and the prompt in front of them is a feature.
+// blockdev is here only for `--rereadpt`, which is what the file manager's
+// rescan runs for a card whose partition table the kernel has not read yet --
+// the first thirty seconds of a freshly inserted SD card, and the one case
+// where auto-mounting has nothing to mount yet.
+polkit.addRule(function (action, subject) {
+    if (action.id !== "org.freedesktop.policykit.exec") {
+        return undefined;
+    }
+    if (!(subject.local && subject.active)) {
+        return undefined;
+    }
+    if (!subject.isInGroup("wheel")) {
+        return undefined;
+    }
+    var program = action.lookup("program");
+    if (program === "/usr/bin/mount"
+            || program === "/usr/bin/umount"
+            || program === "/usr/bin/blockdev") {
+        return "yes";
+    }
+    return undefined;
+});

@@ -1,0 +1,13 @@
+[Unit]
+Description=ii shell watchdog - relaunches the Quickshell desktop shell if it dies
+# The shell is what draws the bar, panels and OSDs; every shell-integrated
+# keybind (brightness, cliphist, the XF86 media OSDs) depends on it living.
+
+[Service]
+Type=simple
+ExecStart=%h/.config/quickshell/ii/scripts/launch/shell-watchdog.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

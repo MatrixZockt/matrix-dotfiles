@@ -1,0 +1,23 @@
+[Unit]
+Description=Local llama-server (Qwen3-8B) for Claude Code
+After=network.target
+# Auto-start when the user session is available
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+# The command line is built by the launcher from the launch parameters set in
+# the Local AI panel (see LlamaService.qml), so editing Context / GPU layers /
+# Parallel there actually changes what runs. 
+ExecStart=%h/.local/bin/llama-server-launch
+Restart=on-failure
+RestartSec=5
+# Give the model time to load (it's ~5GB)
+TimeoutStartSec=300
+# Keep logs accessible
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=llama-server-local
+
+[Install]
+WantedBy=default.target

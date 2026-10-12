@@ -215,6 +215,13 @@ Item {
     // tiny -- and it now happens once, on the CPU, at this size.
     readonly property int panelIconSize: 18
 
+    // Whether anything of the tray's is on screen: the card, or a menu raised
+    // out of it. The arrow reads this instead of `trayOverflowOpen` alone,
+    // because a menu out of the tray is the tray showing something even though
+    // the card itself has been dismissed (see `dismissed` on the card below).
+    readonly property bool trayShowing: GlobalStates.trayOverflowOpen
+        || root.activeMenu !== null
+
     function grabFocus() {
         focusGrab.active = true;
     }
@@ -226,6 +233,12 @@ Item {
             root.activeMenu = null;
         }
         root.activeMenu = window;
+        // A dismissal belongs to the menu that caused it, and this is where
+        // one ends and the next begins -- including the case of NO menu,
+        // which is the watchdog path below. Leaving it set with nothing out
+        // would make the next opening click draw a card that is dismissed on
+        // arrival, i.e. a tray that silently stops opening.
+        trayCard.dismissed = false;
         // Restart the hold's own watchdog (see below). A new menu is a new
         // chance to close cleanly, and a stale count would cut a menu that
         // has only just opened.
@@ -262,6 +275,48 @@ Item {
         focusGrab.active = false;
     }
 
+    // A menu closing has to take its hold with it. `activeMenu` is two things
+    // at once: what keeps the card up while a menu is out (`holdOpen` on
+    // StyledPopup), and what tells the arrow that something of the tray's is
+    // already showing. A menu that closed without clearing it did both of
+    // those wrong -- the card stayed held open after its menu had been
+    // dismissed, until the twenty-second watchdog below noticed, which reads
+    // as a card that refuses to close, and the arrow was still being told a
+    // menu was out long after one was.
+    //
+    // The window is passed in rather than assumed: two icons can have menus
+    // opened in turn, and the second one closing must not clear the record of
+    // a first one that is somehow still up.
+    function noteMenuClosed(window) {
+        if (root.activeMenu === window)
+            root.activeMenu = null;
+        // With no menu out there is nothing left to keep the card away, and
+        // the next time the tray is opened it must open normally rather than
+        // inherit a dismissal from a menu that has already ended.
+        if (root.activeMenu === null)
+            trayCard.dismissed = false;
+        root.releaseFocus();
+    }
+
+    // A press inside the tray, from one of its own icons. Any menu that is out
+    // belongs to an icon and the press means the user has moved on from it: the
+    // MENU goes, the CARD stays. That pair is the whole point -- the card is
+    // where the user is working, and taking it down with the menu is what made
+    // the tray unusable while a menu was out.
+    //
+    // `activeMenu` is cleared here rather than left to the menu's own close so
+    // that the hold cannot outlive it, and the grab is left alone: with the
+    // card in its window list, the grab is what hands the press to the icon
+    // that was pressed.
+    function dismissOpenMenu() {
+        const menu = root.activeMenu;
+        if (menu === null)
+            return;
+        root.activeMenu = null;
+        if (typeof menu.close === "function")
+            menu.close();
+    }
+
     function closeOverflowMenu() {
         // Also drop the dropdown itself. An app quitting while its card is
         // open used to leave the card hanging over the bar with one fewer
@@ -283,15 +338,29 @@ Item {
     HyprlandFocusGrab {
         id: focusGrab
         active: false
-        // ONLY the per-app context menu. The dropdown deliberately is NOT in
-        // this list: it used to be, as `trayOverflowLayout.QsWindow?.window`
-        // -- but that is a GridLayout inside the dropdown, not a window, so
-        // the list was [undefined, null] and the grab had nothing to hold.
-        // It cleared on the spot, `onCleared` set trayOverflowOpen back to
-        // false, and the arrow's clicked background plate came and went in
-        // the same frame. That was the "dropdown does nothing" and the
-        // stuck highlight on the arrow, and it is one bug, not two.
-        windows: [root.activeMenu]
+        // The menu AND the card it hangs off, because the menu alone is not a
+        // scope. Every press that is not on a whitelisted surface CLEARS the
+        // grab -- that is the protocol -- and `onCleared` below takes the card
+        // down with it. So with only the menu listed, a press anywhere else in
+        // the tray (another icon, the card's own padding) was a press
+        // "outside" the menu: the card and the menu the user was still using
+        // both vanished under the finger that was using them, and a right-click
+        // menu could be opened but not clicked.
+        //
+        // `trayCard.item` is the card's own window (LazyLoader.item, the
+        // PopupWindow inside StyledPopup) -- NOT the GridLayout the old list
+        // held, as `trayOverflowLayout.QsWindow?.window`: that was a layout and
+        // not a window, so the list was [undefined, null], the grab had nothing
+        // to hold, it cleared on the spot and `onCleared` set trayOverflowOpen
+        // straight back to false. The filter drops the nulls while the card is
+        // closed, so the list is never half-built.
+        // The card drops out of this list the moment it is dismissed, because
+        // it is not a surface the user can press any more (its input region is
+        // empty) -- and a whitelisted window that swallows nothing is worse
+        // than one that is not listed: the press would vanish into it instead
+        // of CLEARING the grab, so a click on the empty box where the card used
+        // to be would leave the menu up and cost a second click to close.
+        windows: [root.activeMenu, trayCard.dismissed ? null : trayCard.item].filter(w => w)
         onCleared: {
             GlobalStates.trayOverflowOpen = false;
             if (root.activeMenu) {
@@ -327,7 +396,7 @@ Item {
                 item: modelData
                 cellSize: root.cellSize
                 iconSize: root.iconSize
-                onMenuClosed: root.releaseFocus();
+                onMenuClosed: (qsWindow) => root.noteMenuClosed(qsWindow);
                 onMenuOpened: (qsWindow) => root.setExtraWindowAndGrabFocus(qsWindow);
             }
         }
@@ -376,14 +445,25 @@ Item {
         background.implicitWidth: root.cellSize
         background.implicitHeight: root.cellSize
         background.anchors.centerIn: this
-        toggled: GlobalStates.trayOverflowOpen
+        toggled: root.trayShowing
         property bool containsMouse: hovered
 
         downAction: () => {
             // Opens/closes the panel below the bar. Nothing is revealed
             // in place, so the bar's own strip is unchanged by the click
             // and the inline pockets keep their width.
-            GlobalStates.trayOverflowOpen = !GlobalStates.trayOverflowOpen;
+            //
+            // "What is showing", not "the flag". While a menu is out the card
+            // is held open with `trayOverflowOpen` still false, and the arrow
+            // is a click OUTSIDE the grab's scope -- so the grab clears and
+            // `onCleared` closes the card in the same press. A plain toggle
+            // then OPENED the card that the press was dismissing, and whether
+            // the arrow opened or closed came down to the order the toggle and
+            // the clear ran in. Asking whether anything of the tray's is on
+            // screen gives one answer whatever the order: a dismissal when
+            // there is something to dismiss, an opening click otherwise.
+            const showing = root.trayShowing;
+            GlobalStates.trayOverflowOpen = !showing;
         }
 
         // No plate behind the arrow -- not when open, not on hover, and no
@@ -512,9 +592,9 @@ Item {
                 text: "expand_more"
                 horizontalAlignment: Text.AlignHCenter
                 verticalAlignment: Text.AlignVCenter
-                color: GlobalStates.trayOverflowOpen
+                color: root.trayShowing
                     ? Appearance.colors.colOnSecondaryContainer : Appearance.colors.colOnLayer2
-                rotation: (GlobalStates.trayOverflowOpen ? 180 : 0) - (90 * root.vertical) + (180 * root.invertSide)
+                rotation: (root.trayShowing ? 180 : 0) - (90 * root.vertical) + (180 * root.invertSide)
 
                 // The state cue is COLOUR and FILL, never size.
                 //
@@ -528,7 +608,7 @@ Item {
                 // than the swell was and nothing around it moves -- this is
                 // what `HoverIconButton` already does for wifi, bluetooth and
                 // volume.
-                fill: (GlobalStates.trayOverflowOpen || trayOverflowButton.hovered) ? 1 : 0
+                fill: (root.trayShowing || trayOverflowButton.hovered) ? 1 : 0
 
                 Behavior on fill {
                     animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
@@ -552,13 +632,29 @@ Item {
         // (not "a box under the arrow"), and it was driven through a
         // Connections pair that could silently skip opening.
         StyledPopup {
+            id: trayCard
             hoverTarget: trayOverflowButton
-            // Right-clicking an icon opens that icon's menu in another
-            // window, which the pointer has to travel to -- so the pointer
-            // necessarily leaves this card, and without the hold the card
-            // takes that as its cue to close and destroy the menu with it.
-            // Held for as long as a menu is out, capped by the watchdog
-            // above so it cannot outlive one.
+            // Right-clicking an icon opens that icon's menu in ANOTHER
+            // window, and that window is not independent of this card: it is
+            // anchored to the icon inside it, and Quickshell popups are real
+            // compositor popups of the surface they hang from -- so closing
+            // the card destroys the menu in the same gesture that opened it.
+            //
+            // `holdOpen` answers the destruction half: it keeps the card's
+            // CONTENT alive for as long as a menu is out (capped by the
+            // watchdog above, so it cannot outlive one).
+            //
+            // `dismissed` answers the other half, and it is the half the user
+            // asked for: the pointer leaving the card for the menu means the
+            // CARD goes while the MENU stays -- the icon has been reached, the
+            // menu is where the pointer is going, and a card left behind it is
+            // a box the user has finished with sitting over the thing they are
+            // reading. It is set from `onAutoClose` below (the pointer has
+            // actually left) and written back to false at each end of a
+            // menu's life. Deliberately NOT a binding on `activeMenu`, which
+            // is why it is not spelled out here: a menu being out is not by
+            // itself a reason to take the card away -- the pointer may still
+            // be on the icons, choosing between them.
             holdOpen: root.activeMenu !== null
             // Opt in to the fade-and-grow. Off by default across the rest of
             // the bar's popups; the tray card is the one the eye lands on
@@ -592,10 +688,22 @@ Item {
             // every swipe past the end of the bar.
             clickOnly: true
             requestOpen: GlobalStates.trayOverflowOpen
-            // The pointer leaving both the card and the arrow closes it,
-            // which is what puts `trayOverflowOpen` back and drops the
-            // arrow's background plate.
-            onAutoClose: GlobalStates.trayOverflowOpen = false
+            // The pointer left both the card and the arrow. With nothing of
+            // the tray's raised, that closes the card, which is what puts
+            // `trayOverflowOpen` back and drops the arrow's plate.
+            //
+            // With a MENU raised out of it, the same gesture means the thing
+            // this card exists to get right: the pointer has gone to the
+            // menu, so the card gets out of the menu's way. Dismissed, not
+            // closed -- closing destroys the content the menu lives in (see
+            // `dismissed` on StyledPopup) -- and it does not come back when
+            // the menu ends: `trayOverflowOpen` is cleared right here, and
+            // that flag is the only thing that was asking for the card.
+            onAutoClose: {
+                GlobalStates.trayOverflowOpen = false;
+                if (root.activeMenu !== null)
+                    trayCard.dismissed = true;
+            }
 
             // The popup's own box. Only the grid's measured size is
             // forwarded: `StyledPopup` sizes its card off the content's
@@ -672,6 +780,23 @@ Item {
                 // and the card's own size is computed from the same ones, so
                 // the four margins are equal by construction and two icons
                 // cannot land on the same pixel.
+                // The card's own press catcher, BEHIND the icons: the first
+                // child here, so every cell created after it draws over it. A
+                // press that reaches this is a press on the card itself -- the
+                // padding around the cells -- and its only job is to put away
+                // the menu that was out. The card stays: `dismissOpenMenu`
+                // closes the menu and deliberately not the card, because the
+                // card is what the user is working in.
+                //
+                // It cannot stand between a user and an icon: the cells' own
+                // MouseAreas are on top of it and accept their presses, so this
+                // one only ever sees the gaps.
+                MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    onPressed: root.dismissOpenMenu()
+                }
+
                 readonly property int cell: root.panelCellSize
                 readonly property int gap: 4
 
@@ -897,8 +1022,9 @@ Item {
                                 cellSize: trayCardContent.cell
                                 iconSize: root.panelIconSize
                                 showHoverPlate: true
-                                onMenuClosed: root.releaseFocus()
+                                onMenuClosed: (w) => root.noteMenuClosed(w)
                                 onMenuOpened: (w) => root.setExtraWindowAndGrabFocus(w)
+                                onItemPressed: root.dismissOpenMenu()
                             }
                         }
                         Component {
@@ -909,8 +1035,9 @@ Item {
                                 cellSize: trayCardContent.cell
                                 iconSize: root.panelIconSize
                                 showHoverPlate: true
-                                onMenuClosed: root.releaseFocus()
+                                onMenuClosed: (w) => root.noteMenuClosed(w)
                                 onMenuOpened: (w) => root.setExtraWindowAndGrabFocus(w)
+                                onItemPressed: root.dismissOpenMenu()
                             }
                         }
                     }
@@ -1073,8 +1200,9 @@ Item {
                                             cellSize: advancedGrid.cell
                                             iconSize: root.panelIconSize
                                             showHoverPlate: true
-                                            onMenuClosed: root.releaseFocus()
+                                            onMenuClosed: (w) => root.noteMenuClosed(w)
                                             onMenuOpened: (w) => root.setExtraWindowAndGrabFocus(w)
+                                            onItemPressed: root.dismissOpenMenu()
                                         }
                                     }
                                     Component {
@@ -1085,8 +1213,9 @@ Item {
                                             cellSize: advancedGrid.cell
                                             iconSize: root.panelIconSize
                                             showHoverPlate: true
-                                            onMenuClosed: root.releaseFocus()
+                                            onMenuClosed: (w) => root.noteMenuClosed(w)
                                             onMenuOpened: (w) => root.setExtraWindowAndGrabFocus(w)
+                                            onItemPressed: root.dismissOpenMenu()
                                         }
                                     }
                                 }

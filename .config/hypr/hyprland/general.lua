@@ -416,11 +416,28 @@ hl.config({
         hotspot_padding = 1
     },
 
-    -- force_zero_scaling made Hyprland report logical == physical to every
-    -- X11 client, so XWayland apps (TradingView, Steam, old GTK/Java apps)
-    -- rendered at 1:1 while everything else was at 1.6 -- TradingView looked
-    -- tiny and unscaled next to the rest of the desktop. The monitor scale
-    -- in custom/general.lua is the single source of truth for every app.
+    -- THIS VALUE IS OVERRIDDEN, deliberately, by custom/general.lua (loaded
+    -- after this file), which sets force_zero_scaling = true again.
+    --
+    -- The history here matters, because both settings were tried and both
+    -- were rejected for a while: force_zero_scaling=true made Hyprland report
+    -- logical == physical to every X11 client, so XWayland apps (TradingView,
+    -- Steam, old GTK/Java apps) rendered at 1:1 while everything else was at
+    -- 1.6 -- they looked tiny and unscaled next to the rest of the desktop,
+    -- which is why it was turned off here. But false is not neutral either: it
+    -- makes XWayland's root window the LOGICAL size (1707x1067) and has the
+    -- compositor upscale every X11 window by 1.5 to fill the panel -- with
+    -- xwayland:use_nearest_neighbor on, that upscale drops pixels rather than
+    -- filtering them, so X11 apps came out pixelated (uneven glyph stems,
+    -- 1px lines alternating between 1px and 2px). Measured, see
+    -- custom/general.lua.
+    --
+    -- The way out of the either/or is to render X11 apps natively (true) AND
+    -- tell their toolkits the DPI so they are still the right size:
+    -- custom/scripts/x11-dpi.sh writes Xft.dpi (144 at scale 1.5), and
+    -- custom/env.lua exports the X11-app scale for Steam and Qt. That is what
+    -- custom/general.lua now does, so this block is effectively documentation
+    -- of the base config's default rather than the value in force.
     xwayland = {
         force_zero_scaling = false
     }

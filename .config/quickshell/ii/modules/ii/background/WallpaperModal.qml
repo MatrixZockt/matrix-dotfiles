@@ -67,8 +67,14 @@ ShellRoot {
     // add button emitted GlobalStates.requestWallpaperAdd into the void
     // whenever the widget was not instantiated -- the dead add button. The
     // machinery is unchanged, just relocated: a job file asks the desktop's
-    // explorer (hypr-explorer picker) to open, the widget-free modal polls
-    // for the result and applies it.
+    // file manager to open its picker, the widget-free modal polls for the
+    // result and applies it.
+    //
+    // The picker is the SHELL's own file manager (filemanager.sh picker), the
+    // same dialog every other app gets from the portal. This used to name the
+    // retired GTK Explorer directly, which is how "Add wallpaper" ended up
+    // opening a different file manager from the one every other Open dialog
+    // opens.
     readonly property string pickerDir: `${Quickshell.env("XDG_RUNTIME_DIR")}/ii-portal`
     property string addToken: ""
 
@@ -85,9 +91,13 @@ ShellRoot {
             multiple: false,
             token: token,
         }).replace(/'/g, `'\\''`);
+        // Resolved through the shell, so it is the same dialog the keyboard
+        // shortcut and the desktop entry belong to, whatever the shell's
+        // directory is called.
+        const launcher = Quickshell.shellPath("scripts/launch/filemanager.sh");
         addLauncher.command = ["bash", "-c",
             `mkdir -p '${root.pickerDir}' && printf '%s' '${payload}' > '${root.pickerDir}/${token}.json'`
-            + ` && setsid $HOME/.local/bin/hypr-explorer picker '${token}' >/dev/null 2>&1 &`];
+            + ` && setsid '${launcher}' picker '${token}' >/dev/null 2>&1 &`];
         addLauncher.running = false;
         addLauncher.running = true;
         // Close the theatre while the picker is up: the modal holds an

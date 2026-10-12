@@ -61,6 +61,10 @@ Scope {
     PanelLoader { component: MusicPlayerPanel {} }
     PanelLoader { component: NotificationPopup {} }
     PanelLoader { component: OnScreenDisplay {} }
+    // "Going to sleep": raised by the sleep hook (custom/scripts/before-sleep.sh)
+    // a beat before the panel goes down. A wash with a label, no input -- the
+    // alternative was a black screen that looks like a crash.
+    PanelLoader { component: SleepNotice {} }
     PanelLoader { component: OnScreenKeyboard {} }
     PanelLoader { component: Overlay {} }
     PanelLoader { component: Overview {} }

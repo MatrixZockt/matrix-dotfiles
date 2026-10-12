@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# llama-idle-stop -- stop the local llama-server when it is provably doing
+# nothing, so the RTX 4070 can go back to sleep.
+#
+# WHY AN IDLE TIME, AND WHY IT IS MEASURED THIS WAY
+#   Measured 2026-10-10: llama-server had been up 61 minutes holding 7.5 GB of
+#   VRAM, which keeps the dGPU out of RTD3. The card sat in P8 at 4.8 W doing
+#   0 % -- about 12 % of the whole machine's draw, for a model that had made
+#   zero inferences since it started (llamacpp:prompt_tokens_total = 0).
+#
+#   The obvious signal -- "is anyone connected to port 8001" -- is useless
+#   here: quickshell opens an ESTABLISHED socket to the server at login and
+#   keeps it open forever. Counting clients would never once have fired. So
+#   idleness is taken from the server's OWN counters instead:
+#
+#     llamacpp:prompt_tokens_total
+#     llamacpp:tokens_predicted_total
+#
+#   If neither has moved for IDLE seconds, nothing has been asked of the model
+#   and stopping it costs nothing but the ~10 s reload. /health is checked too
+#   as a cheap liveness probe.
+#
+#   Restarting is the owner's (or the shell's Local AI panel's) job:
+#       systemctl --user start llama-server-local.service
+#
+# SAFETY -- this only ever touches one unit, and only when:
+#   * the counter has been still for IDLE seconds (default 900 = 15 min),
+#   * nothing else has the GPU open (a game or a render is never interrupted),
+#   * the unit is actually running.
+# A stop is logged with the measured GPU state before and after, so "why did
+# my model unload" is a journal query.
+set -uo pipefail
+
+# Every knob below is validated rather than defaulted with ${VAR:-fallback}.
+# A plain ${VAR:-fallback} only covers "unset or empty", so any inherited value
+# is trusted -- and this environment exports PORT=0, which made the script
+# politely poll http://127.0.0.1:0/metrics and conclude nothing was usable.
+# A daemon must not take a number from the environment on faith.
+pick_int() {  # value, default, min, max
+    local v="${1:-}" d="$2" lo="$3" hi="$4"
+    case "$v" in
+        ''|*[!0-9]*) echo "$d" ;;
+        *) if [ "$v" -ge "$lo" ] && [ "$v" -le "$hi" ]; then echo "$v"; else echo "$d"; fi ;;
+    esac
+}
+
+UNIT="${UNIT:-llama-server-local.service}"
+case "$UNIT" in
+    ''|*[!A-Za-z0-9_.@-]*) UNIT="llama-server-local.service" ;;
+esac
+PORT="$(pick_int "${PORT:-}" 8001 1 65535)"
+IDLE="$(pick_int "${IDLE:-}" 900 30 86400)"        # seconds of proven zero inference
+INTERVAL="$(pick_int "${INTERVAL:-}" 60 5 3600)"    # seconds between samples
+DRY_RUN="$(pick_int "${DRY_RUN:-}" 0 0 1)"
+
+log() { printf '[llama-idle-stop] %s\n' "$*" >&2; }
+
+metrics_counters() {
+    # Echoes "prompt predicted" or nothing when the server cannot be read.
+    curl -s --max-time 5 "http://127.0.0.1:${PORT}/metrics" 2>/dev/null \
+        | awk '/^llamacpp:prompt_tokens_total /{p=$2}
+               /^llamacpp:tokens_predicted_total /{g=$2}
+               END{ if (p != "" && g != "") print p, g }'
+}
+
+gpu_state() {
+    nvidia-smi --query-gpu=power.draw,pstate --format=csv,noheader 2>/dev/null \
+        | head -1 | tr -d '\r' || echo "?"
+}
+
+gpu_compute_pids() {
+    nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null \
+        | tr -d ' \r' | grep -E '^[0-9]+$' | sort -u
+}
+
+in_our_unit() {
+    # Membership of the unit's cgroup is the only reliable way to tell "our
+    # model" from "something else". An earlier revision matched process names
+    # with pgrep and took head -1, which both missed the wrapper/binary pair
+    # and, when pgrep matched nothing, degenerated into matching an empty
+    # line -- so the check fired on a transient PID and blocked every stop.
+    grep -q -- "$UNIT" "/proc/$1/cgroup" 2>/dev/null
+}
+
+foreign_gpu_users() {
+    local p
+    for p in $(gpu_compute_pids); do
+        in_our_unit "$p" || echo "$p"
+    done
+}
+
+service_running() { systemctl --user is-active --quiet "$UNIT"; }
+
+stop_service() {
+    local before after foreign
+    foreign="$(foreign_gpu_users | tr '\n' ' ')"
+    if [ -n "${foreign// /}" ]; then
+        log "another process holds the GPU (pid $foreign) - not stopping"
+        return 1
+    fi
+    before="$(gpu_state)"
+    if [ "$DRY_RUN" = 1 ]; then
+        log "DRY-RUN would stop $UNIT (GPU before: $before)"
+        return 0
+    fi
+    if ! systemctl --user stop "$UNIT" 2>/dev/null; then
+        log "could not stop $UNIT"
+        return 1
+    fi
+    sleep 4
+    log "stopped $UNIT after ${idle_for}s idle (GPU ${before} -> $(gpu_state))"
+}
+
+# ── main loop ───────────────────────────────────────────────────────────────
+log "start: unit=$UNIT port=$PORT idle=${IDLE}s dry_run=$DRY_RUN"
+last=""; idle_for=0
+
+while :; do
+    if ! service_running; then
+        # Not up. Nothing to do, and the idle clock must not carry over from
+        # the previous run -- a fresh start deserves a fresh countdown.
+        last=""; idle_for=0
+        sleep "$INTERVAL"
+        continue
+    fi
+
+    cur="$(metrics_counters)"
+    if [ -z "$cur" ]; then
+        # Unreachable: the server is still loading, or wedged. Do not treat
+        # that as idleness -- a model that is loading is not a model that is
+        # unused, and the load takes ~10 s of real GPU work.
+        log "no metrics from port $PORT - leaving $UNIT alone"
+        last=""; idle_for=0
+        sleep "$INTERVAL"
+        continue
+    fi
+
+    if [ "$cur" = "$last" ]; then
+        idle_for=$((idle_for + INTERVAL))
+    else
+        [ -n "$last" ] && log "inference seen ($last -> $cur) - idle timer reset"
+        idle_for=0
+    fi
+    last="$cur"
+
+    if [ "$idle_for" -ge "$IDLE" ]; then
+        stop_service && idle_for=0
+        last=""
+    fi
+
+    sleep "$INTERVAL"
+done

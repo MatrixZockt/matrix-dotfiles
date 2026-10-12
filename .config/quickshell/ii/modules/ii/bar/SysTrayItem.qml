@@ -47,7 +47,16 @@ MouseArea {
     }
 
     signal menuOpened(qsWindow: var)
-    signal menuClosed()
+    signal menuClosed(qsWindow: var)
+    // A LEFT press on this icon. The tray card listens: a press inside the tray
+    // means the user has moved on from whatever menu was out, so the card
+    // dismisses that menu without dismissing itself (SysTray.dismissOpenMenu).
+    //
+    // NOT emitted for the right button, and that is the load-bearing half: the
+    // right button is the menu's own toggle, so right-clicking the icon that
+    // owns the open menu has to close it -- if this fired first, the toggle
+    // below would always find `menu.active` false and re-open instead.
+    signal itemPressed()
 
     hoverEnabled: true
     // Both buttons, always. Right click opens the app's own menu, which is
@@ -60,6 +69,7 @@ MouseArea {
     onPressed: (event) => {
         switch (event.button) {
         case Qt.LeftButton:
+            root.itemPressed();
             // Parked window first: restoring it IS the user's click. With
             // nothing parked, the app's own activate() is still the right
             // answer -- for most tray items it is the only thing there is.
@@ -107,7 +117,9 @@ MouseArea {
             }
             onMenuOpened: (window) => root.menuOpened(window);
             onMenuClosed: {
-                root.menuClosed();
+                // The window, so the tray can drop a hold that belongs to
+                // THIS menu and not to a menu that replaced it.
+                root.menuClosed(menu.item);
                 menu.active = false;
             }
         }

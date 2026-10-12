@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# install-appimage — make a double-clicked AppImage "installed".
+#
+#   install-appimage <path.appimage>
+#
+# What it does:
+#   1. Moves the AppImage to ~/Applications (the system home for AppImages —
+#      not "the files that were needed to create it"; the app itself stays).
+#   2. Extracts the icon to ~/.local/share/icons/hicolor/<size>/apps/ and the
+#      desktop file to ~/.local/share/applications/<name>.desktop, pointing at
+#      the AppImage (correct icon in the SUPER app menu, correct menu name).
+#   3. Runs update-desktop-database so the menu picks it up immediately.
+#   4. Removes the extraction leftovers (squashfs-root), not the app itself.
+#
+# The app menu lists it because ~/.local/share/applications beats packaged
+# entries; the icon shows because hicolor user icons override theme lookups.
+set -eu
+
+SRC=""
+for a in "$@"; do
+    case "$a" in
+        *.appimage|*.AppImage|*.AppImage|*.APPIMAGE) SRC="$a" ;;
+    esac
+done
+[ -n "$SRC" ] || { echo "usage: install-appimage <file.AppImage>" >&2; exit 1; }
+[ -f "$SRC" ] || { echo "no such file: $SRC" >&2; exit 1; }
+
+APPS_DIR="$HOME/Applications"
+DESKTOP_DIR="$HOME/.local/share/applications"
+ICON_BASE="$HOME/.local/share/icons/hicolor"
+APPIMAGE_TOOL="$(command -v appimage-tool || true)"
+
+mkdir -p "$APPS_DIR" "$DESKTOP_DIR"
+
+# ── 1. Move into ~/Applications (dedupe: overwrite older copies) ─────────
+BASE="$(basename "$SRC")"
+DEST="$APPS_DIR/$BASE"
+if [ "$(readlink -f "$SRC")" != "$(readlink -f "$DEST")" ]; then
+    mv -f -- "$SRC" "$DEST"
+fi
+chmod +x -- "$DEST"
+
+# ── 2. Extract name + icon + desktop file ─────────────────────────────────
+NAME="$(basename "$BASE" .AppImage)"
+NAME="$(basename "$NAME" .appimage)"
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+# Extract INSIDE the work dir: --appimage-extract always unpacks to
+# ./squashfs-root relative to the CWD, and the caller's directory is not ours
+# to litter (that litter is exactly what this script exists to remove).
+EXTRACTED=""
+if ( cd "$WORK" && "$DEST" --appimage-extract ) >/dev/null 2>&1; then
+    EXTRACTED="$WORK/squashfs-root"
+    [ -d "$EXTRACTED" ] || EXTRACTED="$(find "$WORK" -maxdepth 2 -name squashfs-root -type d 2>/dev/null | head -n1)"
+else
+    # The runtime refused (arch mismatch, exotic runtime). Type-2 AppImages
+    # are plain squashfs: bsdtar reads them without executing anything.
+    if command -v bsdtar >/dev/null 2>&1; then
+        ( cd "$WORK" && bsdtar -xf "$DEST" squashfs-root >/dev/null 2>&1 ) || true
+        [ -d "$WORK/squashfs-root" ] && EXTRACTED="$WORK/squashfs-root"
+    fi
+    if [ -z "$EXTRACTED" ] && [ -n "$APPIMAGE_TOOL" ]; then
+        ( cd "$WORK" && $APPIMAGE_TOOL extract "$DEST" >/dev/null 2>&1 || true )
+        EXTRACTED="$(find "$WORK" -maxdepth 3 -name '*.desktop' -printf '%h\n' 2>/dev/null | head -n1)"
+    fi
+fi
+
+ICON=""
+DESKTOP_SRC=""
+if [ -n "${EXTRACTED:-}" ] && [ -d "$EXTRACTED" ]; then
+    # Prefer the desktop file whose Name= matches the file name best.
+    DESKTOP_SRC="$(find "$EXTRACTED" -maxdepth 3 -name '*.desktop' -type f 2>/dev/null | head -n1)"
+    # Icon: desktop file's Icon= if present, else the biggest png/svg in the
+    # extraction, else the .DirIcon.
+    if [ -n "$DESKTOP_SRC" ]; then
+        ICON_NAME="$(sed -n 's/^Icon=//p' "$DESKTOP_SRC" | head -n1)"
+        if [ -n "$ICON_NAME" ]; then
+            ICON="$(find "$EXTRACTED" -maxdepth 4 -name "$ICON_NAME*" \( -name '*.png' -o -name '*.svg' \) 2>/dev/null | xargs -r ls -S 2>/dev/null | head -n1)"
+        fi
+    fi
+    [ -n "$ICON" ] || ICON="$(find "$EXTRACTED" \( -name '*.png' -o -name '*.svg' \) 2>/dev/null | xargs -r ls -S 2>/dev/null | head -n1)"
+    [ -n "$ICON" ] || ICON="$EXTRACTED/.DirIcon"
+
+    # Name: desktop file's Name= wins; else the file name cleaned up.
+    if [ -n "$DESKTOP_SRC" ]; then
+        N="$(sed -n 's/^Name=//p' "$DESKTOP_SRC" | grep -v '\[' | head -n1)"
+        [ -n "$N" ] && NAME="$N"
+    fi
+fi
+
+# ── 3. Install the icon at a menu-friendly size ───────────────────────────
+if [ -n "$ICON" ] && [ -f "$ICON" ]; then
+    SIZE_DIR="$ICON_BASE/512x512/apps"
+    mkdir -p "$SIZE_DIR"
+    EXT="${ICON##*.}"
+    cp -f -- "$ICON" "$SIZE_DIR/${NAME}.${EXT}"
+    # A couple of extra sizes cost nothing and help the menu scale.
+    for s in 256x256 128x128; do
+        mkdir -p "$ICON_BASE/$s/apps"
+        cp -f -- "$ICON" "$ICON_BASE/$s/apps/${NAME}.${EXT}"
+    done
+    ICON_REF="$NAME"
+else
+    ICON_REF="$APPS_DIR/$BASE"
+fi
+
+# ── 4. Write the launcher desktop file ────────────────────────────────────
+DESKTOP_FILE="$DESKTOP_DIR/${NAME}.desktop"
+cat > "$DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=$NAME
+Comment=AppImage installed from $BASE
+Exec=$DEST
+Path=$HOME
+Icon=$ICON_REF
+Terminal=false
+Categories=Utility;
+StartupWMClass=$NAME
+StartupNotify=true
+EOF
+chmod +x "$DESKTOP_FILE"
+
+# ── 5. Clean the extraction leftovers ("the files that were needed") ──────
+# $WORK (and any squashfs-root inside it) goes with the trap; this also sweeps
+# a stray squashfs-root if an extraction ever escaped the work dir.
+rm -rf "$PWD/squashfs-root" 2>/dev/null || true
+
+# ── 6. Make the menu notice ───────────────────────────────────────────────
+command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
+command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -qtf "$ICON_BASE" 2>/dev/null || true
+
+echo "Installed: $NAME"
+echo "  app:     $DEST"
+echo "  menu:    $DESKTOP_FILE"
+echo "  icon:    ${ICON:-none found}"

@@ -85,17 +85,41 @@
 # than what it replaces as well as strictly more reliable: a decoy cannot have
 # a cmdline of exactly "qs -c ii" without BEING that process. The full cmdline
 # must match, not merely contain the string.
+# THE COST OF THE WALK WAS ON THE LOGIN CRITICAL PATH. It forked `tr` once per
+# entry in /proc to read each cmdline: measured on this machine at 1.98 s per
+# call, and the login path calls it up to four times -- twice in shell.sh
+# before Quickshell is even exec'd, once in splash.sh, and once per watchdog
+# tick. Four seconds of the desktop's startup was this function.
+#
+# `pgrep -f -x` is one process and gives the same answer exactly: `-f` matches
+# the whole command line rather than the untrustworthy comm name (see above),
+# and `-x` requires the ENTIRE line to match, which is the property the walk
+# was written for -- a decoy whose arguments merely mention the string (a bash
+# running this very script, an `ipc call`) cannot match. Verified against the
+# old implementation on a live shell: identical output, and the decoy excluded.
+#
+# 0.038 s instead of 1.98 s, so the shell is launched ~4 s sooner.
+#
+# BOTH SPELLINGS OF argv[0], and the second one is not hypothetical: shell.sh
+# execs `qs` (a PATH lookup, argv[0] = "qs"), but anything that starts the
+# binary by absolute path -- a wrapper, a hand-run /usr/bin/qs -- has
+# "/usr/bin/qs" in that position instead, and a walk that only knows the short
+# form cannot see that shell. Measured 2026-10-11: a shell running as
+# `/usr/bin/qs -c ii` was invisible to the reap loop, so the watchdog judged
+# the session shell-less and started a SECOND one -- two bars, two sets of
+# layers, on one screen. (The old /proc walk had the same blind spot: it
+# compared the joined argv against the literal "qs -c ii" -- so this is a
+# latent bug found while replacing it, not one the replacement introduced.)
+#
+# `[^ ]*/qs` still requires the ENTIRE line to match, so the exactness above
+# holds: "bash -c qs -c ii" and a "bash -c /usr/bin/qs -c ii" decoy (spaces
+# before the path) both fail it.
 shell_pids() {
-    local config="${1:-$qsConfig}" pid cmd
-    for pid in /proc/[0-9]*; do
-        pid="${pid#/proc/}"
-        [ -r "/proc/$pid/cmdline" ] || continue
-        cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" || continue
-        cmd="${cmd% }"                     # drop the trailing join space
-        case "$cmd" in
-            "qs -c $config"|"qs --config $config") printf '%s\n' "$pid" ;;
-        esac
-    done
+    local config="${1:-$qsConfig}"
+    pgrep -f -x -- "qs -c $config" 2>/dev/null
+    pgrep -f -x -- "[^ ]*/qs -c $config" 2>/dev/null
+    pgrep -f -x -- "qs --config $config" 2>/dev/null
+    pgrep -f -x -- "[^ ]*/qs --config $config" 2>/dev/null
 }
 
 # The first real shell whose WAYLAND_DISPLAY is the one given. This is the

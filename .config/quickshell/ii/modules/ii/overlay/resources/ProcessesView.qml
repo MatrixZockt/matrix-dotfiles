@@ -338,11 +338,40 @@ ColumnLayout {
             // half a table: arrows walk the rows, Delete ends the task, Escape
             // clears the selection.
             activeFocusOnTab: true
-            currentIndex: ProcessList.rows.findIndex(row => row.key === root.selectedKey)
-            onCurrentIndexChanged: {
-                const row = ProcessList.rows[currentIndex];
-                if (row)
-                    root.selectedKey = row.key;
+            //
+            // currentIndex is NOT the selection, and it is not rebuilt from the
+            // selection either. This used to be
+            //     currentIndex: ProcessList.rows.findIndex(row => row.key === root.selectedKey)
+            // with an onCurrentIndexChanged that wrote the row's key back into
+            // root.selectedKey. Two bugs in one line: the BINDING re-ran every
+            // time a sample replaced rows (~2s), and ASSIGNING currentIndex
+            // scrolls the view to that row, because a ListView keeps its
+            // current item visible -- so the panel could not be scrolled below
+            // the selected row without being pulled back to it. The write-back
+            // also meant the index decided the selection instead of the other
+            // way round. `selectedKey` is the single source of truth now;
+            // currentIndex is only ever set by selectKey(), to scroll a row
+            // into view, and is never read back.
+            currentIndex: -1
+            function selectKey(key) {
+                root.selectedKey = key;
+                const at = ProcessList.rows.findIndex(row => row.key === key);
+                if (at >= 0) {
+                    table.currentIndex = at;
+                    table.positionViewAtIndex(at, ListView.Contain);
+                }
+            }
+            // Your place in the list survives a sample (see StyledListView):
+            // a new model otherwise clamps contentY to nothing and the panel
+            // snaps back to the top every two seconds.
+            preservePositionOnModelChange: true
+            Connections {
+                // A new column (or a flipped one) is a new list, and the row
+                // the click is asking about is the first one.
+                target: ProcessList
+                function onSortKeyChanged() { table.resetPosition() }
+                function onSortAscendingChanged() { table.resetPosition() }
+                function onQueryChanged() { table.resetPosition() }
             }
             Keys.onPressed: (event) => {
                 if (event.key === Qt.Key_Delete)
@@ -386,8 +415,7 @@ ColumnLayout {
                             root.selectedKey = row.modelData.key;
                             return;
                         }
-                        root.selectedKey = row.modelData.key;
-                        table.currentIndex = row.index;
+                        table.selectKey(row.modelData.key);
                         if (row.isGroup)
                             ProcessList.toggleGroup(row.modelData.name);
                     }

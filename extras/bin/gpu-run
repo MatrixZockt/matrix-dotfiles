@@ -1,0 +1,60 @@
+#!/bin/sh
+# gpu-run -- run ONE program on the NVIDIA dGPU (RTX 4070 Laptop).
+#
+# Usually you do not need this. `gpu-mode on` (or SUPER+SHIFT+G) turns the
+# dGPU on for every app you launch from then on; `gpu-mode off` puts it back
+# and lets the 4070 sleep again. This script is the per-launch version, for
+# the times you want the dGPU for one command only.
+#
+#     gpu-run ./game
+#     gpu-run blender
+#
+# What it actually changes, measured on this machine with eglinfo/glxinfo/
+# vulkaninfo (2026-09-29) rather than assumed:
+#
+#   OpenGL via GLX (X11, XWayland, Wine, most games)  -> RTX 4070
+#   Vulkan (engines, Blender-class tools)             -> 4070 becomes GPU0,
+#                                                        the preferred device
+#   CUDA / NVML (Ollama, PyTorch)                     -> 4070, but it already
+#                                                        was, with or without
+#                                                        this script
+#   Native Wayland EGL (GTK/Qt apps)                  -> STILL the iGPU.
+#     glvnd resolves EGL_DEFAULT_DISPLAY from wl_drm, so a Wayland client
+#     follows the compositor, and the panel is on the Intel GPU. Measured:
+#     forcing the NVIDIA EGL vendor for the process makes eglInitialize fail
+#     outright. There is no lever for this case.
+#   VAAPI / video decode                              -> Intel, correctly
+#
+# So an app that draws through GLX or Vulkan gets the 4070. One that draws
+# through native Wayland EGL does not, and on this hardware cannot.
+#
+# This is the same three variables /usr/bin/prime-run sets, kept as a script so
+# the reasoning above sits next to the code. prime-run works identically.
+#
+# Why the session is not configured this way
+# ------------------------------------------
+# Setting these session-wide is tempting and is wrong twice over. It cannot
+# reach the compositor, because the desktop is drawn by the Intel iGPU
+# (AQ_DRM_DEVICES, see ~/.config/fish/conf.d/aq-drm-devices.fish) and the
+# panel is plugged into it -- so any global change aimed at the dGPU ends up
+# aimed at the compositor too. And an earlier attempt to do it by restricting
+# the EGL vendor list in conf.d made the session unbootable, because that
+# removes the NVIDIA *vendor* while leaving the NVIDIA *card* in Mesa's device
+# list, and Hyprland's GL context then aborts. The full post-mortem is in
+# ~/.config/fish/conf.d.disabled/egl-vendor.fish. gpu-mode exists instead: it
+# applies this policy to launched apps only, never to the compositor.
+set -e
+
+if [ "$#" -eq 0 ]; then
+    echo "usage: gpu-run <command> [args...]" >&2
+    echo "       runs <command> with the NVIDIA dGPU available." >&2
+    exit 2
+fi
+
+# What prime-run does, verbatim: select the NVIDIA GPU for GLX/EGL, and tell
+# the Vulkan optimus layer to expose only the NVIDIA device.
+export __NV_PRIME_RENDER_OFFLOAD=1
+export __GLX_VENDOR_LIBRARY_NAME=nvidia
+export __VK_LAYER_NV_optimus=NVIDIA_only
+
+exec "$@"

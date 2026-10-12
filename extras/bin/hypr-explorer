@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# hypr-explorer launcher.
+#
+#   hypr-explorer              a NEW Explorer window every time (multi-instance,
+#                              like the terminal -- no redirect into a running one)
+#   hypr-explorer picker TOKEN the ii-portal FileChooser dialog: a dedicated
+#                              transient instance that answers the job file and
+#                              quits (never the window instance)
+set -u
+
+if [ "${1:-}" = "picker" ]; then
+    exec setsid python3 "$HOME/.local/lib/hypr-explorer/explorer.py" --picker "${2:?picker mode needs a token}"
+fi
+
+setsid python3 "$HOME/.local/lib/hypr-explorer/explorer.py" "$@" >/dev/null 2>&1 &

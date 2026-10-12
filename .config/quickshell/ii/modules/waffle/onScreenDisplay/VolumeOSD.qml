@@ -5,7 +5,9 @@ import qs.modules.waffle.looks
 OSDValue {
     id: root
     iconName: WIcons.volumeIcon
-    value: Audio.sink?.audio.volume ?? 0
+    // The shell's fraction, so the bar is full at 100% instead of half-filled
+    // at an honest full volume (the sink's own value is a fraction of two).
+    value: Audio.currentVolume()
 
     Connections {
         // Listen to volume changes

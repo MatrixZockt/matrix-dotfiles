@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# llama-server-launch -- start the local llama.cpp server using the launch
+# parameters set in the Local AI panel (LlamaService.qml).
+#
+# WHY THIS EXISTS
+# ---------------
+# The panel keeps its launch parameters and starts the server with
+# `systemctl --user start llama-server-local`. The unit used to hard-code its own
+# flags, so editing Context / GPU layers / Parallel in the panel changed nothing
+# that actually ran. The unit now execs THIS script, which turns the panel's
+# parameters into the real command line -- so what the panel shows is what the
+# server runs.
+#
+# WHERE THE PARAMETERS COME FROM (live shell first, file second)
+# -------------------------------------------------------------
+# 1. The LIVE SHELL wins: `qs -c ii ipc call llama params` is the panel's own
+#    state. It is the only source that is correct immediately after an edit --
+#    FileView writes the params file ASYNCHRONOUSLY, so reading the file in the
+#    second after a change can hand back the PREVIOUS value.
+# 2. The params FILE is the fallback, so a start with no shell running (boot,
+#    a plain `systemctl --user start`) still honours the last saved config.
+#
+# The file lives at ~/.local/state/quickshell/llama-params.json, NOT
+# ~/.local/state/llama-params.json: Quickshell namespaces StateLocation under the
+# shell's own id. Pointing at the bare path was silent -- the file the panel
+# wrote was never opened, so every edit was ignored at launch and the defaults
+# below always won.
+#
+# Only OVERRIDES are ever written to the file (a key missing means "still the
+# default"), so the defaults here MUST match LlamaService's `launchParams` `def`
+# values.
+#
+# Flags the panel does not expose are fixed here so the panel's rows stay the
+# only thing anyone needs to tune: KV-cache quantization, batch sizes, the
+# --slots/--metrics endpoints the panel reads, and the YaRN rope scaling that
+# extends the context above Qwen3's 40960-token trained window.
+set -u
+
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}"
+PARAMS=""
+for cand in "$STATE/quickshell/llama-params.json" \
+            "$STATE/llama-params.json" \
+            "$HOME/.local/state/quickshell/llama-params.json"; do
+  if [ -f "$cand" ]; then PARAMS="$cand"; break; fi
+done
+
+# ── Defaults: MUST match LlamaService.qml's `def` values ────────────────────
+ctx=65536
+ngl=99
+parallel=1
+host=127.0.0.1
+port=8001
+jinja=1
+flash=1
+model="$HOME/Models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf"
+
+SRC=""
+if [ -n "${XDG_RUNTIME_DIR:-}" ] && command -v qs >/dev/null 2>&1; then
+  # `timeout` so an unresponsive shell can never wedge the unit's start.
+  SRC=$(timeout 5 qs -c ii ipc call llama params 2>/dev/null) || SRC=""
+fi
+if [ -z "$SRC" ] && [ -n "$PARAMS" ]; then
+  SRC=$(cat "$PARAMS" 2>/dev/null) || SRC=""
+fi
+
+if [ -n "$SRC" ]; then
+  # Parse without jq: python3 is present on this machine. Both shapes are
+  # accepted -- an OBJECT keyed by name (the file) and an ARRAY of
+  # {key, value} pairs (the IPC reply).
+  #
+  # NOTE: the program is passed with -c, NOT as a heredoc. A heredoc would take
+  # over stdin and the pipe carrying $SRC would never be read -- python would
+  # then parse an empty document and silently fall back to the defaults.
+  eval "$(printf '%s' "$SRC" | python3 -c '
+import json, shlex, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if isinstance(d, list):
+    d = {e.get("key"): e.get("value")
+         for e in d if isinstance(e, dict) and e.get("key")}
+if not isinstance(d, dict):
+    sys.exit(0)
+key_map = {"ctx": "ctx", "ngl": "ngl", "parallel": "parallel",
+           "host": "host", "port": "port", "model": "model",
+           "jinja": "jinja", "flashAttn": "flash"}
+for k, v in d.items():
+    if k in key_map and v is not None:
+        if k in ("jinja", "flashAttn"):
+            v = 1 if (v is True or str(v).lower() in ("1", "true", "yes", "on")) else 0
+        print("%s=%s" % (key_map[k], shlex.quote(str(v))))
+')"
+fi
+
+args=(--model "$model"
+      --host "$host" --port "$port"
+      --ctx-size "$ctx"
+      --n-gpu-layers "$ngl"
+      --parallel "$parallel"
+      --cache-type-k q4_0 --cache-type-v q4_0
+      --batch-size 4096 --ubatch-size 512
+      --slots --metrics)
+
+# YaRN only above the model's trained window. Qwen's documented invocation:
+# target = orig * scale, orig = 32768.
+if [ "$ctx" -gt 40960 ]; then
+  scale=$(awk -v c="$ctx" 'BEGIN{printf "%.4f", c/32768}')
+  args+=(--rope-scaling yarn --rope-scale "$scale" --yarn-orig-ctx 32768)
+fi
+
+[ "$flash" = 1 ] && args+=(--flash-attn on)
+[ "$jinja" = 1 ] && args+=(--jinja)
+
+# ── Reasoning (thinking) ────────────────────────────────────────────────────
+# Qwen3 is trained to emit a  thinking trace before it answers. That trace is
+# what makes an 8B model competent at multi-step tool use, so it stays ON --
+# turning it off is NOT required for tool calling (verified: Claude Code drives
+# Read/Glob/Grep fine with thinking on), and it would cost real quality on hard
+# agentic tasks.
+#
+# What it does need is a LEASH. On a trivial one-line file read Qwen3-8B will
+# happily think for hundreds of tokens, and every one of them is generated at
+# ~46 t/s and then carried in the context window. --reasoning-budget caps the
+# trace: measured, a trivial Claude Code tool call spends ~130 thinking tokens,
+# so 1024 leaves genuinely hard problems plenty of room while killing the
+# runaway case that makes a tool loop feel slow.
+#
+#   0    -> end thinking immediately (fastest; loses quality on hard tasks)
+#   N>0  -> token budget
+#   -1   -> unrestricted (llama.cpp default, and why the rambling happened)
+REASONING_BUDGET=1024
+args+=(--reasoning auto --reasoning-budget "$REASONING_BUDGET")
+
+exec /usr/bin/llama-server "${args[@]}"

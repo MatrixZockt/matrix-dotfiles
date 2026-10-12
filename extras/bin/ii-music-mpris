@@ -277,6 +277,9 @@ class Player(dbus.service.Object):
     _time_pos = 0.0
     _duration = 0.0
     _filename = ""
+    _forced_title = ""   # mpv's force-media-title, set by OnlineMusic.playNow
+    _loop_playlist = False
+    _loop_playlist = False
     _mpv_volume = 80.0
     _loop_file = False
     _queue = []          # [{filename}] — our view of the playlist
@@ -298,6 +301,21 @@ class Player(dbus.service.Object):
                          in_signature="ss", out_signature="v")
     def Get(self, interface, prop):
         return self._get(prop)
+
+    @dbus.service.method("org.freedesktop.DBus.Properties",
+                         in_signature="ssv", out_signature="")
+    def Set(self, interface, prop, value):
+        # THE WRITABLE-PROPERTY HOOK. A Properties.Set must land on THIS
+        # interface in python-dbus terms; without this method dbus-python
+        # rejects every Set with "UnknownMethod: Set" -- which is how an
+        # MPRIS shuffle click (Quickshell writes player.shuffle) silently
+        # did nothing. The two writable player properties of this bridge:
+        if str(prop) == "Shuffle":
+            self.SetShuffle(bool(value))
+        elif str(prop) == "LoopStatus":
+            self.SetLoopStatus(str(value))
+        elif str(prop) == "Volume":
+            self.SetVolume(float(value))
 
     @dbus.service.method("org.freedesktop.DBus.Properties",
                          in_signature="s", out_signature="a{sv}")
@@ -424,6 +442,13 @@ class Player(dbus.service.Object):
         elif name == "loop-file":
             self._loop_file = bool(data)
             self._sync_loop()
+        elif name == "force-media-title":
+            self._forced_title = str(data or "")
+            self._sync_metadata()
+        elif name == "loop-playlist":
+            # mpv reports the string "inf" (or bool) — treat any truthy as on
+            self._loop_playlist = bool(data) and data != False
+            self._sync_loop()
         self._sync_status()
 
     def _tick(self):
@@ -479,7 +504,18 @@ class Player(dbus.service.Object):
             self._emit({"PlaybackStatus": status})
 
     def _sync_loop(self):
-        status = "Playlist" if self._loop_file else "None"
+        # Derive the MPRIS LoopStatus from BOTH mpv flags: loop-playlist is
+        # the daemon's own default (its unit sets loop-playlist=inf), so
+        # "Playlist" must be derived from THAT property, not from loop-file
+        # -- the old version inverted the pair and made the bar's loop state
+        # flicker to None (and then fight the property set) on every
+        # loop-file change event. loop-file alone means repeat-one.
+        if self._loop_playlist:
+            status = "Playlist"
+        elif self._loop_file:
+            status = "Track"
+        else:
+            status = "None"
         if status != self.loop_status:
             self.loop_status = status
             self._emit({"LoopStatus": status})
@@ -494,8 +530,19 @@ class Player(dbus.service.Object):
         if self._pos < 0 or not path:
             md = {"mpris:trackid": dbus.ObjectPath(NO_TRACK)}
         else:
-            artist, title = split_name(path)
-            album = album_for(path)
+            # A stream has no filename to parse — its "path" is a URL, which
+            # used to render as "stream?app_name=ii" in the bar. When the
+            # loader set force-media-title (OnlineMusic.playNow always does),
+            # that is the real name: "Artist - Title" split by the same rule
+            # as a local file, or just the title when no artist is known.
+            if path.startswith(("http://", "https://")) and self._forced_title:
+                artist, title = split_name(self._forced_title)
+                if " - " not in self._forced_title:
+                    artist, title = "", self._forced_title.strip()
+                album = ""
+            else:
+                artist, title = split_name(path)
+                album = album_for(path)
             md = {
                 # A valid object path is mandatory; clients that receive
                 # "/org/mpris/MediaPlayer2/TrackList/NoTrack" or a malformed
@@ -636,11 +683,13 @@ class Player(dbus.service.Object):
         if status not in ("None", "Track", "Playlist"):
             return
         self.loop_status = status
-        # mpv has no per-track loop over IPC; the playlist repeat flag is the
-        # one that maps cleanly, and "Track" is honoured as a repeat-one by
-        # re-issuing the index on end of file.
-        self._send("set_property", "loop-file", status == "Playlist")
-        self._loop_file = status == "Playlist"
+        # MPRIS semantics: "Playlist" = loop the whole queue (the daemon's
+        # own unit default), "Track" = repeat-one on loop-file, "None" = both
+        # off. loop-playlist takes bool false; "inf" is only a GET shape.
+        self._send("set_property", "loop-playlist", status == "Playlist")
+        self._send("set_property", "loop-file", status == "Track")
+        self._loop_playlist = status == "Playlist"
+        self._loop_file = status == "Track"
         self._emit({"LoopStatus": self.loop_status})
 
     @dbus.service.method("org.mpris.MediaPlayer2.Player", out_signature="d")
@@ -678,6 +727,8 @@ class Player(dbus.service.Object):
             self.mpv.send(["observe_property", 7, "idle-active"])
             self.mpv.send(["observe_property", 8, "loop-file"])
             self.mpv.send(["get_property", "volume"])
+            self.mpv.send(["observe_property", 9, "force-media-title"])
+            self.mpv.send(["observe_property", 10, "loop-playlist"])
         else:
             log("mpv daemon down — staying on the bus as a Stopped player")
         self._sync_status()

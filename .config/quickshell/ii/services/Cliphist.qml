@@ -12,10 +12,16 @@ Singleton {
     // property string cliphistBinary: FileUtils.trimFileProtocol(`${Directories.home}/.cargo/bin/stash`)
     property string cliphistBinary: "cliphist"
     property real pasteDelay: 0.05
-    // The synthesised paste, through the compositor. See paste() for why this
-    // is not ydotool.
+    // The paste keystroke, for superpaste() -- which fires several in a row and
+    // has no popup to wait for. A single paste goes through
+    // pasteKeystrokeScript below instead; see paste().
     property string pressPasteCommand: "ydotool key -d 1 29:1 47:1 47:0 29:0"
-    readonly property string pasteShortcutCommand: "hyprctl dispatch 'hl.dsp.send_shortcut({ mods = \"CTRL\", key = \"v\" })'"
+    // The Ctrl+V that lands one entry, as a SCRIPT. It waits for the clipboard
+    // popup's layer surface to be gone before sending the key: the popup holds
+    // the keyboard exclusively while it is up, so a paste sent any earlier
+    // lands in the popup's own search field instead of the window underneath.
+    // See the script for the measurements behind the wait.
+    readonly property string pasteKeystrokeScript: Quickshell.shellPath("scripts/clipboard/paste-keystroke.sh")
     property bool sloppySearch: Config.options?.search.sloppy ?? false
     property real scoreThreshold: 0.2
     property list<string> entries: []
@@ -57,6 +63,7 @@ Singleton {
     }
 
     function copy(entry) {
+        root.noteShellCopy();
         if (root.cliphistBinary.includes("cliphist")) // Classic cliphist
             Quickshell.execDetached(["bash", "-c", `printf '%s' '${StringUtils.shellSingleQuoteEscape(entry)}' | ${root.cliphistBinary} decode | wl-copy`]);
         else { // Stash
@@ -65,42 +72,62 @@ Singleton {
         }
     }
 
+    // An entry that has been decoded onto the clipboard and is waiting for the
+    // popup to get out of the keyboard's way so its paste keystroke can be sent.
+    property bool pendingPaste: false
+
+    // Put the chosen entry back on the clipboard.
+    //
+    // NOTHING IS PASTED HERE, on purpose. The popup takes the keyboard
+    // EXCLUSIVELY while it is open -- that is what makes the arrows and RETURN
+    // work without a click first -- so a Ctrl+V sent at this moment goes to the
+    // POPUP, not to the window the user is pasting into. That is the whole
+    // reported bug: the paste landed in the popup's own search field (which is
+    // where the stray text in its query came from), and retrying after the
+    // popup happened to have closed worked often enough to read as "it pastes
+    // on the twentieth try".
+    //
+    // So this only decodes. The keystroke is sent by sendPendingPaste(), once
+    // the popup's surface is actually gone -- or, when no popup was up at all
+    // (a paste asked for over IPC), by the fallback timer below. The script
+    // itself re-checks that the surface is gone, so neither caller has to be
+    // exactly right about the timing.
     function paste(entry) {
-        // Decode the entry onto the clipboard, then ACTUALLY INPUT it into the
-        // focused window.
-        //
-        // The keystroke goes through the COMPOSITOR (`hyprctl dispatch
-        // hl.dsp.send_shortcut`), not through ydotool. Two reasons, both learned
-        // the hard way:
-        //
-        //   * ydotool injects via /dev/uinput, which is a synthetic keyboard as
-        //     far as Hyprland is concerned: it needs uinput permissions, it
-        //     depends on ydotoold still being alive, and a release that does
-        //     not land leaves the key stuck down -- which then types into
-        //     whatever grabs focus next. That is not hypothetical here: a stuck
-        //     key from an earlier paste kept appending characters into the
-        //     clipboard popup's own search box.
-        //   * wl-clipboard 2.3 has no `wl-copy --paste`, so there is no
-        //     protocol-level "paste this now". Some keystroke has to be
-        //     synthesised -- and the compositor is the reliable place to do it,
-        //     because it addresses the focused window directly instead of
-        //     hoping the virtual keyboard reaches it.
-        //
-        // The sleep is before the keys, and longer than it looks like it needs
-        // to be: this popup closes as the click lands, and Hyprland gives the
-        // keyboard back to the window underneath a beat later -- pasting into
-        // a window that has not got focus yet is pasting into nothing.
+        root.noteShellCopy();
         if (root.cliphistBinary.includes("cliphist")) { // Classic cliphist
-            const decoded = `printf '%s' '${StringUtils.shellSingleQuoteEscape(entry)}' | ${root.cliphistBinary} decode | wl-copy`;
-            Quickshell.execDetached(["bash", "-c",
-                `${decoded}; sleep 0.18; ${root.pasteShortcutCommand}`]);
+            Quickshell.execDetached(["bash", "-c", `printf '%s' '${StringUtils.shellSingleQuoteEscape(entry)}' | ${root.cliphistBinary} decode | wl-copy`]);
         } else { // Stash
             const entryNumber = entry.split("\t")[0];
-            Quickshell.execDetached(["bash", "-c", `${root.cliphistBinary} decode ${entryNumber} | wl-copy; sleep 0.15; ${root.pressPasteCommand}`]);
+            Quickshell.execDetached(["bash", "-c", `${root.cliphistBinary} decode ${entryNumber} | wl-copy`]);
         }
+        root.pendingPaste = true;
+    }
+
+    // Send the Ctrl+V for a paste() that has already been decided. Idempotent:
+    // the popup's unmap and the fallback timer both call it and only the first
+    // one does anything.
+    function sendPendingPaste() {
+        if (!root.pendingPaste)
+            return;
+        root.pendingPaste = false;
+        Quickshell.execDetached(["bash", root.pasteKeystrokeScript]);
+    }
+
+    // The no-popup fallback. A paste asked for over IPC, or one whose popup
+    // never mapped, would otherwise sit in pendingPaste for ever; the normal
+    // path (the popup unmapping) has already cleared the flag by this point, so
+    // this is a no-op then. Its interval is not the paste timing -- the script
+    // owns that -- it only decides how soon the script is started.
+    Timer {
+        id: pendingPasteFallback
+        interval: 300
+        repeat: false
+        running: root.pendingPaste
+        onTriggered: root.sendPendingPaste()
     }
 
     function superpaste(count, isImage = false) {
+        root.noteShellCopy();
         // Find entries
         const targetEntries = entries.filter(entry => {
             if (!isImage) return true;
@@ -141,11 +168,56 @@ Singleton {
         wipeProc.running = true;
     }
 
-    Connections {
-        target: Quickshell
-        function onClipboardTextChanged() {
-            delayedUpdateTimer.restart()
+    // ── Noticing that something was copied ──────────────────────────────
+    // NOT `Quickshell.clipboardText`, which is what this used to listen to. Under
+    // Wayland a client only learns about the clipboard from a selection OFFER, and
+    // offers follow focus -- a layer-shell background process like this shell never
+    // has it, so that property simply sat still on this desktop and the toast had
+    // no reason to ever look. Measured before replacing it: a copy produced no
+    // signal here at all. `wl-paste --watch` is the standard answer -- one
+    // long-lived process, one line per clipboard change, no focus, no polling --
+    // and it was confirmed to fire on this compositor.
+    Process {
+        id: clipboardWatch
+        command: ["wl-paste", "--watch", "bash", "-c", "echo changed"]
+        running: true
+        stdout: SplitParser {
+            onRead: line => {
+                root.pendingChange = true
+                root.pendingOwnCopy = root.shellCopied()
+                root.toastRetries = 0
+                delayedUpdateTimer.restart()
+            }
         }
+        onExited: (code, status) => {
+            // A watcher that is gone leaves the toast silently missing until the
+            // next reload, which reads as "the feature is broken" rather than "the
+            // watcher stopped". 127 is "no such command": reviving a machine that
+            // has no wl-clipboard every second would be a spawn loop.
+            if (code !== 127)
+                clipboardWatchRevive.restart()
+        }
+    }
+
+    Timer {
+        id: clipboardWatchRevive
+        interval: 1000
+        repeat: false
+        onTriggered: clipboardWatch.running = true
+    }
+
+    // cliphist writes the entry to its store ASYNCHRONOUSLY -- measured on this
+    // machine from 60 ms on a good copy to past 700 ms on a bad one -- while the
+    // refresh that follows a change ran ~20 ms later, so it usually listed the
+    // PREVIOUS store and the new entry was simply not in it yet. That is the second
+    // reason the toast never appeared. So: ask again, shortly, until the newest
+    // entry is one we have not announced. Bounded, and only while a change is
+    // actually pending.
+    Timer {
+        id: toastRetryTimer
+        interval: 150
+        repeat: false
+        onTriggered: root.refresh()
     }
 
     Timer {
@@ -173,22 +245,48 @@ Singleton {
             if (exitCode === 0) {
                 const previous = root.entries
                 root.entries = readProc.buffer
-                // Detect a newly copied entry: the list grew by one and the new tail is
-                // the freshly copied item. Show a brief toast for it (never routed through
-                // the notification service, so it doesn't enter notification history).
-                if (readProc.buffer.length > 0
-                    && readProc.buffer.length === previous.length + 1
-                    && root.workSafety.clipboard.enable !== true) {
-                    const newest = readProc.buffer[readProc.buffer.length - 1]
-                    const isImage = root.entryIsImage(newest)
-                    const text = isImage
-                        ? Translation.tr("Copied an image")
-                        : (newest.split("\t")[0]?.replace(/^\s*\S+\s+/, "") ?? "")
-                    if (text !== "") {
-                        root.showCopyToast(text)
+                // The newest entry, which cliphist prints FIRST -- verified against
+                // a live store, where the highest id is the first line. This used to
+                // take the LAST line, so the toast was tracking the OLDEST entry,
+                // which only changes when that entry is eventually evicted: a third
+                // reason it looked like it never worked at all.
+                //
+                // Announcing a change is for copies made OUT THERE -- Ctrl+C in an
+                // app, a context menu, a screenshot -- and not for the shell putting
+                // an entry back on the clipboard itself, which would flash a card at
+                // someone who is already looking at the popup that did it. Nor does
+                // it appear while work-safety mode is hiding the clipboard.
+                //
+                // The guard here used to read `root.workSafety.clipboard.enable`,
+                // and `workSafety` is not a property of this service at all -- it
+                // lives in the config as `workSafety.enable.clipboard`, so the
+                // access threw and took the toast down with it before it could
+                // ever be shown.
+                const newest = readProc.buffer.length > 0 ? readProc.buffer[0] : ""
+                if (newest !== root.announcedTail) {
+                    root.pendingChange = false
+                    root.toastRetries = 0
+                    const own = root.pendingOwnCopy
+                    root.pendingOwnCopy = false
+                    if (!root.primedTail) {
+                        // First read after a reload. Whatever is already on the
+                        // clipboard was copied before this shell was listening, and
+                        // announcing it would be a card for a copy nobody just made.
+                        root.primedTail = true
+                        root.announcedTail = newest
                     } else {
-                        root.showCopyToast(Translation.tr("Copied"))
+                        root.announcedTail = newest
+                        if (newest !== ""
+                            && !own
+                            && Config.options?.workSafety?.enable?.clipboard !== true) {
+                            root.showCopyToast(root.entryIsImage(newest)
+                                ? Translation.tr("Image copied")
+                                : Translation.tr("Copied"))
+                        }
                     }
+                } else if (root.pendingChange && root.toastRetries < 8) {
+                    root.toastRetries++
+                    toastRetryTimer.restart()
                 }
             } else {
                 console.error("[Cliphist] Failed to refresh with code", exitCode, "and status", exitStatus)
@@ -206,8 +304,43 @@ Singleton {
     // pinned entry vanished from the pinned view -- after the next copy.
     readonly property string pinStorePath: Directories.cache + "/cliphist-pinned.json"
     property list<string> pinnedContents: []
+    // The label the toast shows: one short word, not the copied text. The card is
+    // feedback that the copy LANDED, and a dump of what was copied turns a glance
+    // into a read. `copyToastSeq` is how the toast learns that a SECOND copy
+    // arrived while it was still up -- the label may be identical, so the text
+    // cannot carry that.
     property string lastCopiedText: ""
     property bool copyToastVisible: false
+    property int copyToastSeq: 0
+    // Set by every path where the SHELL puts something on the clipboard; see
+    // shellCopied(). A window rather than a flag, because the refresh that notices
+    // the change is asynchronous -- a flag would have to be cleared by the very
+    // detection it exists to suppress.
+    property real shellCopyUntil: 0
+    // The newest entry the toast has already spoken for, and whether the first
+    // read after a reload has happened yet. Compared as the WHOLE line, because
+    // cliphist's id is part of it: copying the same text again gets a new id and
+    // is still a copy worth a card. Declared here rather than inferred from the
+    // list length, which cannot tell "one new entry" from "cliphist has not
+    // written it yet" -- see the retry in readProc.onExited.
+    property string announcedTail: ""
+    property bool primedTail: false
+    property bool pendingChange: false
+    property int toastRetries: 0
+    // Whether the change now being tracked is the shell's OWN copy (a paste from
+    // the popup, a superpaste). Decided when the change is NOTICED, not when it is
+    // announced: cliphist's write is asynchronous and the retry can push the
+    // announcement past the suppression window, which would flash a "Copied" card
+    // at someone who just pasted from the popup that did it.
+    property bool pendingOwnCopy: false
+
+    function noteShellCopy() {
+        root.shellCopyUntil = Date.now() + 800
+    }
+
+    function shellCopied(): bool {
+        return Date.now() < root.shellCopyUntil
+    }
 
     // The entry text without the numeric id cliphist prefixes.
     function entryContent(entry) {
@@ -273,18 +406,20 @@ Singleton {
         return out;
     }
 
-    // Called by the copy notification path to surface a brief "copied" toast.
+    // Surface the brief "copied" toast.
+    //
+    // How long it stays, and how it leaves, belong to the toast itself (see
+    // modules/ii/onScreenDisplay/OnScreenDisplay.qml): ONE owner for ONE
+    // lifetime. There used to be a timer here and another in the toast, 1500 ms
+    // against 1200 ms, each with its own idea of when the card was over.
     function showCopyToast(text) {
         root.lastCopiedText = text;
         root.copyToastVisible = true;
-        root.copyToastTimer.restart();
-    }
-
-    Timer {
-        id: copyToastTimer
-        interval: 1500
-        repeat: false
-        onTriggered: { root.copyToastVisible = false; root.lastCopiedText = ""; }
+        root.copyToastSeq++;
+        // Printed because this is the one part of the toast a terminal cannot see:
+        // whether the copy was NOTICED at all is otherwise indistinguishable from a
+        // card that was noticed and failed to draw.
+        print(`[cliphist] copy toast: ${text} (seq ${root.copyToastSeq})`);
     }
 
     Component.onCompleted: {

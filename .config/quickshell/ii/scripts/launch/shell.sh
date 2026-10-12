@@ -199,6 +199,28 @@ fi
 # flashing a loading indicator on the many paths that correctly exit above --
 # a shell already running, a lost race, a duplicate caller -- and a splash
 # that appears and vanishes for no reason is worse than no splash.
+#
+# ── CLEAR THE LAST SESSION'S "THE BAR IS UP" CLAIM FIRST ──────────────────
+#
+# Reaching this line means a shell is about to be started and none is running
+# for this session, so any ii-bar-visible.json on disk was written by a shell
+# that is gone. And it is FRESH, not stale: Bar.qml refreshes it every 2 s
+# while a bar is up, so logging out leaves {"visible":true,"ts":<seconds
+# ago>} waiting for the next login.
+#
+# Anything that reads it then believes a desktop is already on screen.
+# Measured on 2026-10-11 (the login sequence replayed): the login cover read
+# that freshly-written corpse marker, decided the desktop was up, and refused
+# to appear -- the black screen this whole block exists to prevent, with the
+# indicator disabled by the very session that had just ended. The compositor's
+# gesture gate (readBarVisible in custom/general.lua) would likewise arm bar
+# gestures against a bar that is not there.
+#
+# Deleting it costs nothing: that reader treats a MISSING file as "cannot
+# know" (nil), not as an error, and the new shell republishes the file within
+# a second of its bar appearing.
+rm -f "${XDG_RUNTIME_DIR:-/tmp}/ii-bar-visible.json" 2>/dev/null || true
+
 setsid bash "$HOME/.config/quickshell/ii/scripts/launch/splash.sh" \
     >/dev/null 2>&1 </dev/null &
 

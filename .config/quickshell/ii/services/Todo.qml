@@ -66,6 +66,125 @@ Singleton {
     // flag lets the sidebars stand down while a drag is in flight.
     property bool dragInFlight: false
 
+    // ── No view state ──────────────────────────────────────────────────
+    //
+    // A `minimizedIds` set used to live here: the ids of just-ticked tasks, kept
+    // so the ticked row could fold in place on the Unfinished page and retire to
+    // Done only when that page was left. It is gone, because it put a finished
+    // task in the list of things still owed, for as long as the page was open,
+    // and kept it off Done in the meantime -- the opposite of what the tick
+    // says. `tick` (TaskList.qml) now marks the task and nothing else, so a
+    // task's `done` flag is the whole of its state and the two pages are plain
+    // views of it.
+
+    // ── Live lookups for the row bindings ──────────────────────────────
+    //
+    // The entries in `list` are plain JS objects, and a QML binding that reads a
+    // field of a plain object NEVER re-evaluates: nothing about an object like
+    // that emits a change signal, so a row kept whatever it read when its
+    // delegate was built. That was invisible while the only thing reading these
+    // fields was the Done page (whose delegates are built with `done` already
+    // true) -- but the same row can be drawn on either page, and a task can be
+    // unticked from Done and ticked again from Unfinished without its delegate
+    // being rebuilt, so a stale `done` means a finished task still drawing an
+    // empty circle and bright text (or the reverse).
+    //
+    // Every field a row DRAWS therefore goes through one of these, and what makes
+    // them live is the read of `list` they do on the way: `list` is a notifiable
+    // property, and `persist()` reassigns it on every mutation -- the same
+    // reassignment ScriptModel already watches -- so the binding has something
+    // to depend on and re-evaluates the moment the task changes.
+    function taskById(id) {
+        for (let i = 0; i < list.length; i++) {
+            if (list[i].id === id)
+                return list[i]
+        }
+        return null
+    }
+
+    function isDone(id) {
+        const task = taskById(id)
+        return task !== null && task.done === true
+    }
+
+    function contentOf(id) {
+        const task = taskById(id)
+        return task === null ? "" : String(task.content ?? "")
+    }
+
+    // ── Completion stamps and retention ────────────────────────────────
+    //
+    // A task that is ticked gets a `completedAt` (epoch ms) written the moment
+    // it is marked done, and the stamp is removed the moment it is unticked.
+    // The stamp exists for two reasons: the Done page draws it under the task
+    // text, and retention below is measured from it.
+    //
+    // Done tasks are NOT kept forever. One month after they are finished they
+    // are dropped, so the Done page stays a record of recent work rather than
+    // an ever-growing archive. Only DONE tasks are ever dropped -- an
+    // unfinished task has no stamp and is never touched, however old it is.
+    //
+    // `double`, NOT `int`: QML's `int` is 32-bit, and 30 days in ms is
+    // 2,592,000,000 -- past INT32_MAX. Declared `int` it wrapped to a NEGATIVE
+    // number, which made `now - completedAt > retentionMs` true for every
+    // stamp and would have deleted every finished task at once. Epoch
+    // milliseconds are inherently 64-bit and so is this.
+    readonly property double retentionMs: 30 * 86400000
+
+    // Live lookup for the row bindings, in the same shape as `isDone` /
+    // `contentOf`: it reads `list` on the way, so a row re-evaluates the
+    // moment its task is stamped or unstamped rather than keeping whatever
+    // the delegate read when it was built. 0 means "no stamp".
+    function completedAtOf(id) {
+        const task = taskById(id)
+        if (task === null || task.completedAt === undefined || task.completedAt === null)
+            return 0
+        return Number(task.completedAt)
+    }
+
+    // Stamp any done task that predates the stamp (a list written before this
+    // field existed). They are stamped with the load time, which starts their
+    // retention window now -- the alternative, dropping them on sight the
+    // first time the shell loads after this change, would delete a month of
+    // finished work the user never asked to lose.
+    //
+    // Returns true if anything was added, so the caller can write the file
+    // back exactly once.
+    function ensureCompletedAt() {
+        const now = Date.now()
+        let added = false
+        for (let i = 0; i < list.length; i++) {
+            const task = list[i]
+            if (task.done === true
+                    && (task.completedAt === undefined || task.completedAt === null)) {
+                task.completedAt = now
+                added = true
+            }
+        }
+        return added
+    }
+
+    // Drop every done task finished more than `retentionMs` ago. Unfinished
+    // tasks are never candidates, and a done task with no stamp is left alone
+    // (`ensureCompletedAt` gives it one first).
+    //
+    // Mutates `list` and writes the file itself, so it is safe to call from
+    // anywhere -- the load path, a tick, or the hourly timer -- and returns
+    // true only when something was actually dropped. Only rewriting the file
+    // when it changed matters: an unconditional write here would churn the
+    // file every hour for no reason.
+    function purgeExpiredDone() {
+        const now = Date.now()
+        const kept = list.filter(t => !(t.done === true
+            && t.completedAt !== undefined && t.completedAt !== null
+            && now - Number(t.completedAt) > retentionMs))
+        if (kept.length === list.length)
+            return false
+        root.list = kept
+        todoFileView.setText(JSON.stringify(root.list))
+        return true
+    }
+
     // Backfill ids onto a list loaded from disk, and point `nextId` past the
     // highest one seen. Runs on every load so ids survive restarts.
     function ensureIds() {
@@ -90,13 +209,16 @@ Singleton {
     function markDone(index) {
         if (index >= 0 && index < list.length) {
             list[index].done = true
+            list[index].completedAt = Date.now()
             persist()
+            purgeExpiredDone()
         }
     }
 
     function markUnfinished(index) {
         if (index >= 0 && index < list.length) {
             list[index].done = false
+            delete list[index].completedAt
             persist()
         }
     }
@@ -118,7 +240,14 @@ Singleton {
         if (i < 0)
             return false
         list[i].done = true
+        // Stamp it now. The Done page draws this and retention counts from it,
+        // so a done task without one is the one shape that must never reach
+        // the list.
+        list[i].completedAt = Date.now()
         persist()
+        // A tick can be the moment a task crosses the retention line (the
+        // shell may have been running across it), so sweep at the same time.
+        purgeExpiredDone()
         return true
     }
 
@@ -127,6 +256,9 @@ Singleton {
         if (i < 0)
             return false
         list[i].done = false
+        // Unticking is "this is not finished after all", so the stamp goes
+        // with the tick. A task re-ticked later gets a fresh one.
+        delete list[i].completedAt
         persist()
         return true
     }
@@ -238,15 +370,43 @@ Singleton {
         refresh()
     }
 
+    // Retention also runs on a slow clock, so a task that crosses the line
+    // while the shell is running disappears on its own instead of waiting for
+    // the next restart or tick. Hourly is chosen because the boundary is
+    // measured in days: nothing is gained by checking more often, and the
+    // sweep itself is free when nothing is due (see `purgeExpiredDone`).
+    Timer {
+        interval: 3600000
+        running: true
+        repeat: true
+        onTriggered: root.purgeExpiredDone()
+    }
+
     FileView {
         id: todoFileView
         path: Qt.resolvedUrl(root.filePath)
         onLoaded: {
             const fileContents = todoFileView.text()
             root.list = JSON.parse(fileContents)
-            // Give every pre-existing task a stable id and write the file back,
-            // so from here on every task has one for the rest of its life.
-            if (ensureIds()) {
+            // Three migrations/upkeeps, each reporting whether it changed
+            // anything, so the file is written back AT MOST once.
+            //
+            // 1. Give every pre-existing task a stable id, so from here on
+            //    every task has one for the rest of its life.
+            // 2. Stamp done tasks that predate the stamp, starting their
+            //    retention window now.
+            // 3. Drop done tasks past that window.
+            //
+            // The order matters: 2 before 3 means an unstamped done task is
+            // given a fresh stamp and then judged as recent, rather than
+            // being treated as ancient and deleted.
+            let changed = ensureIds()
+            changed = ensureCompletedAt() || changed
+            // `purgeExpiredDone` writes the file itself when it drops
+            // something, so `changed` only has to make sure a stamp/ids
+            // migration is not lost.
+            purgeExpiredDone()
+            if (changed) {
                 root.list = list.slice(0)
                 todoFileView.setText(JSON.stringify(root.list))
             }

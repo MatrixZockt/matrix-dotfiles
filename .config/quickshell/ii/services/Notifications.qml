@@ -273,19 +273,99 @@ Singleton {
         return TrayApps.classForTrayItem({ id: entry || name, title: icon || name });
     }
 
+    // ── Which desktop entry sent this notification ──────────────────────
+    //
+    // The bridge from a notification to the thing that can OPEN its app, for
+    // the case in `focusSender` below where the sender has no window at all.
+    //
+    // Three spellings of the same identity, in the order they are worth
+    // trusting: the `desktop-entry` hint, which a sender publishes precisely
+    // so that its icon and its window can be resolved; the app icon's
+    // basename, which for the packaged apps on this machine IS the desktop
+    // file's id (Thunderbird sends `org.mozilla.Thunderbird`, and
+    // `/usr/share/applications/org.mozilla.Thunderbird.desktop` is the file
+    // that starts it, so an icon we can draw is a launch we can make); and
+    // the display name last, because a name is a label rather than an id and
+    // matches only by accident of packaging.
+    function senderEntry(notif) {
+        if (!notif) return null;
+        const live = notif.notification;
+        const cands = [];
+        const push = (v) => {
+            const key = root.entryKey(v);
+            if (key.length > 0 && cands.indexOf(key) < 0)
+                cands.push(key);
+        };
+        if (live) push(live.desktopEntry);
+        push(notif.appIcon);
+        push(notif.appName);
+        if (cands.length === 0)
+            return null;
+
+        // Pass 1: the file id, exactly. This is the fast path and it is the
+        // one the two trustworthy candidates almost always take.
+        for (const c of cands) {
+            const entry = DesktopEntries.byId(c);
+            if (entry)
+                return entry;
+        }
+        // Pass 2: the id, then the display name, compared over the whole
+        // list. This is what catches a sender that told us nothing but
+        // "Thunderbird" -- a label, but the exact label the entry carries.
+        const all = Array.from(DesktopEntries.applications.values);
+        for (const c of cands) {
+            const hit = all.find((e) => String(e.id ?? "").toLowerCase().replace(/\.desktop$/, "") === c);
+            if (hit)
+                return hit;
+        }
+        for (const c of cands) {
+            const hit = all.find((e) => String(e.name ?? "").trim().toLowerCase() === c);
+            if (hit)
+                return hit;
+        }
+        // Pass 3: Quickshell's own fuzzy lookup, and LAST, because it is a
+        // heuristic and what this decides is whether a program is started.
+        // A wrong answer here is not a mislabelled row, it is someone's
+        // editor opening because a script named itself after it.
+        for (const c of cands) {
+            const entry = DesktopEntries.heuristicLookup(c);
+            if (entry)
+                return entry;
+        }
+        return null;
+    }
+
+    // One candidate spelling reduced to something comparable: basename (icons
+    // and desktop files arrive as paths), no .desktop, no image extension,
+    // lowercased. Empty for anything that is not a usable string.
+    function entryKey(v) {
+        if (typeof v !== "string" || v.length === 0)
+            return "";
+        return v.split("/").pop()
+            .replace(/\.desktop$/i, "")
+            .replace(/\.(png|svg|xpm|ico|jpe?g|gif)$/i, "")
+            .trim().toLowerCase();
+    }
+
     // ── Click a notification: go to the app that sent it ───────────────
     //
-    // A notification is a message ABOUT a window. Acting on it by raising
-    // the window it is about is the obvious thing for it to do, and until
-    // now it did nothing at all on a left click (only a middle click
-    // dismissed it).
+    // A notification is a message ABOUT a window, so acting on it by raising
+    // that window is the obvious thing for it to do. "Go to the app" has two
+    // answers, though, and only one of them used to be handled: the app is
+    // open and gets focused, or the app is CLOSED and gets OPENED. The second
+    // is not a corner case -- a mail client that is not running still gets to
+    // tell you it has mail, and its card used to answer a click with silence.
+    //
+    // Returns what it actually did -- "focused", "launched" or "none" -- so
+    // the diagnostics IPC `focus` can say it, which is how this is checked
+    // without a mouse.
     //
     // The dispatch pair is the one the rest of the shell uses and the only
     // one this Hyprland build answers: `hl.dsp.focus({ workspace = N })`
     // first -- focusing a window on another workspace is a silent no-op --
     // and then the window itself.
     function focusSender(notif) {
-        if (!notif) return false;
+        if (!notif) return "none";
         // Resolve against the LIVE notification when there is one, because a
         // notification restored from the history file has no desktopEntry to
         // read (see the `dump` handler below for the same trap). A tray app
@@ -297,8 +377,26 @@ Singleton {
             TrayApps.show(cls);
         const wins = (HyprlandData.windowList || []).filter((w) => w.class === cls);
         if (wins.length === 0) {
-            console.log("[Notifications] No window for sender: " + (cls || notif.appName));
-            return false;
+            // Nothing on screen to raise, so open the app instead.
+            //
+            // Through GlobalStates.launchEntry, NOT entry.execute(): that is
+            // the shell's one launch choke point, and it is what makes this
+            // launch indistinguishable from one off the app menu -- same
+            // open.sh, same tray `allow` for the close-to-tray apps, same pid
+            // record the compositor reads to tell a launcher window from a
+            // popup someone else opened, same "starting" card while it comes
+            // up. A second launch mechanism here would be a second set of
+            // those behaviours, and the ones that would go missing are
+            // exactly the ones that are invisible until they are wrong.
+            const entry = root.senderEntry(notif);
+            if (entry) {
+                console.log("[Notifications] No window for sender: " + (cls || notif.appName)
+                    + " -- opening " + (entry.id || entry.name));
+                GlobalStates.launchEntry(entry);
+                return "launched";
+            }
+            console.log("[Notifications] No window and no desktop entry for sender: " + (cls || notif.appName));
+            return "none";
         }
         // Prefer a window already on the workspace being looked at: switching
         // to another workspace to get a second window of an app that has one
@@ -306,12 +404,22 @@ Singleton {
         const active = HyprlandData.activeWorkspace?.id;
         const here = wins.find((w) => w.workspace && w.workspace.id === active);
         const target = here || wins[0];
+        // The switch runs through the SAME dispatcher every other desktop
+        // change uses (the keybinds, the overview, the swipes), so it plays the
+        // same transition: with animations on, `hl.dsp.focus({workspace})`
+        // slides the desktops with the config's own `workspaces` motion
+        // instead of cutting. Nothing extra is needed here to make the jump
+        // animated -- it is animated because it is not a special case.
+        //
+        // A window already on the VISIBLE desktop has no switch to play: the
+        // compositor raises it where it stands, and a z-order change is not
+        // something it can animate. That case looks the way it always has.
         if (target.workspace && target.workspace.id >= 0)
             Hyprland.dispatch(`hl.dsp.focus({ workspace = ${target.workspace.id} })`);
         const addr = String(target.address || "");
         if (addr.length > 0)
             Hyprland.dispatch(`hl.dsp.focus({ window = "address:${addr}" })`);
-        return true;
+        return "focused";
     }
 
     // Quickshell's notification IDs starts at 1 on each run, while saved notifications
@@ -593,12 +701,20 @@ Singleton {
         }
 
         // `notifications focus <id>` -- the click handler's exact path.
+        //
+        // Reports which of the two answers it took. `launched` is the case
+        // that used to report "no window" and mean "nothing happened";
+        // `none` is now the honest one for a sender with neither a window nor
+        // a desktop entry, which is a notification from something that
+        // cannot be opened at all.
         function focus(id: string): string {
             const n = root.list.find((x) => String(x.notificationId) === String(id));
             if (!n)
                 return `no notification with id ${id}`;
-   const ok = root.focusSender(n);
-            return `focusSender(${id}) app="${n.appName}" cls=${root.senderClass(n) || "(none)"} -> ${ok ? "focused" : "no window"}`;
+            const result = root.focusSender(n);
+            const entry = root.senderEntry(n);
+            return `focusSender(${id}) app="${n.appName}" cls=${root.senderClass(n) || "(none)"}`
+                + ` entry=${entry ? (entry.id || entry.name) : "(none)"} -> ${result}`;
         }
 
         // Resolves a notifier's identity without a real notification,

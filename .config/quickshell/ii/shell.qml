@@ -22,9 +22,6 @@ import QtQuick.Window
 import Quickshell
 import Quickshell.Io
 import Quickshell.Hyprland
-// For `TrayService` in the trayOverflow IPC below, which reports how many
-// tray items exist -- the number that decides whether the dropdown has
-// anything to show at all.
 import Quickshell.Services.SystemTray
 import Quickshell.Services.Mpris
 
@@ -84,6 +81,13 @@ ShellRoot {
         // here; the scan of ~/Models is one `find`, and polling stays off
         // until a surface claims it (see LlamaService.tabOwner).
         LlamaService.models
+        // Same reason again: reading the singleton CREATES it, and this one has
+        // to be alive at login regardless of whether anything is on screen --
+        // a stick plugged in before the first Files window is exactly the case
+        // it exists for. The read is its 3s lsblk poll, which starts itself.
+        Volumes.known
+        // The census of what was already plugged in when the shell started.
+        Volumes.poll()
         // Reading `GlobalStates` CREATES it (a Quickshell singleton exists from
         // the first read). Nothing here needs the values -- the touch is the
         // point: it makes the singleton, and with it the sidebar-state
@@ -127,30 +131,6 @@ ShellRoot {
 
         function cycle(): void {
             root.cyclePanelFamily()
-        }
-    }
-
-    // The system tray's dropdown card, drivable without a physical click.
-    // The chevron is a 24px target inside the bar's layout, and "ask someone
-    // to hover it and report" is not a verification step.
-    IpcHandler {
-        target: "trayOverflow"
-
-        function open(): void {
-            GlobalStates.trayOverflowOpen = true;
-        }
-
-        function close(): void {
-            GlobalStates.trayOverflowOpen = false;
-        }
-
-        function toggle(): void {
-            GlobalStates.trayOverflowOpen = !GlobalStates.trayOverflowOpen;
-        }
-
-        function state(): string {
-            const n = TrayService ? (TrayService.pinnedItems.length + TrayService.unpinnedItems.length) : -1;
-            return `open=${GlobalStates.trayOverflowOpen} items=${n}`;
         }
     }
 
@@ -223,16 +203,94 @@ ShellRoot {
         }
     }
 
+    // ═══ A swipe over a popup owes BOTH halves ═══════════════════════════════
+    //
+    // The four-finger horizontal swipe is the compositor's own gesture, and on
+    // its own it is all-or-nothing: Hyprland commits the switch only past a
+    // distance it decides, and it says nothing at all about the swipes it
+    // refuses. Measured on this machine with an injected four-finger swipe:
+    // 0.10 of the pad commits nothing, 0.20 commits.
+    //
+    // A temporary popup changes what that refusal means. The gesture still
+    // reaches the popup -- the compositor drops its focus grab and the popup
+    // puts itself away -- so the swipe LOOKS like it did something while the
+    // desktop never moved. That is the report, exactly: "it blocks the four
+    // finger swipe to another desktop and closes the menu instead". Reproduced
+    // with the launcher open: popup closed, desktop unchanged.
+    //
+    // So a swipe that had a popup under it owes the user both halves, and the
+    // shell is the only side that can promise the second one. The compositor's
+    // gesture stays exactly as it is -- it is the good, live-drag version, and
+    // a popup must not cost the user that -- and when it did NOT commit, the
+    // switch is made from here instead. When it DID commit, the settle timer
+    // finds the desktop already changed and does nothing, so one gesture is
+    // never worth two desktops. That guard is the same shape, at the same
+    // ~120ms, as the launcher's own wheel path (AppSearchOverlay.wheelSettle).
+    //
+    // `swipeHadPopup` is snapshotted at the gesture's BEGIN, not read at the
+    // end, because by the end the popup may well have closed itself already --
+    // that is precisely what it does when the gesture starts. It is taken on
+    // EVERY gesture begin, whatever the finger count: a four-finger swipe's
+    // `begin` can be reported as 2 or 3 fingers (they do not all land in the
+    // same millisecond), so gating this on `start === 4` would quietly never
+    // arm -- the same trap the tracker's own `peak` fix was about.
+    property bool swipeHadPopup: false
+    property int swipeFromWorkspace: 0
+
+    function settleSwipePopups(travel) {
+        if (!root.swipeHadPopup)
+            return;
+        const hadPopup = GlobalStates.closeTransientPopups();
+        const from = root.swipeFromWorkspace;
+        if (from <= 0)
+            return;         // could not read the desktop: close, but do not guess
+        swipeFallback.from = from;
+        // Measured on this machine, both directions, four swipes: a RIGHTWARD
+        // swipe (positive travel) goes to the desktop BEFORE, a leftward one to
+        // the desktop after.
+        swipeFallback.forward = travel < 0;
+        swipeFallback.restart();
+        console.log(`[swipe] popup under the gesture (closed=${hadPopup})`
+            + ` travel=${travel.toFixed(3)} from=${from} fallback=${swipeFallback.forward ? "+1" : "-1"}`);
+    }
+
+    Timer {
+        id: swipeFallback
+        property int from: 0
+        property bool forward: false
+        // The compositor's own switch lands ~20ms after the fingers lift; this
+        // is that with room to spare, and still not felt as a delay.
+        interval: 140
+        onTriggered: {
+            const now = Number(HyprlandData.activeWorkspace?.id ?? 0);
+            if (now !== swipeFallback.from)
+                return;     // the compositor switched; nothing left to do
+            // The Lua dispatcher form, like every other dispatch in this shell:
+            // this Hyprland runs the Lua config parser, where a bare
+            // `workspace 3` string is not a dispatcher it recognises.
+            Hyprland.dispatch(`hl.dsp.focus({ workspace = "${swipeFallback.forward ? "+1" : "-1"}" })`);
+        }
+    }
+
     Connections {
         target: TouchpadSwipe
         // The same four fingers Hyprland turns into a workspace switch.
         // TouchpadSwipe reports that the gesture finished and which way it
-        // went (positive is rightward); the direction is no longer used for
-        // anything, because a rightward swipe creates its desktop and so
-        // publishes an event like any other landing.
+        // went (positive is rightward).
+        //
+        // The direction went unused for a while (the pill's flash is
+        // unconditional), and it is needed again here: when the compositor
+        // refuses a swipe, this is the only record of which way it was asking
+        // to go.
+        function onGestureStarted(start) {
+            root.swipeHadPopup = GlobalStates.transientPopupOpen;
+            root.swipeFromWorkspace = Number(HyprlandData.activeWorkspace?.id ?? 0);
+        }
+
         function onHorizontalSwipeEnded(travel) {
             edgeTimer.travel = travel;
             edgeTimer.restart();
+            root.settleSwipePopups(travel);
         }
     }
 
@@ -322,13 +380,47 @@ ShellRoot {
         }
     }
 
-    // Debug / verification hook for the liquid bar: drive the pocket spring
-    // without needing a physical pointer (agent-side testing).
+    // Removable media. The announcements are the service's; these three are
+    // how they can be checked without a screwdriver -- there is no way to plug
+    // a device in from a script, so `forget` removes one from the census and
+    // the next poll fires the real "inserted" path for it.
+    IpcHandler {
+        target: "volumes"
+
+        function state(): string {
+            return Volumes.stateLine();
+        }
+
+        function poll(): string {
+            Volumes.poll();
+            return Volumes.stateLine();
+        }
+
+        function forget(path: string): string {
+            return Volumes.forget(path);
+        }
+
+        function phantom(path: string, kind: string, label: string, size: string): string {
+            return Volumes.phantom(path, kind, label, Number(size));
+        }
+
+        // The automount pass, on demand: what "auto mounted when plugged in"
+        // actually does, asked of the copy that would have done it.
+        function automountNow(): string {
+            return Volumes.automountNow();
+        }
+
+    }
+
+    // Debug / verification hook for the liquid bar. The below-bar droplet is
+    // RETIRED (BarContent.armPocket's note), so `set` is close-only now: any
+    // id just closes whatever is open. `state` still reads the spring, which
+    // is how a regression that re-arms a drop would be caught.
     IpcHandler {
         target: "liquidbar"
 
         function set(id: string): void {
-            LiquidBar.setPocket(id === "none" ? "" : id)
+            LiquidBar.setPocket("")
         }
 
         function state(): string {

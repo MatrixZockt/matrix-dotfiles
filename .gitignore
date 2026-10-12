@@ -51,3 +51,18 @@ extras/applications/freebuff.desktop
 # Agent session scratch (design previews, reference screenshots).
 .freebuff-tmp/
 .thread-preview/
+# Two stray artifacts on disk, neither of them configuration: `file:/` is a
+# directory a path bug created under the shell config (a file:// URL used as a
+# path, 2026-10-09) and `x + ` is an empty file left by a mistyped shell
+# redirect (2026-10-07). Listed here rather than deleted, so nothing in this
+# repository silently removes something from the disk.
+.config/quickshell/ii/file:/
+# (the trailing space is escaped: git strips unescaped trailing spaces)
+/x +\ 
+# Device insert/remove sounds: cut on this machine from a recording the user
+# supplied (scripts/system/import-device-sound.py). The recording is not in
+# this repository and is not free to redistribute, so neither is what is cut
+# from it -- and these two are generated per machine anyway, never checked in.
+# make-device-sounds.py still holds the synthesised fallback recipe.
+.config/quickshell/ii/assets/sounds/device-insert.wav
+.config/quickshell/ii/assets/sounds/device-remove.wav

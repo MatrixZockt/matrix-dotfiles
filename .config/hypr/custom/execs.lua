@@ -66,6 +66,22 @@ hl.exec_cmd("$HOME/.config/quickshell/ii/scripts/keyboard/apply.sh --no-reload")
 -- every desktop the bar can show -- the "my window jumped to a desktop that
 -- does not exist" report. Idempotent: it does nothing when nothing is
 -- stranded. See custom/scripts/workspace-sanity.sh.
+-- X11 app DPI.
+--
+-- custom/general.lua turns on xwayland:force_zero_scaling, so X11 apps draw
+-- 1:1 into the panel instead of being upscaled (that upscale is what made
+-- them pixelated). 1:1 on a ~198 DPI panel would leave them at two-thirds
+-- size unless their toolkit is told the DPI, and Xft.dpi is that instruction
+-- -- an X11-only one, so it cannot double-scale a Wayland app. The script
+-- reads the scale from ~/.cache/display/scale and writes Xft.dpi with xprop
+-- (xrdb, which would normally do this, is not installed and is not needed).
+--
+-- It waits for XWayland itself (up to ~20s) because this file is parsed
+-- before the X server is necessarily up, and it is idempotent: on a config
+-- reload it re-sets the same value. apply-display.sh calls it too, so a scale
+-- change in Settings > Display updates X11 apps without a re-login.
+hl.exec_cmd("$HOME/.config/hypr/custom/scripts/x11-dpi.sh")
+
 hl.exec_cmd("$HOME/.config/hypr/custom/scripts/workspace-sanity.sh")
 
 -- Freebuff Desktop is deliberately NOT started at login. (Removed 2026-10-04

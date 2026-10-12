@@ -13,7 +13,13 @@ Description=ii music daemon - headless mpv playback engine for the shell's Music
 PartOf=graphical-session.target
 
 [Service]
-ExecStart=/usr/bin/mpv --no-video --no-audio-display --idle=yes --input-ipc-server=%t/ii-music-ipc --volume=80 --keep-open=no --really-quiet
+# --loop-playlist=inf: the queue NEVER runs dry. measured cause of the
+# "music randomly stops" report: every online track (OnlineMusic.playNow)
+# plays in a 1-track queue, and with --keep-open=no the last track's end
+# sent mpv to idle -- reproduced over the IPC (1 track -> idle-active=true
+# after end). looping the playlist keeps both the app's shuffle (which
+# permutes the queue) and the sidebar's library playable forever.
+ExecStart=/usr/bin/mpv --no-video --no-audio-display --idle=yes --input-ipc-server=%t/ii-music-ipc --volume=80 --keep-open=no --really-quiet --loop-playlist=inf
 Restart=always
 RestartSec=2
 

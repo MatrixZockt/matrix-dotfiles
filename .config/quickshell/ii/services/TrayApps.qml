@@ -112,7 +112,7 @@ Singleton {
     // because its grid is placed by hand from the cells that exist, and a
     // hidden-but-present delegate would leave a gap shaped like the icon.
     // Reacts to windowList, so park/restore/close all show up without a call.
-    readonly property list<var> liveRegistry: registry.filter(e => root.isRunning(e.cls))
+    readonly property list<var> liveRegistry: registry.filter(e => root.isRunning(e.cls) && root.isHidden(e.cls))
 
     // ── In-flight operations ────────────────────────────────────────────────
     // Cold start or a restore in flight FOR THIS APP: the icon dims and a ring
@@ -369,6 +369,16 @@ Singleton {
     // the app putting one there (it restarts its own window), and the
     // watcher parks it below instead of asking whether the user meant it.
     property var trayIntent: ({})
+    // Per-class timestamp of the LAST time the permission was granted. The
+    // launch gap guard below (enforceTray's !has branch) reads it: a grant
+    // through allow() from the launcher arrives BEFORE the app's first window
+    // exists (Thunderbird maps its first window 5-8s after process start),
+    // and revoking after the fixed 1s "window gone" grace is what parked the
+    // app the instant its window finally appeared. Held 20s, which covers the
+    // slowest cold start this machine has produced (Thunderbird 15s, cold:
+    // measured) with margin; a REVOCATION clears it so a later unsanctioned
+    // stray is still parked on the normal schedule.
+    property var grantedAt: ({})
     property var hadWindows: ({})
     property var lastParkAt: ({})
     property bool adopted: false
@@ -386,11 +396,21 @@ Singleton {
         if (was !== on)
             console.log(`[TrayApps] ${new Date().toISOString().slice(11, 23)} intent(${cls}) ${was} -> ${on} by ${why ?? "?"}`);
         const m = Object.assign({}, root.trayIntent);
+        // The grant timestamp rides the same object: stamping it is what lets
+        // the launch-gap guard below hold the permission while the app is
+        // still between `allow` and its first window. A revocation clears the
+        // stamp, so a grant can never outlive the permission it belongs to.
         if (on)
             m[cls] = true;
         else
             delete m[cls];
         root.trayIntent = m;
+        const gs = Object.assign({}, root.grantedAt);
+        if (on)
+            gs[cls] = Date.now();
+        else
+            delete gs[cls];
+        root.grantedAt = gs;
     }
 
     function enforceTray() {
@@ -469,6 +489,37 @@ Singleton {
                 // window has to stay gone for a full second first; if it
                 // comes back inside that, nothing was revoked.
                 const gone = root.goneAt[cls] || 0;
+                // A LAUNCH IN FLIGHT keeps its permission: Thunderbird takes
+                // 5-8s between process start and its first window mapping,
+                // and revoking the intent inside that gap is exactly the bug
+                // this fixes -- permission gone, the window then maps, and
+                // the watcher below reads it as a stray and parks it on
+                // arrival, which is the app "opening and instantly
+                // disappearing into the tray". markBusy("launch") holds the
+                // gate: busyFor() is true from launch() until the window
+                // maps (or its own timeout prunes it), and only THEN can the
+                // permission lapse. Also covers the earlier crash WHERE THE
+                // ALLOW RAN BEFORE THE WINDOW EXISTED but the compositor's
+                // window list had not yet dropped the old window (or
+                // processAlive's pgrep is still returning matches), which
+                // used to clear the intent within a second of granting it.
+                // A RECENTLY GRANTED permission holds through the launch gap
+                // too: the launcher's allow() runs before the window exists,
+                // and busyMap does not cover calls from outside this service
+                // (the launcher path never calls markBusy). 20s from the
+                // grant covers the slowest measured cold start; a real closing
+                // of the app is only revoked after that. A quit (park+quit
+                // paths) clears the permission and its stamp together, so a
+                // later stray still parks on the normal schedule.
+                const granted = root.grantedAt[cls] || 0;
+                const inFlight = (root.busyMap[cls]
+                    && root.busyMap[cls].kind === "launch"
+                    && Date.now() <= root.busyMap[cls].until)
+                    || (Date.now() - granted < 20000 && root.trayIntent[cls] === true);
+                if (inFlight) {
+                    seen[cls] = false;
+                    continue;
+                }
                 if (!gone) {
                     const g = Object.assign({}, root.goneAt);
                     g[cls] = Date.now();
@@ -493,6 +544,18 @@ Singleton {
             }
             seen[cls] = true;
             const stray = wins.filter(w => !w.workspace || w.workspace.name !== "special:tray");
+            // DURING THE LAUNCH WINDOW the permission cannot expire, however
+            // the list reads: a launch in flight (granted recently, still
+            // allowed out) is inside Thunderbird's heavy startup, and that
+            // burst produced a STALE windowList mid-map (measured, run 2 of
+            // three identical cold launches: the all-parked branch read
+            // "all windows parked for 1876ms" for a window the compositor
+            // itself reported tiled on ws 2 -- the 60ms-debounced re-read
+            // served the pre-launch record). Revoking on that phantom
+            // parked every 3rd cold launch. The 25s bound matches the
+            // slowest measured cold start below and the !has guard above.
+            const granted = root.grantedAt[cls] || 0;
+            const launchShield = Date.now() - granted < 25000 && root.trayIntent[cls] === true;
             if (root.trayIntent[cls] === true) {
                 // Open on purpose -- leave the windows alone. But a
                 // permission with NOTHING on screen has expired, and it can
@@ -515,8 +578,17 @@ Singleton {
                 } else {
                     const since = root.allParkedAt[cls] || 0;
                     if (!since) {
+                        if (!launchShield) {
+                            const a = Object.assign({}, root.allParkedAt);
+                            a[cls] = Date.now();
+                            root.allParkedAt = a;
+                        }
+                    } else if (launchShield) {
+                        // Shield active: the timer never accumulates, so a
+                        // phantom "all parked" reading during a launch cannot
+                        // reach the 1.5s verdict.
                         const a = Object.assign({}, root.allParkedAt);
-                        a[cls] = Date.now();
+                        delete a[cls];
                         root.allParkedAt = a;
                     } else if (Date.now() - since > 1500) {
                         console.log(`[TrayApps] ${new Date().toISOString().slice(11, 23)} permission expired for ${cls}: all windows parked for ${Date.now() - since}ms`);
@@ -697,6 +769,16 @@ Singleton {
     // live icon is far worse than keeping a stale one. TrayNoise.isService is
     // not asked either, for the same reason: the Advanced grid is exactly the
     // never-a-window case.
+    //
+    // THE ONE EXCEPTION is the user's explicit rule: an app enabled for
+    // close-to-tray (tray.closeToTray in config.json) shows its tray icon
+    // ONLY while it is CLOSED -- parked in the tray vault -- never while its
+    // window is open or still opening. The intent is known for exactly these
+    // apps (the map is opt-in), so the old objection does not apply: while
+    // the window is on screen the icon is noise on top of the window the user
+    // is already looking at, and when it is parked the icon is the way back
+    // in. Covers the shell-owned registry icons through the same door: their
+    // liveRegistry model already implements this same rule.
     function isDeadItem(item) {
         if (!item)
             return true;
@@ -705,6 +787,23 @@ Singleton {
             if (root.matchesAny(cands, root.registryKeys(e)))
                 return !root.isRunning(e.cls);
         }
+        // Close-to-tray suppression. Resolved through classForTrayItem, which
+        // matches PARKED windows too (hyprctl keeps vaulted windows in its
+        // client list), so the parked state resolves and the icon shows.
+        const cls = root.classForTrayItem(item);
+        if (cls === "" || !root.closeToTrayEnabled(cls))
+            return false;
+        const wins = root.windowsOf(cls);
+        if (wins.length > 0 && !root.isHidden(cls))
+            return true; // window on a real workspace: the app is OPEN
+        // A launch granted from the shell's launcher with no window mapped
+        // yet is still OPENING (Thunderbird maps 5-8s in): no icon until the
+        // window arrives. The 20s grant window matches enforceTray's.
+        if (wins.length === 0 && root.trayIntent[cls] === true
+            && Date.now() - (root.grantedAt[cls] || 0) < 20000)
+            return true;
+        // Parked (every window in special:tray), or windowless with no launch
+        // in flight: CLOSED. This is the one state the icon exists for.
         return false;
     }
 
@@ -798,6 +897,22 @@ Singleton {
                 lines.push(`${e.cls}: running=${root.isRunning(e.cls)} hidden=${root.isHidden(e.cls)} busy=${root.busyFor(e.cls)} wins=${wins.length} ws=[${wins.map(w => w.workspace?.name).join(",")}] intent=${root.trayIntent[e.cls] === true} had=${root.hadWindows[e.cls] === true} icon=${root.iconFor(e)}`);
             }
             lines.push(`capable=${JSON.stringify(root.capableApps().map(a => a.cls))}`);
+            // Per-SNI-item decisions, so the close-to-tray suppression is
+            // verifiable from a script: what the card keeps and what it
+            // drops, with the inputs that decided it.
+            const sni = (TrayService.pinnedItems ?? [])
+                .concat(TrayService.unpinnedItems ?? []);
+            lines.push(`sni=${sni.length}`);
+            for (const item of sni) {
+                const cls = root.classForTrayItem(item);
+                const wins = cls ? root.windowsOf(cls) : [];
+                lines.push(`  "${item.title ?? item.id}" id=${item.id} -> cls=${cls || "-"}`
+                    + ` c2t=${root.closeToTrayEnabled(cls)}`
+                    + ` wins=${wins.length}`
+                    + ` allParked=${cls ? root.isHidden(cls) : "-"}`
+                    + ` intent=${cls ? root.trayIntent[cls] === true : "-"}`
+                    + ` dead=${root.isDeadItem(item)}`);
+            }
             return lines.join("\n");
         }
 
@@ -822,7 +937,53 @@ Singleton {
         // app raising itself out of the tray. Matched against the registry's
         // own launch string, so only a real match counts.
         function allow(cmd: string): string {
-            const hit = root.registry.find(e => e.launch && String(cmd).indexOf(e.launch) !== -1);
+            // The launcher quotes each argv word before joining it into the
+            // shell line it hands open.sh (GlobalStates.entryCommand ->
+            // shellQuote), so a desktop entry whose Exec is `thunderbird %u`
+            // arrives here as LITERAL `'thunderbird'` -- quotes and all. The
+            // strip below turns that back into the bare word; measured: the
+            // unstripped form matched NOTHING, which is how a cold menu
+            // launch of Thunderbird never got its permission and the watcher
+            // parked the window the moment it appeared. The basename pass
+            // additionally lets `thunderbird` match `/usr/bin/thunderbird`.
+            const raw = String(cmd).trim();
+            const clean = raw
+                .replace(/^'+\s*/, "")
+                .replace(/\s*'+$/, "")
+                .replace(/\\'/g, "'")
+                .trim();
+            // Words = split on whitespace and QUOTES only (not `/`): a path
+            // token stays whole, so its basename is its part after the last
+            // slash. `cd '/home/user' && 'thunderbird' '-compose'` then
+            // yields cd, /home/user, &&, thunderbird, -compose -- and the
+            // bare-word test below fires on `thunderbird`.
+            const words = (s) => String(s).split(/[\s'"]+/).filter(Boolean);
+            const baseOf = (w) => { const parts = w.split("/"); return parts[parts.length - 1]; };
+            const hit = root.registry.find(e => {
+                if (!e.launch)
+                    return false;
+                const ln = String(e.launch);
+                if (clean.indexOf(ln) !== -1 || ln.indexOf(clean) !== -1)
+                    return true;
+                // WHOLE-WORD basename match, equality only -- never substring:
+                // equality is what kept "bird" and "mail" from answering to
+                // "thunderbird", and keeps one app whose path merely contains
+                // another app's name from matching it. The check runs over
+                // EVERY word of the command (head, and any quoted argument),
+                // against every word of the launch path.
+                const cw = words(clean);
+                const lw = words(ln);
+                for (const c of cw) {
+                    const cb = baseOf(c);
+                    if (cb.length <= 2)
+                        continue;
+                    for (const l of lw) {
+                        if (baseOf(l) === cb)
+                            return true;
+                    }
+                }
+                return false;
+            });
             if (!hit)
                 return `allow: no tray app matches`;
             root.setIntent(hit.cls, true, "allow (launcher)");

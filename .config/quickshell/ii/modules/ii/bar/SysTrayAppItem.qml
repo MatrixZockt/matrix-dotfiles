@@ -31,7 +31,11 @@ MouseArea {
     property bool showHoverPlate: false
 
     signal menuOpened(qsWindow: var)
-    signal menuClosed()
+    signal menuClosed(qsWindow: var)
+    // A LEFT press on this icon; see the note in SysTrayItem, which this
+    // mirrors so the two tray icons stay behaviourally identical. The tray card
+    // uses it to dismiss an open menu without dismissing itself.
+    signal itemPressed()
 
     // Recomputed from the window list, never stored: this icon has to be
     // right after the close gesture parks the window, and after the shell
@@ -61,6 +65,7 @@ MouseArea {
 
     onPressed: (event) => {
         if (event.button === Qt.LeftButton) {
+            root.itemPressed();
             // Not item.activate(): there is no app behind this icon, the
             // shell is. The shell decides: show it, park it, or start it.
             TrayApps.toggle(root.entry.cls);
@@ -107,7 +112,9 @@ MouseArea {
             }
             onMenuOpened: (window) => root.menuOpened(window);
             onMenuClosed: {
-                root.menuClosed();
+                // The window, so the tray can drop a hold that belongs to
+                // THIS menu and not to a menu that replaced it.
+                root.menuClosed(menu.item);
                 menu.active = false;
             }
         }

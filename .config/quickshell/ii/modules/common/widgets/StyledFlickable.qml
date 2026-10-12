@@ -108,66 +108,81 @@ Flickable {
         onTriggered: root.flingTick()
     }
 
+    // The one door into this surface's scrolling.
+    //
+    // scrollfling.js spells the rule out ("ONE DOOR"): a surface must never
+    // write contentY from a wheel delta itself, it hands the event to the
+    // scroller underneath, which owns the gain, the coast and the bounds.
+    // `handleWheel` is that handoff for a Flickable -- StyledListView has had
+    // the same entry point for longer. It matters whenever the wheel does NOT
+    // arrive at the MouseArea below on its own: the now-bar card's swipe
+    // overlay covers every view in the card and is the only item that sees a
+    // wheel over it, so without this a caller holding the event could route it
+    // nowhere and the surface under the pointer would sit still.
+    function handleWheel(wheelEvent) {
+        const maxY = root.maxScrollY();
+        const now = Date.now();
+        // ── Touchpad: pixel deltas, 1:1 while the fingers are down ──
+        // The delta's sign already carries the user's natural-scroll
+        // preference (Qt/libinput encode it), so it is applied directly.
+        const pd = wheelEvent.pixelDelta;
+        if (pd && (pd.x !== 0 || pd.y !== 0)) {
+            wheelEvent.accepted = true;
+            // Direct write: the Behavior must not turn 1:1 tracking into
+            // an animation, nor the coast into an eased one.
+            scrollAnim.stop();
+            root.wheelAnimEnabled = false;
+            // The gain scales the DELTA, not the resulting position, so
+            // tracking stays proportional to the finger -- just at the
+            // speed a browser actually scrolls at.
+            const dy = root.fling.feed(-pd.y * root.touchpadGain, now);
+            const next = Math.max(0, Math.min(root.contentY + dy, maxY));
+            root.contentY = next;
+            root.scrollTargetY = next;
+            root.wheelAnimEnabled = true;
+            // Arm the coast on every event; flingTick decides when it
+            // actually starts. Asking `shouldFling(now)` here could never
+            // be true -- `feed()` has just set `lastEventMs = now`, so the
+            // 70ms quiet test compares now with itself -- which left the
+            // timer never started and nothing running to notice the
+            // fingers lifting. See StyledListView.handleWheel.
+            root.coasting = true;
+            flingTimer.restart();
+            return;
+        }
+        // A frame with NO delta in either field is what libinput emits as
+        // the fingers leave the pad, not a mouse notch. Falling through to
+        // the mouse branch below cancelled the coast on the very frame
+        // that begins the fling, so the surface stopped dead the instant
+        // the hand lifted. Leave the coast armed instead; flingTick owns
+        // the 70ms quiet test. See StyledListView.handleWheel.
+        if (!wheelEvent.angleDelta || (wheelEvent.angleDelta.x === 0 && wheelEvent.angleDelta.y === 0)) {
+            wheelEvent.accepted = true;
+            return;
+        }
+        // ── Mouse wheel: instant notches ────────────────────────────
+        const delta = wheelEvent.angleDelta.y / root.mouseScrollDeltaThreshold;
+        // The angleDelta.y of a touchpad is usually small and continuous,
+        // while that of a mouse wheel is typically in multiples of ±120.
+        const scrollFactor = Math.abs(wheelEvent.angleDelta.y) >= root.mouseScrollDeltaThreshold ? root.mouseScrollFactor : root.touchpadScrollFactor;
+        const base = scrollAnim.running ? root.scrollTargetY : root.contentY;
+        root.scrollTargetY = Math.max(0, Math.min(base - delta * scrollFactor, maxY));
+        root.contentY = root.scrollTargetY;
+        // A real wheel notch means the hand is on a mouse: cancel any
+        // coast rather than fighting it.
+        root.coasting = false;
+        flingTimer.stop();
+        root.fling.reset();
+        wheelEvent.accepted = true;
+    }
+
     MouseArea {
         id: scrollMouse
         visible: true
         anchors.fill: parent
         acceptedButtons: Qt.NoButton
         onWheel: function(wheelEvent) {
-            const maxY = root.maxScrollY();
-            const now = Date.now();
-            // ── Touchpad: pixel deltas, 1:1 while the fingers are down ──
-            // The delta's sign already carries the user's natural-scroll
-            // preference (Qt/libinput encode it), so it is applied directly.
-            const pd = wheelEvent.pixelDelta;
-            if (pd && (pd.x !== 0 || pd.y !== 0)) {
-                wheelEvent.accepted = true;
-                // Direct write: the Behavior must not turn 1:1 tracking into
-                // an animation, nor the coast into an eased one.
-                scrollAnim.stop();
-                root.wheelAnimEnabled = false;
-                // The gain scales the DELTA, not the resulting position, so
-                // tracking stays proportional to the finger -- just at the
-                // speed a browser actually scrolls at.
-                const dy = root.fling.feed(-pd.y * root.touchpadGain, now);
-                const next = Math.max(0, Math.min(root.contentY + dy, maxY));
-                root.contentY = next;
-                root.scrollTargetY = next;
-                root.wheelAnimEnabled = true;
-                // Arm the coast on every event; flingTick decides when it
-                // actually starts. Asking `shouldFling(now)` here could never
-                // be true -- `feed()` has just set `lastEventMs = now`, so the
-                // 70ms quiet test compares now with itself -- which left the
-                // timer never started and nothing running to notice the
-                // fingers lifting. See StyledListView.handleWheel.
-                root.coasting = true;
-                flingTimer.restart();
-                return;
-            }
-            // A frame with NO delta in either field is what libinput emits as
-            // the fingers leave the pad, not a mouse notch. Falling through to
-            // the mouse branch below cancelled the coast on the very frame
-            // that begins the fling, so the surface stopped dead the instant
-            // the hand lifted. Leave the coast armed instead; flingTick owns
-            // the 70ms quiet test. See StyledListView.handleWheel.
-            if (!wheelEvent.angleDelta || (wheelEvent.angleDelta.x === 0 && wheelEvent.angleDelta.y === 0)) {
-                wheelEvent.accepted = true;
-                return;
-            }
-            // ── Mouse wheel: instant notches ────────────────────────────
-            const delta = wheelEvent.angleDelta.y / root.mouseScrollDeltaThreshold;
-            // The angleDelta.y of a touchpad is usually small and continuous,
-            // while that of a mouse wheel is typically in multiples of ±120.
-            const scrollFactor = Math.abs(wheelEvent.angleDelta.y) >= root.mouseScrollDeltaThreshold ? root.mouseScrollFactor : root.touchpadScrollFactor;
-            const base = scrollAnim.running ? root.scrollTargetY : root.contentY;
-            root.scrollTargetY = Math.max(0, Math.min(base - delta * scrollFactor, maxY));
-            root.contentY = root.scrollTargetY;
-            // A real wheel notch means the hand is on a mouse: cancel any
-            // coast rather than fighting it.
-            root.coasting = false;
-            flingTimer.stop();
-            root.fling.reset();
-            wheelEvent.accepted = true;
+            root.handleWheel(wheelEvent);
         }
     }
 

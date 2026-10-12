@@ -52,10 +52,32 @@ LazyLoader {
     // was taken away again in the same quarter second, which reads as the
     // tray having ignored the right-click entirely.
     //
-    // So a caller whose content can raise a menu sets this, and the card
-    // stays up for as long as the menu is. The pointer still closes it
-    // normally the moment the menu is gone.
+    // So a caller whose content can raise a menu sets this, and the CONTENT
+    // stays alive for as long as the menu is -- which is all this promises.
+    // It does NOT keep the card itself on screen: a caller that also wants
+    // the card gone while the menu lives sets `dismissed` below. The tray
+    // sets both, and the pair is the point -- the menu keeps the window it
+    // lives in alive, the card gets out of the way of the menu.
     property bool holdOpen: false
+
+    // ── Dismissed, though its content is still needed ───────────────────
+    //
+    // Out of the caller's way, not destroyed. The tray raises this when the
+    // pointer leaves the card for one of its menus: the icon has been
+    // reached, the menu is where the pointer is going, and a card left behind
+    // it is a box the user has finished with sitting over the thing they are
+    // reading.
+    //
+    // It cannot simply be CLOSED instead (`active: false`), and that is the
+    // whole reason this property exists. A menu raised from this content is
+    // not an independent window: it is anchored to the item inside the card
+    // and Quickshell popups are real compositor popups of the surface they
+    // hang from -- so an unmapped card takes its menus down with it, in the
+    // same gesture that opened them. What is left is the card's window
+    // staying mapped while it paints nothing and accepts nothing, which is
+    // what this drives: the painting through `cardPainted`, the animation
+    // through `wantsCard`, and the input region through the mask below.
+    property bool dismissed: false
 
     // ── The open/close animation, opt-in ────────────────────────────────
     //
@@ -71,6 +93,18 @@ LazyLoader {
     readonly property bool shouldShow: hoverTarget
         && (holdOpen || (clickOnly ? requestOpen : hoverTarget.containsMouse))
 
+    // What the CARD wants, as opposed to what the pointer (or the caller's
+    // hold) needs. Only the dismissal separates the two: a dismissed card
+    // wants nothing, while `shouldShow` and `holdOpen` go on describing a
+    // content that has to stay alive and a pointer that may still be inside
+    // it.
+    readonly property bool wantsCard: shouldShow && !dismissed
+
+    // Whether the card's face is on screen. `shown` carries the animation;
+    // `dismissed` takes the card off outright, and for a caller that never
+    // opted into the curve there is no curve to play on the way out.
+    readonly property bool cardPainted: !dismissed && (!animateIn || shown)
+
     // What the animation actually plays against, and what is allowed to
     // outlive `shouldShow` for a moment.
     //
@@ -83,12 +117,16 @@ LazyLoader {
     // there is still an object on screen to play it on.
     property bool shown: false
 
-    active: animateIn ? (shown || closeLinger.running) : shouldShow
+    // `active` is the CONTENT's lifetime, and that is `holdOpen`'s half of
+    // the contract: while a caller is holding the content (the tray, for the
+    // menu raised out of it) the card may be dismissed, unpainted and closed
+    // to input, and the LazyLoader must still not destroy it.
+    active: holdOpen || (animateIn ? (shown || closeLinger.running) : shouldShow)
 
-    onShouldShowChanged: {
+    onWantsCardChanged: {
         if (!animateIn)
             return;
-        if (shouldShow) {
+        if (wantsCard) {
             shown = true;
             closeLinger.stop();
         } else if (shown) {
@@ -97,7 +135,7 @@ LazyLoader {
         }
     }
     Component.onCompleted: {
-        if (animateIn && shouldShow)
+        if (animateIn && wantsCard)
             shown = true;
     }
 
@@ -166,8 +204,17 @@ LazyLoader {
         Component.onCompleted: popupWindow.updateAnchor()
 
         // Input lands on the card only; the gap and shadow stay click-through.
+        //
+        // A dismissed card takes no input at all, and that half is not
+        // optional: the window stays mapped (see `dismissed`) for the sake of
+        // the menu hanging from it, so without it the card would go on
+        // swallowing every click inside the box it used to occupy -- over
+        // whatever the user is actually working in. The empty case is the
+        // shell's own "no region" idiom (`Region { item: null }`, as in
+        // ScreenFlash and Idle), switched exactly the way Overview switches
+        // its own mask on and off.
         mask: Region {
-            item: popupBackground
+            item: root.dismissed ? null : popupBackground
         }
 
         HoverHandler {
@@ -187,10 +234,18 @@ LazyLoader {
         // does with a card that small. The clock and battery cards keep the
         // long one, because those are read WHILE the pointer is on them and
         // the delay only matters on the way out.
+        // A hold does NOT suspend this any more, and that is the half of the
+        // contract `dismissed` depends on. The timer is the only thing that
+        // notices the pointer has gone, and while a menu is out the pointer
+        // is on the MENU -- so a hold that muted it left the caller with no
+        // way to hear "the user has left the card", which is precisely the
+        // moment the tray wants to put the card away and keep the menu. What
+        // the hold buys is that the card is not DESTROYED by it; whether the
+        // card closes, or is dismissed behind a menu that outlives it, is the
+        // caller's decision in `onAutoClose`.
         Timer {
             interval: root.closeDelay
             running: root.clickOnly && root.requestOpen
-                && !root.holdOpen
                 && !popupHoverHandler.hovered
                 && !(root.hoverTarget && root.hoverTarget.containsMouse)
             onTriggered: root.autoClose()
@@ -241,8 +296,8 @@ LazyLoader {
             // 0.96 is a small enough travel to read as material rather than
             // as a zoom. Anything past ~0.9 starts looking like a transition
             // between two different cards.
-            opacity: !root.animateIn ? 1 : (root.shown ? 1 : 0)
-            scale: !root.animateIn ? 1 : (root.shown ? 1 : 0.96)
+            opacity: root.cardPainted ? 1 : 0
+            scale: root.cardPainted ? 1 : 0.96
             // Grow AWAY from the bar, i.e. from the edge the popup is
             // anchored to, so the anchored edge stays pinned under the
             // pointer for the whole animation.

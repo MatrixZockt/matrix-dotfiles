@@ -33,6 +33,58 @@ ListView {
     property var fling: Fling.create({ velocity: 0, lastEventMs: 0, distance: 0, samples: [] })
     property bool coasting: false
 
+    // ── Keeping your place when the model is replaced ─────────────────────
+    //
+    // A list whose model is a NEW JS ARRAY on every update -- the process
+    // table, which is re-sampled every two seconds -- cannot be scrolled
+    // while it is live. Assigning a new array is not "the data changed", it
+    // is "the old model went away and a different one arrived": the view
+    // throws its delegates out, its contentHeight drops to nothing for a
+    // frame, and contentY is clamped to the new (zero) height. The list is
+    // back at the top, mid-gesture, every couple of seconds -- which is
+    // exactly what "I cannot scroll it, it keeps jumping back up" is.
+    //
+    // So the position is bookmarked as the user scrolls and put back after a
+    // model change. Opt-in, because a list whose contents are genuinely
+    // replaced (a search result, a different folder) SHOULD start at the top;
+    // this is for the ones that are the same list seen again.
+    property bool preservePositionOnModelChange: false
+    // Where to put the view back. Also the value to zero when a change of
+    // contents -- a new sort, a new filter -- means "go to the top" after all.
+    property real positionBookmark: 0
+    property bool restoringPosition: false
+
+    onModelChanged: {
+        if (root.preservePositionOnModelChange)
+            Qt.callLater(root.restorePosition)
+    }
+
+    // Re-applies `positionBookmark` after a model change. Deferred to the next
+    // event-loop turn by the caller: the new model has to be handed to the
+    // view and laid out before contentHeight means anything.
+    function restorePosition() {
+        if (root.restoringPosition)
+            return;
+        const bookmark = root.positionBookmark;
+        const wasWheelAnim = root.wheelAnimEnabled;
+        root.restoringPosition = true;
+        // Raw writes: the ease in `Behavior on contentY` would turn a restored
+        // position into a visible scroll from the top.
+        root.wheelAnimEnabled = false;
+        // A fresh model has not been laid out yet, and until it is,
+        // contentHeight is 0 and the clamp below would answer 0 for every
+        // bookmark -- the jump this whole mechanism exists to prevent. Asking
+        // for the first row forces that layout; the position is written after.
+        if (root.contentHeight <= 0 || bookmark <= 0)
+            root.positionViewAtIndex(0, ListView.Beginning);
+        const maxY = Math.max(0, root.contentHeight - root.height);
+        const target = Math.max(0, Math.min(bookmark, maxY));
+        root.contentY = target;
+        root.scrollTargetY = target;
+        root.wheelAnimEnabled = wasWheelAnim;
+        root.restoringPosition = false;
+    }
+
     property real touchpadScrollFactor: Config?.options.interactions.scrolling.touchpadScrollFactor ?? 100
     property real mouseScrollFactor: Config?.options.interactions.scrolling.mouseScrollFactor ?? 50
     property real mouseScrollDeltaThreshold: Config?.options.interactions.scrolling.mouseScrollDeltaThreshold ?? 120
@@ -273,6 +325,26 @@ ListView {
         if (!scrollAnim.running) {
             root.scrollTargetY = root.contentY;
         }
+        // The bookmark follows the user, not the restore -- otherwise putting
+        // the position back would immediately bookmark the position it was
+        // put back FROM and the next model change would use that.
+        if (root.preservePositionOnModelChange && !root.restoringPosition && root.count > 0)
+            root.positionBookmark = root.contentY;
+    }
+
+    // "This is a different list now" -- a new sort, a new filter: the top is
+    // where the answer is, and the bookmark has to agree with the view or the
+    // next sample would restore the old place again.
+    function resetPosition() {
+        root.positionBookmark = 0;
+        if (root.contentY === 0)
+            return;
+        const wasWheelAnim = root.wheelAnimEnabled;
+        root.wheelAnimEnabled = false;
+        root.positionViewAtBeginning();
+        root.contentY = 0;
+        root.scrollTargetY = 0;
+        root.wheelAnimEnabled = wasWheelAnim;
     }
 
     onContentHeightChanged: {

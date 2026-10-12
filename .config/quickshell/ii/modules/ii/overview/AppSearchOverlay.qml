@@ -6,6 +6,9 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Widgets
 import Quickshell.Wayland
+// `Hyprland.dispatch`, for the wheel's desktop switch -- the same dispatcher
+// form every other switch in this shell uses.
+import Quickshell.Hyprland
 
 import qs
 import qs.services
@@ -48,6 +51,42 @@ Scope {
     id: root
 
     readonly property bool open: GlobalStates.appSearchOverlayOpen
+
+    // ── Fade in / fade out ────────────────────────────────────────────────
+    //
+    // One number, one item: `fade` drives the CARD's opacity and nothing else.
+    // No scale, no blur, no shadow, no layer -- an opacity on an item that is
+    // already in the scene graph is a single property write per frame, so this
+    // costs one number's worth of work and cannot re-layout the menu (opacity
+    // does not touch geometry, unlike the width/height/x/y animation the card
+    // used to be tempted by).
+    //
+    // The window is kept mapped only while the fade is actually running
+    // (`visible: root.open || root.fade > 0.01` below), so a closed menu is an
+    // unmapped surface: it draws nothing, blur or no blur, and the shell spent
+    // nothing to keep it. That is also what makes the fade-out possible at all
+    // -- `visible: root.open` alone would unmap the surface on the same tick
+    // the state flipped and the menu would snap out of existence.
+    //
+    // The durations ride the shell's own motion budget (motionScale), so the
+    // performance power profile shortens these along with everything else
+    // rather than leaving one surface still animating at full length.
+    property real fade: 0
+
+    // Whether the card has been shown at least once this session. Read by the
+    // window's `visible` below, and the reason the second and every later SUPER
+    // tap is instant while the first one is not: see the note there. Not
+    // persisted -- a fresh shell is free to start with an unmapped surface.
+    property bool hasOpened: false
+
+    NumberAnimation {
+        id: fadeAnim
+        target: root
+        property: "fade"
+        // Re-opening or re-closing mid-fade carries on from where it is
+        // instead of restarting from the far end.
+        alwaysRunToEnd: false
+    }
 
     // ── Geometry ──────────────────────────────────────────────────────────
     // 540 instead of the old 379. 379 was the width of the bar's centre
@@ -171,6 +210,38 @@ Scope {
     // the list has to stop somewhere the card can actually hold.
     readonly property var advancedMatches: root.rawMatches.filter(isAdvancedEntry).slice(0, 15)
 
+    // ── Emoji mode ────────────────────────────────────────────────────────
+    //
+    // The emoji prefix ("`:`" unless the config says otherwise) turns this
+    // card's results into the emoji list. It is the panel SUPER+. opens that
+    // has understood that prefix all along; this card -- the one a SUPER TAP
+    // gives you -- only ever searched installed apps, so `:` ran through the
+    // app pipeline, matched nothing, and answered "No matches". One prefix,
+    // one meaning: the emoji service below is the same Emojis.fuzzyQuery that
+    // panel uses, so the two doors show the same list in the same order and
+    // cannot drift apart.
+    readonly property string emojiPrefix: Config.options.search.prefix.emojis
+    readonly property bool emojiMode: root.query.trim().startsWith(root.emojiPrefix)
+
+    // The whole set when nothing follows the prefix -- `Emojis.fuzzyQuery("")`
+    // returns every entry rather than nothing (checked against the live
+    // service: `:` alone answers with all ~1900 of them), which is what makes
+    // a bare `:` mean "show me the emojis" instead of an empty box.
+    readonly property var emojiMatches: {
+        if (!root.emojiMode)
+            return [];
+        const search = StringUtils.cleanPrefix(root.query.trim(), root.emojiPrefix);
+        return Emojis.fuzzyQuery(search).map(line => {
+            const glyph = line.match(/^\s*(\S+)/)?.[1] ?? "";
+            return { glyph: glyph, name: line.replace(/^\s*\S+\s+/, "") };
+        });
+    }
+
+    // How tall the emoji list is allowed to get. The card is as tall as its
+    // contents, so this is the one number that keeps a 1900-row list inside the
+    // screen; scroll bars and the rest follow from it.
+    readonly property real emojiListHeight: 470
+
     // Right-aligned type label for a match row. No longer rendered -- the
     // match rows are name-only now (see the row's contentItem) -- but kept
     // because it is the shell's single place that knows an entry's KIND, and
@@ -212,6 +283,10 @@ Scope {
     // ↵ have exactly one thing to act on: the Frequent grid's first row only
     // (the All apps grid is a click surface, like the preview's static tiles).
     readonly property int selectableCount: {
+        // Emoji mode replaces the row set outright: while a prefix is being
+        // typed the only selectable rows are the emojis, whatever tab is on.
+        if (root.emojiMode)
+            return root.emojiMatches.length;
         // Two different lists under one tab: groups when idle, entries when
         // typing. The row set the ↑↓ keys walk has to be the row set on screen.
         if (activeTab === 1)
@@ -221,9 +296,41 @@ Scope {
         return Math.min(3, frequentApps.length); // Frequent grid's top row
     }
 
-    // Reset the field, tab and selection each time the overlay opens.
+    // Open: reset the field, tab and selection. Close: make the close STICK.
+    //
+    // The second half is not bookkeeping, it is the difference between a menu
+    // that closes and one that appears not to. SUPER *release* toggles this menu
+    // (Overview.qml, `searchToggleRelease`), and that handler only stands down
+    // while the interrupt flag is clear. So every way OUT of the menu has to
+    // clear it: with the flag still set, a release in flight toggles the menu
+    // straight back open -- Escape (or a click outside the card) closes it and
+    // it reappears the moment SUPER comes up, which is exactly what "I cannot
+    // close it" looks like from the keyboard. The wheel path clears the flag by
+    // hand because it has to happen before its settle timer; every other exit
+    // is covered here, on the close itself, whichever path caused it.
     onOpenChanged: {
+        // The fade is driven from here -- the one place that knows the state
+        // changed, whichever path changed it (Escape, the click catcher, a
+        // launch, the wheel's desktop switch, or SUPER released again) -- so no
+        // future exit can forget to fade.
+        //
+        // 160 in / 120 out at the shell's standard curve. A fade is a change of
+        // ALPHA and nothing else: long enough to be seen as a transition,
+        // short enough that the keyboard does not wait on it, and the field has
+        // its focus the same tick either way (see below), so typing is never
+        // blocked by the animation.
+        fadeAnim.stop();
+        fadeAnim.duration = Math.round((root.open ? 160 : 120)
+            * Appearance.animationCurves.motionScale);
+        fadeAnim.easing.type = Easing.BezierSpline;
+        fadeAnim.easing.bezierCurve = root.open
+            ? Appearance.animationCurves.standard
+            : Appearance.animationCurves.emphasizedAccel;
+        fadeAnim.to = root.open ? 1 : 0;
+        fadeAnim.start();
+
         if (root.open) {
+            root.hasOpened = true;
             root.openedAt = Date.now();
             root.focusLandedAt = 0;
             root.query = "";
@@ -238,7 +345,12 @@ Scope {
             // below only has to cover the compositor's own focus handover.
             fieldInput.forceActiveFocus();
             fieldForceTimer.restart();
+            return;
         }
+        GlobalStates.superReleaseMightTrigger = false;
+        // The menu belongs to this surface and does not outlive it: closing the
+        // launcher with a menu open leaves nothing of the menu behind.
+        appMenu.open = false;
     }
 
     // The field takes focus, and KEEPS RE-ASKING until it actually has it.
@@ -293,6 +405,13 @@ Scope {
     }
 
     function activateSelection() {
+        // An emoji row COPIES, it does not launch: there is no window behind an
+        // emoji, and Enter on a highlighted row means the same thing as
+        // clicking it.
+        if (root.emojiMode) {
+            root.copyEmoji(root.emojiMatches[root.selectedIndex]);
+            return;
+        }
         if (root.activeTab === 1) {
             // Typed: the rows are individual entries, so Enter launches the one
             // under the cursor. Idle: the rows are groups, which launch their
@@ -355,11 +474,16 @@ Scope {
                 winActive: panel.active,
                 lastClose: root.lastClose,
                 lastCloseAgo: root.lastCloseAt > 0 ? Date.now() - root.lastCloseAt : null,
+                // The card's opacity, 0..1: the fade is a real animated value,
+                // so it is readable here rather than guessed at from pixels.
+                fade: Math.round(root.fade * 100) / 100,
                 focusDelayMs: (root.open && root.openedAt > 0)
                     ? (root.focusLandedAt > 0 ? root.focusLandedAt - root.openedAt : -1)
                     : null,
                 query: root.query,
                 typing: root.typing,
+                emojiMode: root.emojiMode,
+                emojiCount: root.emojiMatches.length,
                 matchCount: root.matches.length,
                 advancedMatchCount: root.advancedMatches.length,
                 selected: root.selectedIndex,
@@ -377,6 +501,8 @@ Scope {
                 open: root.open,
                 query: root.query,
                 typing: root.typing,
+                emojiMode: root.emojiMode,
+                emojiCount: root.emojiMatches.length,
                 matchCount: root.matches.length,
                 advancedMatchCount: root.advancedMatches.length,
                 selected: root.selectedIndex,
@@ -406,6 +532,71 @@ Scope {
             root.activateSelection();
             return `launched=${name}`;
         }
+
+        // Open an app's right-click menu without a pointer.
+        //
+        // This overlay is a layer surface, so a synthetic press can hover it but
+        // never lands in the QML -- the same limitation the To Do widget's tick
+        // has. This calls the very function the right press calls, mapped from
+        // a point inside the card, so the menu can be looked at (and its rows
+        // reported) rather than described.
+        function menu(id: string): string {
+            // Both spellings, and the heuristic as a last resort: the launcher
+            // hands over `kitty` in one place and `kitty.desktop` in another,
+            // and a terminal has no way of knowing which one this is.
+            const bare = String(id).replace(/\.desktop$/, "");
+            const found = DesktopEntries.byId(id)
+                ?? DesktopEntries.byId(bare)
+                ?? DesktopEntries.heuristicLookup(bare);
+            if (!found)
+                return "not found: " + id;
+            if (!GlobalStates.appSearchOverlayOpen)
+                GlobalStates.appSearchOverlayOpen = true;
+            root.openAppMenu(found, card, { x: card.width / 2, y: card.height * 0.4 });
+            return appMenu.open
+                ? `menu open for ${found.name} rows=${appMenu.rows.length}`
+                : "no menu (a shell window has none)";
+        }
+
+        // What the menu is showing: the rows themselves -- the same list its
+        // Repeater is handed -- what a destructive row is confirming, and the
+        // probe behind all of it.
+        function menuState(): string {
+            return JSON.stringify({
+                open: appMenu.open,
+                entry: String((appMenu.entry && appMenu.entry.name) ?? ""),
+                confirming: appMenu.confirming ? appMenu.confirming.actionId : null,
+                rows: appMenu.rows.map(r => r.header !== undefined ? "# " + r.header : r.label),
+                kind: AppAdmin.kind,
+                package: AppAdmin.packageName,
+                dataPaths: AppAdmin.dataPaths,
+                actions: AppAdmin.actions.map(a => a.id),
+                busy: AppAdmin.busy,
+                resultOk: AppAdmin.resultOk,
+                result: AppAdmin.resultText
+            });
+        }
+
+        // Put the menu away and leave the launcher standing -- what a press
+        // beside the menu does. Separate from `close` above, which takes the
+        // whole launcher down: the two are different dismissals and the
+        // difference is the thing worth being able to check.
+        function menuClose(): string {
+            appMenu.dismiss();
+            return "menu open=" + appMenu.open;
+        }
+
+        // Choose a row the way a click does, found by label, so the confirm
+        // step and then the run step can both be reached without a pointer.
+        function menuChoose(label: string): string {
+            const wanted = String(label ?? "").toLowerCase();
+            const row = appMenu.rows.find(r => r.header === undefined
+                && String(r.label ?? "").toLowerCase() === wanted);
+            if (!row)
+                return "no row: " + label;
+            appMenu.choose(row);
+            return "chose " + row.actionId;
+        }
     }
 
     // A desktop switch dismisses the overlay. `activeWorkspace` is reassigned
@@ -423,6 +614,121 @@ Scope {
             }
             root.lastWorkspaceId = id;
         }
+    }
+
+    // ── The wheel over the menu is a desktop switch ─────────────────────
+    //
+    // Scroll to change desktop while this menu is up and the desktop did not
+    // move -- but the menu closed anyway, which is the two halves of one
+    // gesture disagreeing. Both causes are here, and both are fixed here:
+    //
+    //   the switch   the overlay takes input over the whole screen, so a
+    //                scroll lands on it and stops. A mouse wheel still got
+    //                through -- the compositor's SUPER+scroll bind is a wheel
+    //                bind and fires under a layer surface -- but a touchpad's
+    //                finger scroll does not reach it, so with two fingers on
+    //                the pad the desktop stood still.
+    //   the close    SUPER then goes up having been interrupted by nothing,
+    //                and the release side of the SUPER tap is what toggles
+    //                this menu (Overview.qml, searchToggleRelease: only a KEY
+    //                pressed while SUPER is down marks the chord as "not a
+    //                tap"). One scroll, and the only thing it did was put the
+    //                menu away.
+    //
+    // So the overlay finishes the job itself: it takes the wheel, moves the
+    // desktop the way the SUPER+scroll bind would (up = +1, down = -1), and
+    // puts itself away -- and it marks the chord as used, so the release that
+    // follows cannot toggle the menu back.
+    //
+    // Two details make it behave rather than merely fire:
+    //
+    //   * it DEFERS to the compositor. With a mouse wheel the bind does fire,
+    //     and the desktop moves on its own -- measured ~20ms after the event.
+    //     So no switch is issued blindly: the wheel only arms a short settle
+    //     timer, and at the end of it the active desktop is compared with the
+    //     one the gesture started on. Moved -> the compositor did it, and the
+    //     watcher above has already closed the menu; dispatching here as well
+    //     would skip a desktop. Not moved -> the touchpad case, and the shell
+    //     dispatches the switch itself.
+    //
+    //   * one gesture is one desktop. Settling waits for the wheel to stop, so
+    //     a whole two-finger scroll moves one desktop instead of one per
+    //     frame -- and since the switch takes the menu away with it, the rest
+    //     of the same gesture lands on the desktop, not on the menu.
+    property int wheelStartId: -1
+    property int wheelStep: 0
+
+    function wheelOverlay(step: int): void {
+        if (root.wheelStartId === -1)
+            root.wheelStartId = Number(HyprlandData.activeWorkspace?.id ?? 0);
+        root.wheelStep = step;
+        // The chord is not a plain SUPER tap any more (the same flag the key
+        // interrupt sets), or the release toggles the menu straight back open
+        // -- which is the half of this bug that was visible.
+        GlobalStates.superReleaseMightTrigger = false;
+        wheelSettle.restart();
+    }
+
+    Timer {
+        id: wheelSettle
+        // The compositor's own switch lands ~20ms after the wheel; this is
+        // that with room to spare, and still not felt as a delay.
+        interval: 120
+        onTriggered: {
+            const step = root.wheelStep;
+            const from = root.wheelStartId;
+            root.wheelStartId = -1;
+            root.wheelStep = 0;
+            if (step === 0 || !root.open)
+                return;                 // no gesture in flight, or already gone
+            const now = Number(HyprlandData.activeWorkspace?.id ?? 0);
+            if (now !== from)
+                return;                 // the compositor switched; nothing left to do
+            root.noteClose(`wheel ${step > 0 ? "+1" : "-1"}`);
+            GlobalStates.appSearchOverlayOpen = false;
+            Hyprland.dispatch(`hl.dsp.focus({ workspace = "${step > 0 ? "+1" : "-1"}" })`);
+        }
+    }
+
+    // ── The right-click menu ──────────────────────────────────────────────
+    //
+    // RippleButton calls `altAction` on a right press (its own MouseArea
+    // already accepts the right button), so every app surface in this card
+    // reaches the menu by the same route: the tile, the match row and the
+    // advanced row each hand over their model and themselves.
+    //
+    // The press is mapped into the menu LAYER's coordinates rather than the
+    // card's, because the menu is positioned where the pointer was and may sit
+    // partly outside the card -- the layer fills the whole surface, so a menu
+    // opened at the card's edge is placed correctly instead of being clamped
+    // into the card and drawn in the wrong place.
+    //
+    // A shell window (Settings, Task Manager) is not an installed app: there
+    // is no package behind it and nothing to uninstall, so it has no menu at
+    // all rather than a menu of options that cannot apply.
+    function openAppMenu(entry, item, mouse) {
+        if (!entry || !item || !AppAdmin.available(entry))
+            return;
+        const point = item.mapToItem(menuLayer, mouse.x, mouse.y);
+        appMenu.entry = entry;
+        appMenu.anchorX = point.x;
+        appMenu.anchorY = point.y;
+        appMenu.open = true;
+    }
+
+    // Put an emoji on the clipboard. `Quickshell.clipboardText` is the one
+    // clipboard write the shell makes (the panel's emoji rows and the clipboard
+    // history both use it), so a copied emoji lands there and nowhere else.
+    //
+    // The card then closes, exactly as it does after launching anything: the
+    // pick is the end of the interaction. The row that was clicked stays
+    // visible for the length of the fade, so it reads as "that one".
+    function copyEmoji(emoji) {
+        if (!emoji || !emoji.glyph)
+            return;
+        Quickshell.clipboardText = emoji.glyph;
+        root.noteClose("emoji");
+        GlobalStates.appSearchOverlayOpen = false;
     }
 
     function launchEntry(entry) {
@@ -443,17 +749,57 @@ Scope {
         GlobalStates.launchEntry(entry);
     }
 
+    // The default state is closed, so there is nothing to seed in the common
+    // case -- but a config reload that happens to land while the menu is open
+    // would otherwise map it at zero opacity and leave it there until the next
+    // state change. Same reason NowBarPanel seeds its own `t`.
+    Component.onCompleted: root.fade = root.open ? 1 : 0
+
     PanelWindow {
         id: panel
 
         readonly property var fallbackScreen: Quickshell.screens.length > 0 ? Quickshell.screens[0] : null
         screen: fallbackScreen
-        visible: root.open
+        // Mapped through the fade-out, and -- once the card has been seen once
+        // -- kept mapped, because MAPPING IS WHAT COSTS THE FIRST KEYSTROKE.
+        //
+        // The compositor can only give this surface the keyboard after it has
+        // been mapped, and mapping this one is not cheap: the surface is
+        // created, its whole card is built and laid out, and only then does the
+        // keyboard arrive. Measured on this machine with real input on the wire
+        // (a SUPER tap, then "fi" typed at a range of gaps after it): at 0, 15
+        // and 30ms after the tap both characters went to the window UNDERNEATH,
+        // at 50 and 80ms the first one still did, and only from 120ms did both
+        // land. So "I tap SUPER and start typing" lost the beginning of the
+        // query, every time, and the shell had no way to hear those keys --
+        // they were never addressed to it.
+        //
+        // A surface that is already mapped has nothing left to create, so the
+        // keyboard arrives on the compositor's next frame instead of after the
+        // card is built. `hasOpened` is what stops that being a standing cost
+        // for a launcher nobody uses: before the first open this window is
+        // unmapped exactly as it always was, and it only stays resident once
+        // the card has actually been on screen.
+        visible: root.hasOpened || root.open || root.fade > 0.01
         color: "transparent"
         exclusionMode: ExclusionMode.Ignore
         WlrLayershell.namespace: "quickshell:appSearchOverlay"
         WlrLayershell.layer: WlrLayer.Overlay
         WlrLayershell.keyboardFocus: root.open ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
+
+        // A RESIDENT SURFACE MUST NOT BE A TARGET.
+        //
+        // This one covers the whole screen whenever it is up, so a surface left
+        // mapped with no input region is precisely the bug the sleep notice was
+        // fixed for:
+        // with nothing on screen to explain it, every click in the session
+        // lands on it and goes nowhere. So the input region follows `open`
+        // exactly -- empty while the launcher is closed, whole while it is up.
+        // `Region { item: null }` is this shell's "no region" idiom (the same
+        // one ScreenFlash, StatusTell and SleepNotice use).
+        mask: root.open ? openRegion : closedRegion
+        Region { id: closedRegion; item: null }
+        Region { id: openRegion; item: clickCatcher }
 
         // Assert focus the moment the surface exists, so the first frame and the
         // first keystroke do not race. The timer above covers anything this one
@@ -470,13 +816,78 @@ Scope {
             right: true
         }
 
-        // No input mask: the whole surface takes input, so a press anywhere
-        // outside the card lands on this catcher and simply closes.
+        // Escape closes, from the WINDOW rather than from the field alone.
+        //
+        // The field's own Keys handler (down in the card) used to be the only
+        // thing that ever answered Escape, which is fine right up until the
+        // field is not the focused item -- a click on the card's own padding, a
+        // focus handover the compositor never completed, or any moment while
+        // the retry timer is between attempts. Then the key arrived at the
+        // surface and NOTHING consumed it: the menu stayed up and Escape looked
+        // dead. A Shortcut on the window is evaluated before item-level focus
+        // matters, so the key is answered whenever this surface owns the
+        // keyboard, whatever happens to be focused inside it.
+        Shortcut {
+            sequence: "Escape"
+            enabled: root.open
+            onActivated: {
+                // A menu on screen is what Escape means first: closing the
+                // launcher out from under an open menu would dismiss two
+                // things with one key, the second of which is the surface the
+                // user was working in.
+                if (appMenu.open) {
+                    appMenu.dismiss();
+                    return;
+                }
+                root.noteClose("escape");
+                GlobalStates.appSearchOverlayOpen = false;
+            }
+        }
+
+        // The whole surface takes input while the card is open, so a press
+        // anywhere outside the card lands on this catcher and simply closes.
+        // While the card is CLOSED the region above is empty, so this catcher
+        // is unreachable -- `enabled` says the same thing a second time so the
+        // intent survives anyone editing the mask binding.
         MouseArea {
+            id: clickCatcher
+            enabled: root.open
             anchors.fill: parent
             onClicked: mouse => {
+                // The first press beside an open menu puts the menu away and
+                // leaves the launcher standing; the launcher itself takes the
+                // next one. Without this, right-clicking an app and then
+                // clicking its menu's padding would close the whole overlay.
+                if (appMenu.open) {
+                    appMenu.dismiss();
+                    return;
+                }
                 root.noteClose(`click@${Math.round(mouse.x)},${Math.round(mouse.y)}/${panel.width}x${panel.height}`);
                 GlobalStates.appSearchOverlayOpen = false;
+            }
+            // The wheel on the catcher is the desktop switch -- see
+            // `wheelOverlay`. It sits here rather than on the card on purpose:
+            // Qt offers a wheel to the item under the pointer and then walks
+            // down the stack until something ACCEPTS it, so the card's own
+            // lists get first refusal and only a scroll they refuse reaches
+            // this handler. That fall-through is measured, not assumed -- a
+            // wheel aimed at the middle of the card arrives here, because the
+            // menu's grids do not scroll by wheel, and that scroll is exactly
+            // the one that used to do nothing at all.
+            //
+            // The arithmetic is the bar island's own (NowBar.wheelDy/
+            // wheelDx), including the natural-scroll un-inversion, so the
+            // overlay and the island can never disagree about which way a
+            // scroll goes. Positive is "next desktop", the direction the
+            // compositor's SUPER+scroll uses.
+            onWheel: event => {
+                const pd = event.pixelDelta;
+                const hasPixels = pd && (pd.x !== 0 || pd.y !== 0);
+                const dy = hasPixels ? (event.inverted ? -pd.y : pd.y) : event.angleDelta.y / 120 * 40;
+                const dx = hasPixels ? (event.inverted ? -pd.x : pd.x) : event.angleDelta.x / 120 * 40;
+                const d = dy !== 0 ? dy : dx;
+                if (d !== 0)
+                    root.wheelOverlay(d > 0 ? 1 : -1);
             }
         }
 
@@ -498,6 +909,10 @@ Scope {
             anchors.centerIn: parent
             width: innerWidth + extra * 2
             implicitHeight: column.implicitHeight
+            // The whole menu, in one property: see `root.fade`. Everything
+            // drawn here is a child of this card, so the card's opacity is the
+            // menu's opacity and there is nothing else to keep in step.
+            opacity: root.fade
             radius: Appearance.rounding.large
             // Frosted glass: translucent, so the compositor blur shows the
             // windows behind the card (xray off = never the wallpaper).
@@ -522,6 +937,13 @@ Scope {
             // Eat clicks that land on the card so they never reach the catcher.
             MouseArea {
                 anchors.fill: parent
+                // ...except that a click on the card is still a click away
+                // from an open app menu, so the menu goes and the launcher
+                // stays. The event is eaten either way.
+                onClicked: {
+                    if (appMenu.open)
+                        appMenu.dismiss();
+                }
             }
 
             ColumnLayout {
@@ -571,6 +993,11 @@ Scope {
                             onTextChanged: root.query = text
                             Keys.onPressed: event => {
                                 if (event.key === Qt.Key_Escape) {
+                                    if (appMenu.open) {
+                                        appMenu.dismiss();
+                                        event.accepted = true;
+                                        return;
+                                    }
                                     root.noteClose("escape");
                                     GlobalStates.appSearchOverlayOpen = false;
                                     event.accepted = true;
@@ -683,8 +1110,10 @@ Scope {
                     spacing: 0
 
                     // While typing: vertical match list (the preview's state 2)
+                    // -- unless an emoji prefix is being typed, which swaps in
+                    // the emoji list below instead of app matches.
                     ColumnLayout {
-                        visible: root.typing
+                        visible: root.typing && !root.emojiMode
                         Layout.fillWidth: true
                         Layout.leftMargin: root.pad
                         Layout.rightMargin: root.pad
@@ -726,6 +1155,7 @@ Scope {
                                 buttonRadius: Appearance.rounding.small
                                 pointingHandCursor: true
                                 onClicked: root.launchEntry(matchRow.modelData)
+                                altAction: mouse => root.openAppMenu(matchRow.modelData, matchRow, mouse)
                                 // Selected row = secondaryContainer fill, the
                                 // shell's list-selection treatment (preview #333).
                                 toggled: selected
@@ -800,6 +1230,133 @@ Scope {
                         }
                     }
 
+                    // ── Emoji list (the emoji prefix, typed) ─────────────────
+                    //
+                    // One row per emoji: the glyph, then its name. Clicking (or
+                    // Enter) copies the glyph and closes the card -- see
+                    // copyEmoji. Nothing here launches an app, so there is no
+                    // right-click app menu on these rows.
+                    ColumnLayout {
+                        visible: root.emojiMode
+                        Layout.fillWidth: true
+                        Layout.leftMargin: root.pad
+                        Layout.rightMargin: root.pad
+                        Layout.bottomMargin: 12
+                        spacing: 2
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Layout.bottomMargin: 4
+                            spacing: 8
+
+                            Text {
+                                text: Translation.tr("Emojis")
+                                color: Appearance.colors.colOnSurfaceVariant
+                                font.family: Appearance.font.family.main
+                                font.pixelSize: Appearance.font.pixelSize.smallest
+                                font.letterSpacing: 0.7
+                                font.capitalization: Font.AllUppercase
+                            }
+                            Item { Layout.fillWidth: true }
+                            Text {
+                                text: String(root.emojiMatches.length)
+                                color: Appearance.colors.colOutline
+                                font.family: Appearance.font.family.main
+                                font.pixelSize: Appearance.font.pixelSize.smallest
+                            }
+                        }
+
+                        // A scrolling list, NOT the Repeater the app rows use.
+                        //
+                        // The card is as tall as its contents, so a Repeater
+                        // over the whole emoji set (~1900 rows with `:` on its
+                        // own) would build every row and grow the card past the
+                        // screen. This builds the rows in view and scrolls
+                        // inside a fixed height -- the same reason the other
+                        // launcher's results are a ListView.
+                        StyledListView {
+                            id: emojiList
+                            Layout.fillWidth: true
+                            // Short lists stay short (three matches = three
+                            // rows); long ones stop at the cap and scroll.
+                            Layout.preferredHeight: Math.min(root.emojiListHeight, emojiList.contentHeight)
+                            clip: true
+                            spacing: 2
+                            // Every keystroke REPLACES the model, so the add
+                            // animation would pop every visible row in again on
+                            // each key. This list is substituted, not appended
+                            // to, and should look substituted.
+                            animateAppearance: false
+                            // ~1900 rows with no bar give no hint of where in
+                            // them you are (see the flag's own comment).
+                            scrollBarAlwaysOn: true
+                            model: root.emojiMatches
+                            // The arrows walk the same index this list draws its
+                            // highlight on, so the selected row is kept in view
+                            // rather than being selected off-screen.
+                            currentIndex: root.selectedIndex
+                            onCurrentIndexChanged: emojiList.positionViewAtIndex(root.selectedIndex, ListView.Contain)
+
+                            delegate: RippleButton {
+                                id: emojiRow
+                                required property int index
+                                required property var modelData
+                                readonly property bool selected: root.selectedIndex === emojiRow.index
+                                width: ListView.view.width
+                                implicitHeight: root.rowHeight
+                                buttonRadius: Appearance.rounding.small
+                                pointingHandCursor: true
+                                onClicked: root.copyEmoji(emojiRow.modelData)
+                                toggled: selected
+                                colBackground: "transparent"
+                                colBackgroundHover: Appearance.colors.colSurfaceContainerHigh
+                                colBackgroundToggled: Appearance.colors.colSecondaryContainer
+                                colBackgroundToggledHover: Appearance.colors.colSecondaryContainer
+
+                                contentItem: RowLayout {
+                                    spacing: 10
+
+                                    // The glyph itself -- a character, not an
+                                    // icon file, and set in its own column wide
+                                    // enough for the emoji font to draw it at
+                                    // this size without clipping.
+                                    Text {
+                                        Layout.alignment: Qt.AlignVCenter
+                                        Layout.preferredWidth: 36
+                                        horizontalAlignment: Text.AlignHCenter
+                                        text: emojiRow.modelData.glyph
+                                        color: emojiRow.selected
+                                            ? Appearance.colors.colOnSecondaryContainer
+                                            : Appearance.colors.colOnSurface
+                                        font.pixelSize: Appearance.font.pixelSize.larger
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: emojiRow.modelData.name ?? ""
+                                        elide: Text.ElideRight
+                                        color: emojiRow.selected
+                                            ? Appearance.colors.colOnSecondaryContainer
+                                            : Appearance.colors.colOnSurface
+                                        font.family: Appearance.font.family.main
+                                        font.pixelSize: Appearance.font.pixelSize.normal
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            visible: root.emojiMatches.length === 0
+                            Layout.fillWidth: true
+                            Layout.topMargin: 8
+                            Layout.bottomMargin: 8
+                            horizontalAlignment: Text.AlignHCenter
+                            text: Translation.tr("No matches")
+                            color: Appearance.colors.colOutline
+                            font.family: Appearance.font.family.main
+                            font.pixelSize: Appearance.font.pixelSize.smaller
+                        }
+                    }
+
                     // Nothing typed: Frequent grid + All apps grid (state 1)
                     ColumnLayout {
                         visible: !root.typing
@@ -853,6 +1410,7 @@ Scope {
                                     implicitHeight: root.tileHeight
                                     buttonRadius: Appearance.rounding.normal
                                     onClicked: root.launchEntry(freqTile.modelData)
+                                    altAction: mouse => root.openAppMenu(freqTile.modelData, freqTile, mouse)
                                     toggled: selected
                                     colBackground: "transparent"
                                     colBackgroundHover: Appearance.colors.colSurfaceContainerHigh
@@ -934,6 +1492,7 @@ Scope {
                                         implicitHeight: root.tileHeight
                                         buttonRadius: Appearance.rounding.normal
                                         onClicked: root.launchEntry(allTile.modelData)
+                                        altAction: mouse => root.openAppMenu(allTile.modelData, allTile, mouse)
 
                                         contentItem: ColumnLayout {
                                                 spacing: 6
@@ -1015,6 +1574,7 @@ Scope {
                                 buttonRadius: Appearance.rounding.small
                                 pointingHandCursor: true
                                 onClicked: root.launchEntry(advancedRow.modelData)
+                                altAction: mouse => root.openAppMenu(advancedRow.modelData, advancedRow, mouse)
                                 toggled: selected
                                 colBackground: "transparent"
                                 colBackgroundHover: Appearance.colors.colSurfaceContainerHigh
@@ -1184,7 +1744,9 @@ Scope {
                             font.pixelSize: Appearance.font.pixelSize.smallest
                         }
                         Text {
-                            text: Translation.tr("↵ launch")
+                            text: root.emojiMode
+                                ? Translation.tr("↵ copy")
+                                : Translation.tr("↵ launch")
                             color: Appearance.colors.colOutline
                             font.family: Appearance.font.family.monospace
                             font.pixelSize: Appearance.font.pixelSize.smallest
@@ -1196,6 +1758,39 @@ Scope {
                             font.pixelSize: Appearance.font.pixelSize.smallest
                         }
                     }
+                }
+            }
+        }
+
+        // ── The app's own right-click menu ────────────────────────────────
+        //
+        // Laid over the whole surface and declared LAST, so it is above both
+        // the card and the click catcher. The layer is what makes that safe:
+        // it is an empty Item that accepts no input of its own, so a press
+        // that misses the menu falls through to the catcher underneath and
+        // closes the launcher -- while a press on the menu belongs to the menu.
+        //
+        // It is also the coordinate space the press is mapped into (see
+        // openAppMenu): the menu is placed where the pointer was, in the
+        // surface's own coordinates, so it can sit beside the card at the
+        // screen edge without being clamped into a card it is not a child of.
+        Item {
+            id: menuLayer
+            anchors.fill: parent
+
+            AppContextMenu {
+                id: appMenu
+                open: false
+                entry: null
+                onLaunchRequested: entry => root.launchEntry(entry)
+                onAppActionRequested: action => {
+                    // A desktop action asks for a NEW session -- "New window",
+                    // "New private window" -- so it is executed directly rather
+                    // than through GlobalStates.launchEntry, whose whole job is
+                    // to redirect to the copy already running.
+                    root.noteClose("app action");
+                    GlobalStates.appSearchOverlayOpen = false;
+                    action.execute();
                 }
             }
         }

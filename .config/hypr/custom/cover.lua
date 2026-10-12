@@ -17,32 +17,59 @@
 -- move/resize dispatches are ignored on a tiled-maximized window, so the gaps
 -- cannot be closed by shifting it afterwards.
 --
--- The working mechanism (proven live on this machine, [0,0] 1600x1000):
+-- Then the window half was floating: float + move-to-origin + resize-to-the-
+-- monitor (proven live, [0,0] 1707x1067). That geometry is still exact and it
+-- is what legacyCover() below does, but its MOTION was wrong, and the motion
+-- is what this file changed for on 2026-10-11:
 --
---   1. float the window (action = "set", so an already-floating window is
---      untouched rather than toggled back to tiled);
---   2. move it to the monitor's logical origin and resize it to the monitor's
---      full LOGICAL size (monitor.width/height are PHYSICAL on this build --
---      divide by scale, see the closeDrag code in custom/general.lua);
---   3. remember what the window was BEFORE floating (tiled or floating, and
---      the floating geometry), so exit can put every pixel back.
+--   * a window dispatcher that sets a floating window's box is applied by the
+--     compositor with NO animation. Measured twice over: with every animation
+--     leaf slowed to ~2.5s (10x), the covering window's top edge still went
+--     from its tile (y=75 physical) to y=0 in a single captured frame --
+--     there was no intermediate frame to capture. `misc:animate_manual_resizes`
+--     is false on this build and turning it on changed nothing;
+--   * everything ARRIVING at the transition still animated -- the neighbours'
+--     reflow into the freed slot is ~275ms of eased motion (measured). So the
+--     covering window teleported while the rest of the desktop glided around
+--     it, which is exactly the "half laggy" report and the reason for this
+--     rewrite.
 --
--- Floating is what makes the compositor respect exact pixel geometry. The
--- window is never given the fullscreen state: fs stays 0, Chromium keeps its
--- tab strip, and the shell's barCover flag is what hides the bar.
+-- The working mechanism now is the compositor's OWN expanded state, asked for
+-- the internal half only:
 --
--- The catch-all `float = false` rule in custom/rules.lua re-asserts itself on
--- state changes for RULE-MATCHED windows, but empirically a window floated by
--- dispatch STAYS floating (verified: float -> move -> resize all landed and
--- held), so no rule interaction needs handling here.
+--     hl.dsp.window.fullscreen_state({ internal = 2, client = 0, action = "set" })
 --
--- Exit reverses: unfloat first (restore happens inside that toggle -- a
--- floating->tiled toggle re-tiles into the split), then re-assert the
--- remembered floating state if the window was floating before, and only then
--- give the bar's strip back -- and ONLY then if no OTHER window is still
--- covering: two windows can be covered at once (cover one, switch workspace,
--- cover another), and handing the strip back under the second would push a
--- covered window out of its edge-to-edge geometry.
+-- `client = 0` is the whole point, and it is what the float cover was invented
+-- for: the window fills the monitor (internal fullscreen) while the app is
+-- never told it is fullscreen, so Chromium keeps its tab strip. Measured
+-- afterwards: at=[0,0] size=[1707,1067] fs=2 fullscreenClient=0.
+--
+-- It also fixes the motion, because a fullscreen window is a LAYOUT change and
+-- this compositor animates layout changes (that is the same path that made the
+-- neighbours glide all along). Measured on this machine with the same harness
+-- that exposed the teleport: the top edge now sweeps 56/17/8/3/1/0 over ~310ms
+-- going in, and 20/49/57/62/67/70/72/73/74/75 over ~440ms coming out -- one
+-- eased move per direction, played by the compositor, with the neighbours
+-- covered and restored inside the same animation. Nothing is hand-played and
+-- no per-frame dispatch is issued.
+--
+-- `action = "set"` and not "toggle" so entering is deterministic; measured,
+-- "unset" is a NO-OP on this build (accepted, does nothing), so the way out is
+-- the toggle with both halves zero -- see exit().
+--
+-- What this retires: the pre-cover geometry memory is no longer needed to put
+-- the window back, because the tiler never lost it -- un-fullscreening lands
+-- the window in the tile (or the floating geometry) it had, measured. The
+-- memory stays for two reasons: it marks the window as OURS for the sweep and
+-- the drift repair, and it is what restores a window covered by an OLDER
+-- version of this module (a full-monitor float, fs == 0). legacyCover() is
+-- kept for the same two cases plus the one real fallback: a window that
+-- refuses the fullscreen request must still be able to fill the screen.
+--
+-- Exit: one dispatch back to the tile, then the bar's strip -- and ONLY then if
+-- no OTHER window is still covering: two windows can be covered at once (cover
+-- one, switch workspace, cover another), and handing the strip back under the
+-- second would push a covered window out of its edge-to-edge geometry.
 
 local M = {}
 
@@ -230,6 +257,63 @@ local function toggledTooSoon(addr)
     return false
 end
 
+-- Focus a window by address, as a WINDOW OBJECT. The window dispatchers on
+-- this build act on the focused window and ignore an `address` argument (see
+-- the long note in custom/general.lua), so anything that resizes or expands a
+-- window has to take focus first -- and the cover does, because the bar's
+-- strip request in enter() spawns a `qs` process, which is long enough for
+-- focus to be somewhere else by the time the geometry dispatch lands.
+local function focusAddr(addr)
+    local w = liveWindow(addr)
+    if not w then return nil end
+    hl.dispatch(hl.dsp.focus({ window = w }))
+    return w
+end
+
+-- The pre-2026-10-11 way to fill the screen: float the window (action = "set",
+-- so an already-floating window is not toggled back to tiled), then pin it to
+-- the monitor's logical rect. The geometry is exact and it holds -- a window
+-- floated by dispatch stays floated -- but the compositor applies it with no
+-- animation (see the header), so this is now only:
+--   * the fallback when a window refuses the fullscreen request, and
+--   * the way a window covered by an OLDER version of this module is put back.
+local function legacyCover(addr)
+    local w = liveWindow(addr)
+    if not w then return false end
+    local lw, lh, mx, my = logicalMonitor(w)
+    focusAddr(addr)
+    hl.dispatch(hl.dsp.window.float({ action = "set", address = addr }))
+    local function pin()
+        local cur = liveWindow(addr)
+        if not (cur and cur.floating) then
+            hl.dispatch(hl.dsp.window.float({ action = "set", address = addr }))
+        end
+        hl.dispatch(hl.dsp.window.move({ x = mx, y = my, address = addr }))
+        hl.dispatch(hl.dsp.window.resize({ x = lw, y = lh, address = addr }))
+    end
+    pin()
+    -- The float read can lag; retry the pin once a frame later if the first
+    -- landed on a window the tiler had not yet released. (Same pattern as
+    -- closeDrag's refloat in custom/general.lua.)
+    hl.timer(function()
+        local cur = liveWindow(addr)
+        -- Only re-pin if the geometry did not land: a second pin on a window
+        -- that already covers the screen is invisible, but a pin that fires
+        -- after the user LEFT cover (exit ran, window re-tiled) would yank it
+        -- back out of its tile.
+        if not (cur and cur.floating) then return end
+        if cur.at and cur.size
+            and cur.at.x == mx and cur.at.y == my
+            and cur.size.x == lw and cur.size.y == lh then
+            return
+        end
+        if (cur.fullscreen or 0) ~= 0 then return end
+        hl.dispatch(hl.dsp.window.move({ x = mx, y = my, address = addr }))
+        hl.dispatch(hl.dsp.window.resize({ x = lw, y = lh, address = addr }))
+    end, { timeout = 60, type = "oneshot" })
+    return true
+end
+
 -- Take the window over the screen. `w` is a window object (from
 -- hl.get_active_window() or a hl.get_windows() entry), never a selector:
 -- selectors throw on this build, and a throw inside a gesture callback
@@ -240,9 +324,10 @@ function M.enter(w)
     -- The bar first, always: its strip is what the window is about to cover.
     M.barStrip(addr, true)
 
-    -- Remember the pre-cover state so exit can restore it exactly. A tiled
-    -- window must come back tiled AT ITS OLD TILE; a floating one must come
-    -- back floating at its old geometry. Read BEFORE any dispatch.
+    -- Remember the pre-cover state. Exit no longer needs it to place the
+    -- window (the compositor restores the tile itself), but the sweep and the
+    -- drift repair use the memory to tell a live cover from leftover churn,
+    -- and legacyCover() restores from it. Read BEFORE any dispatch.
     local lw, lh, mx, my = logicalMonitor(w)
     -- Geometry reads: this build exposes position/size as POINT OBJECTS
     -- (w.at.x, w.size.x -- the same shape closeDrag in general.lua reads),
@@ -262,41 +347,26 @@ function M.enter(w)
         mw = lw, mh = lh, mx = mx, my = my,
     }
 
-    -- Float (set, not toggle: a floating window stays floating), then pin to
-    -- the full monitor. Each dispatch is separate -- multi-statement evals
-    -- have thrown in this build.
-    hl.dispatch(hl.dsp.window.float({ action = "set", address = addr }))
-    -- The float read can lag; retry the pin once a frame later if the first
-    -- landed on a window the tiler had not yet released. (Same pattern as
-    -- closeDrag's refloat in custom/general.lua.)
-    local function pin()
-        local now = liveWindow(addr)
-        if not (now and now.floating) then
-            hl.dispatch(hl.dsp.window.float({ action = "set", address = addr }))
-        end
-        hl.dispatch(hl.dsp.window.move({ x = mx, y = my, address = addr }))
-        hl.dispatch(hl.dsp.window.resize({ x = lw, y = lh, address = addr }))
-    end
-    pin()
+    -- ONE dispatch: the compositor's own expanded state, internal half only.
+    -- The app is not told anything (client = 0), and because the window's box
+    -- now changes as a LAYOUT change the compositor animates it -- see the
+    -- header for the measurements.
+    focusAddr(addr)
+    hl.dispatch(hl.dsp.window.fullscreen_state({
+        internal = 2, client = 0, action = "set" }))
+
+    -- One beat later, check that it took. A window that refuses the request
+    -- (a rule, a client that will not resize) has to be able to fill the
+    -- screen anyway, so the old float+pin is kept for exactly that case.
     hl.timer(function()
         local now = liveWindow(addr)
-        -- Only re-pin if the geometry did not land: a second pin on a window
-        -- that already covers the screen is invisible, but a pin that fires
-        -- after the user LEFT cover (exit ran, window re-tiled) would yank it
-        -- back out of its tile.
-        if not (now and now.floating) then return end
-        if now.at and now.size
-            and now.at.x == mx and now.at.y == my
-            and now.size.x == lw and now.size.y == lh then
-            return
-        end
-        -- Still floating but not yet at the target: land it.
+        if now == nil then return end
         if (now.fullscreen or 0) ~= 0 then return end
-        hl.dispatch(hl.dsp.window.move({ x = mx, y = my, address = addr }))
-        hl.dispatch(hl.dsp.window.resize({ x = lw, y = lh, address = addr }))
+        trace("enter " .. tostring(addr) .. ": fullscreen refused, float+pin fallback")
+        legacyCover(addr)
     end, { timeout = 60, type = "oneshot" })
-    trace("enter " .. tostring(addr) .. " -> " .. tostring(lw) .. "x" .. tostring(lh)
-        .. " @" .. tostring(mx) .. "," .. tostring(my)
+    trace("enter " .. tostring(addr) .. " internal fullscreen @"
+        .. tostring(mx) .. "," .. tostring(my) .. " " .. tostring(lw) .. "x" .. tostring(lh)
         .. " wasFloating=" .. tostring(M.remember[addr].wasFloating))
     return true
 end
@@ -308,11 +378,32 @@ function M.exit(w)
     local addr = w and w.address or nil
     local mem = addr and M.remember and M.remember[addr] or nil
     if w and addr then
-        -- A real fullscreen window (fs == 2) cannot be un-floated; leave that
-        -- state first with the mode it actually has.
+        -- Leave the expanded state first. TWO shapes of it, and they need
+        -- different doors off the screen:
+        --
+        --   * a window the APP put in fullscreen (or SUPER+ALT+F's spoof): the
+        --     client half has to be handed back explicitly, with the mode the
+        --     window actually has -- toggling "fullscreen" on a maximized
+        --     window would stack a real fullscreen on top of the maximize.
+        --     Unchanged from before this rewrite.
+        --
+        --   * OUR cover: internal fullscreen with the client never told
+        --     (fs == 2, fullscreenClient == 0). That is ONE dispatch, and the
+        --     compositor plays the whole way back itself -- landing the window
+        --     in the tile (or the floating geometry) it had before, in one
+        --     eased move. This is the exit half of "one clean transition";
+        --     nothing here is hand-played. The toggle with BOTH halves zero is
+        --     this build's way out (`action = "unset"` is accepted and does
+        --     nothing -- measured).
         if (w.fullscreen or 0) == 2 then
-            hl.dispatch(hl.dsp.window.fullscreen({
-                mode = "fullscreen", action = "toggle", address = addr }))
+            if (w.fullscreenClient or 0) ~= 0 then
+                hl.dispatch(hl.dsp.window.fullscreen({
+                    mode = "fullscreen", action = "toggle", address = addr }))
+            else
+                focusAddr(addr)
+                hl.dispatch(hl.dsp.window.fullscreen_state({
+                    internal = 0, client = 0, action = "toggle" }))
+            end
         end
         if mem and mem.addr == addr then
             if not mem.wasFloating then
@@ -482,5 +573,42 @@ M.isCovering = isCoverState
 -- still a cover as far as the exit path is concerned, and reading it as
 -- "not covering" there is what stranded it.
 M.owns = ownsWindow
+
+-- Is this window in the compositor-side expanded state THIS module creates --
+-- fullscreen for the compositor, an ordinary resize for the app? That is
+-- fs == 2 with NO client-side fullscreen (fullscreenClient == 0), and it is
+-- the test custom/general.lua's four-finger-up needs to route the exit: our
+-- cover leaves through M.exit (ONE dispatch, animated by the compositor),
+-- while a window the APP fullscreened has a client-side state to hand back and
+-- keeps its own path (anchoredTransition). Both doors must never fire for the
+-- same window -- the old code chose by `fs ~= 0`, which sent our cover into the
+-- hand-played glide and would have stacked a client fullscreen on top of it.
+function M.isInternalCover(w)
+    return w ~= nil and (w.fullscreen or 0) == 2
+        and (w.fullscreenClient or 0) == 0
+end
+
+-- "Can this window be seen covering the screen at all?" -- exported because
+-- custom/general.lua's sweep has to ask the same question about windows OUTSIDE
+-- this module's memory (it drops stale memories for parked windows), and the
+-- vault predicate must have one definition, not two. Same reasoning as owns():
+-- a special workspace is parking, not covering.
+M.canCoverScreen = canCoverScreen
+
+-- Drop a window's remembered pre-cover state.
+--
+-- The caller is the compositor sweep in custom/general.lua, once per pass, for
+-- windows that have been PARKED (special:tray -- see TrayApps.qml's vault):
+-- parking is what a close-to-tray app's close does, and the vault un-floats a
+-- window on the way back out, so the cover the memory describes is gone. Left
+-- in place it is not merely stale but actively wrong -- owns() reads the
+-- MEMORY as the truth, so the next SUPER+F was read as "exit that cover" and
+-- the window did not fill the screen until the press after that. That is the
+-- tray half of "I can't put this app in fullscreen".
+-- Accepts a window object or a bare address, so callers need not look one up.
+function M.forget(w)
+    local addr = type(w) == "table" and w.address or w
+    if addr and M.remember then M.remember[addr] = nil end
+end
 
 return M

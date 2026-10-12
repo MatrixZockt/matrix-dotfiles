@@ -396,6 +396,14 @@ Singleton {
                 property JsonObject indicators: JsonObject {
                     property bool network: true // Wi-Fi, in the connectivity pill
                     property bool bluetooth: true // Bluetooth, in the same pill
+                    // The VPN / tailnet indication, in that same pill (see
+                    // services/Tailscale.qml). The one indicator whose subject
+                    // may not exist: the icon needs the tailscale CLI AND this
+                    // switch -- exactly the pair of conditions Wi-Fi and
+                    // Bluetooth already answer with (`installed`/`available`
+                    // plus the switch). Off removes the icon from the pill even
+                    // where the CLI is present.
+                    property bool vpn: true
                     property bool sound: true // volume / mute
                     property bool battery: true // charge
                     // The muted-MICROPHONE chip in the pill (its sink twin
@@ -867,6 +875,7 @@ Singleton {
                         property list<var> toggles: [
                             { "size": 2, "type": "network" },
                             { "size": 2, "type": "bluetooth"  },
+                            { "size": 2, "type": "tailscale" },
                             { "size": 1, "type": "idleInhibitor" },
                             { "size": 1, "type": "mic" },
                             { "size": 2, "type": "audio" },

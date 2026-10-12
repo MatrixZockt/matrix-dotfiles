@@ -101,16 +101,46 @@ fi
 
 # Nothing is on screen. Any surviving splash process from an earlier run is a
 # leftover, and leaving it in place is what makes every later call refuse.
+#
+# The sweep asks shell_pids, NOT `pgrep -f "[q]s -c $_cfg"`, and that is not
+# tidiness -- the pgrep form killed the wrong process, live, while this line
+# was being measured. `-f` matches the whole command line with the pattern
+# unanchored, so ANY process whose arguments merely mention the string is a
+# target: a bash running a test script that contains it, an editor with the
+# file open, a terminal showing the source. That happened here -- a shell
+# running a test whose text included `qs -c splash` was killed by this loop,
+# mid-command, which looks exactly like a random unexplained death. shell_pids
+# matches the entire command line exactly (see shell-pids.sh), so a bystander
+# cannot match at all.
+#
+# The `comm` check is belt and braces on a kill path: whatever matches, only a
+# real quickshell binary is ever signalled.
 for _cfg in $SPLASH_ALL_CONFIGS; do
-    for _stale in $(pgrep -f "[q]s -c $_cfg" 2>/dev/null); do
+    for _stale in $(shell_pids "$_cfg"); do
+        [ "$(cat "/proc/$_stale/comm" 2>/dev/null)" = "qs" ] || continue
         log "clearing stale splash pid $_stale ($_cfg, no surface)"
         kill "$_stale" 2>/dev/null || true
     done
 done
 sleep 0.2
 
-# Nothing to show a splash for if a shell is already alive -- this is called
-# just before the shell is exec'd, so a hit here means a race we lost.
+# Nothing to show a splash for if the DESKTOP IS ON SCREEN.
+#
+# "A `qs -c ii` process exists" is NOT that question, and answering it instead
+# is why the splash was absent at exactly the moment it exists for. Measured at
+# login: the launcher called this script ~6 s after the compositor came up, the
+# old guard found the still-loading shell's process and answered "shell already
+# running", and the user watched a bare background for the whole load. A
+# loading shell, a shell whose bar just crashed, and the shell of the session
+# that was logged out of a moment ago all answer "yes" to the process test.
+#
+# The bar's own published state is the honest test, and it is already the
+# desktop's own handshake -- Bar.qml writes $XDG_RUNTIME_DIR/ii-bar-visible.json
+# ({visible,stripH,midL,midR,ts}, refreshed every 2 s while the bar is up) and
+# the compositor's gesture gate reads it. A fresh `visible:true` means a bar is
+# really on screen -- not merely that a process is alive -- so there is nothing
+# left to cover. Anything else (no file, a stale one, or `visible:false`)
+# means the desktop is not up yet: show the backdrop.
 #
 # EXCEPT WHEN THE CALLER SAYS OTHERWISE. reset-shell.sh shows the indicator
 # BEFORE it kills the shell, so at that moment a shell IS running and this
@@ -118,8 +148,39 @@ sleep 0.2
 # `SPLASH_FORCE=1` is that caller saying "I know, show it anyway"; it does not
 # disable the "another splash is already up" check above, because two splashes
 # at once is still wrong.
-if [ "${SPLASH_FORCE:-0}" != "1" ] && [ -n "$(shell_pids "$qsConfig")" ]; then
-    log "shell already running, not showing splash"
+#
+# AND THE FILE ALONE IS NOT ENOUGH EITHER. It has to be a fresh `visible:true`
+# written by a shell that is STILL RUNNING, because the file outlives the shell
+# that wrote it and is refreshed every 2 s while a bar is up. Measured on the
+# login sequence: kill the shell, and the marker left behind still reads
+# {"visible":true,"ts":<3 s ago>} -- a stale-but-fresh claim from a corpse.
+# Guarding on the file alone therefore reproduced the very bug this is meant to
+# fix: the cover refused to appear at login, because the previous session's bar
+# had published seconds before. A live `qs -c ii` process is what distinguishes
+# the two cases, so both are required: a shell exists AND its bar says it is on
+# screen.
+#
+desktop_on_screen() {
+    local config="${qsConfig:-ii}"
+    [ -n "$(shell_pids "$config")" ] || return 1
+    local f="${XDG_RUNTIME_DIR:-/tmp}/ii-bar-visible.json"
+    [ -f "$f" ] || return 1
+    BAR_STATE="$f" python3 - <<'PY' 2>/dev/null
+import json, os, time
+try:
+    with open(os.environ["BAR_STATE"]) as fh:
+        d = json.load(fh)
+except Exception:
+    raise SystemExit(1)
+# Same 10 s staleness window the compositor's reader uses: a wedged shell's
+# last "visible" must not make us skip the backdrop forever.
+fresh = time.time() - float(d.get("ts") or 0) < 10
+raise SystemExit(0 if d.get("visible") and fresh else 1)
+PY
+}
+
+if [ "${SPLASH_FORCE:-0}" != "1" ] && desktop_on_screen; then
+    log "desktop already on screen (bar published), not showing splash"
     exit 0
 fi
 
@@ -171,7 +232,15 @@ log "splash up (pid $SPLASH_PID), waiting for the shell"
 # One watcher process rather than a shell loop calling hyprctl hundreds of
 # times: the polling is a Python loop that spawns hyprctl itself, and it exits
 # the moment the shell appears or the timeout expires.
-python3 - "$SPLASH_PID" "$TIMEOUT" "${SPLASH_FORCE:-0}" <<'PY'
+#
+# Its stdout goes to $LOG, NOT inherited. Callers start this script with
+# `>/dev/null 2>&1` (shell.sh does), so every print() below -- the two lines
+# that say WHY the cover went away -- was written to /dev/null. The result was
+# an indicator whose failure was undiagnosable from the log: "the cover never
+# disappeared" and "the cover disappeared too early" look identical, and
+# neither leaves a trace. log() writes to $LOG already; the watcher now does
+# too, and the two halves of one launch read as one story.
+python3 - "$SPLASH_PID" "$TIMEOUT" "${SPLASH_FORCE:-0}" >>"$LOG" 2>&1 <<'PY'
 import json, os, signal, subprocess, sys, time
 
 splash_pid, timeout = int(sys.argv[1]), float(sys.argv[2])
@@ -187,7 +256,26 @@ saw_shell_gone = not forced
 
 
 def shell_is_drawn():
-    """True once a `qs -c ii` process owns a mapped layer surface."""
+    """True once the shell's BAR is drawn -- not merely any surface.
+
+    MEASURED, which is why this is not the weaker test it looks like:
+
+        +0.7 s  `qs -c ii` process exists
+        +1.1 s  first surface mapped (quickshell:background -- a wallpaper)
+        +4.0 s  `quickshell:bar` mapped
+        +5.1 s  the bar publishes visible:true
+
+    Dismissing on the first surface therefore hands the user a desktop that
+    looks loaded and is not: walls, no bar, nothing to click, for three and a
+    half seconds. That is the "blank screen at login" this indicator exists to
+    end, so the indicator stays until the bar itself is up.
+
+    `quickshell:bar` is the shell's own namespace for the bar
+    (WlrLayershell.namespace in Bar.qml), and the surface is mapped whenever
+    the bar is loaded -- a slid-away bar under auto-hide still has its layer
+    mapped (it is the margin that moves, not the surface), so this cannot wait
+    forever on an auto-hidden bar.
+    """
     try:
         out = subprocess.run(
             ["hyprctl", "layers", "-j"], capture_output=True, text=True, timeout=5
@@ -200,10 +288,10 @@ def shell_is_drawn():
     for monitors in data.values():
         for level in (monitors.get("levels") or {}).values():
             for surface in level or []:
-                ns = surface.get("namespace") or ""
-                pid = surface.get("pid")
-                if ns.startswith("quickshell:") and pid and pid != splash_pid:
-                    pids.add(pid)
+                if (surface.get("namespace") or "") == "quickshell:bar":
+                    pid = surface.get("pid")
+                    if pid and pid != splash_pid:
+                        pids.add(pid)
 
     for pid in pids:
         try:

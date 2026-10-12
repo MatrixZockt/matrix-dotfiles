@@ -30,23 +30,47 @@ Scope {
     // Width of the invisible strip that listens for the pointer. Has to be wide
     // enough that landing on "the very edge" reliably enters the surface, but
     // narrow enough not to steal clicks from the windows underneath.
-    readonly property int stripWidth: 10
+    // Shared with the sidebars, whose input regions stop short of it so this
+    // strip keeps the click even while one of them is open (see
+    // Appearance.sizes.edgeRevealStripWidth).
+    readonly property int stripWidth: Appearance.sizes.edgeRevealStripWidth
+
+    // ── Whether the sidebars are allowed over a fullscreen window ────────
+    //
+    // Read from the setting that already means this, and read in the SAME
+    // place the sidebars themselves read it: SidebarLeft/SidebarRight pick
+    // their layer from it (Overlay when it is on, Top when it is off). That
+    // coupling is the whole point -- a strip that opens a sidebar which is
+    // drawing on Top sits UNDER the fullscreen client, so "it opened" and
+    // "nothing is there" are the same picture, and the click that did it
+    // leaves an invisible panel open to confuse the next gesture.
+    //
+    // ON  -> the sidebars live over fullscreen, so the edge behaves over
+    //        fullscreen exactly as it does anywhere else: hover opens.
+    // OFF -> fullscreen really means no sidebars, so the edge is dead there:
+    //        no hover, no click, and no hint inviting either.
+    readonly property bool sidebarsOverFullscreen:
+        Config.options?.sidebar?.showInFullscreen ?? true
 
     component EdgePanelWindow: PanelWindow {
         id: edgeWindow
         required property var targetScreen
         required property bool isLeft
-        // Set while a window on this monitor is fullscreen: a video or a game
+        // Set while a window on this monitor is fullscreen AND the sidebars are
+        // not allowed over one (sidebar.showInFullscreen): a video or a game
         // must not have a sidebar slide in because the pointer drifted near the
-        // edge. Detected from HyprlandData's client list (any toplevel with
-        // fullscreen > 0 on this monitor's name) rather than the workspace
-        // scan the dock uses -- a morphed popup window (settings/taskmanager
-        // fullscreen) is a regular client, which the workspace scan misses.
-        // The sidebars themselves also sit on Overlay while
-        // sidebar.showInFullscreen is on, so they would still DRAW over the
-        // fullscreen client -- the strip staying dead is what makes "no
-        // sidebars in fullscreen" actual behaviour instead of a lighting
-        // trick: nothing opens them, so nothing appears.
+        // edge. Fullscreen is detected from HyprlandData's client list (any
+        // toplevel with fullscreen > 0 on this monitor's name) rather than the
+        // workspace scan the dock uses -- a morphed popup window
+        // (settings/taskmanager fullscreen) is a regular client, which the
+        // workspace scan misses.
+        //
+        // WITH THE SETTING ON, this stays false and the edges behave over a
+        // fullscreen window exactly as they do anywhere else. That is the only
+        // honest meaning of "the sidebars are available over fullscreen": the
+        // sidebars are drawn on Overlay there, so all that was left was for
+        // something to OPEN them, and these strips are the only thing that can.
+        // Keeping them dead would leave the setting decorative.
         property bool suppressed: false
         // Said out loud when it flips, in the same `[edge]` vocabulary the rest
         // of the shell logs in: "the edge strips do nothing" is otherwise
@@ -56,6 +80,68 @@ Scope {
             `[edge] ${edgeWindow.isLeft ? "left" : "right"} strip suppressed=${edgeWindow.suppressed}`)
         // True between "the edge opened this sidebar" and "the edge closed it".
         property bool revealed: false
+
+        // Whether the edge just sent this panel away -- see
+        // GlobalStates.sidebarEdgeLatch for why the two halves have to agree on
+        // it. Read through GlobalStates because the close can come from the
+        // panel's own edge sliver as well as from this strip, and the pointer
+        // is on the same few pixels either way.
+        //
+        // One close while the pointer stays put is a decision, not an
+        // invitation: without the latch the hover -- still armed, because the
+        // pointer never left -- brings the panel straight back, and a
+        // dismissal reads as a flicker (or, from the other chair, as the click
+        // having done nothing at all).
+        readonly property bool hoverLatched: edgeWindow.isLeft
+            ? GlobalStates.sidebarLeftEdgeLatch
+            : GlobalStates.sidebarRightEdgeLatch
+        // Written through one place, per edge: the flag belongs to this strip's
+        // side of the screen and nowhere else.
+        function setLatch(on) {
+            if (edgeWindow.isLeft)
+                GlobalStates.sidebarLeftEdgeLatch = on;
+            else
+                GlobalStates.sidebarRightEdgeLatch = on;
+        }
+        // Every close while the pointer is still on the strip gets the latch,
+        // not just the ones this file performs: Esc, the bar's toggle and a
+        // click-through dismissal all land the same way, and all of them would
+        // otherwise be undone by the hover that is already armed under the
+        // pointer. (A close from the panel's own edge sliver is latched there,
+        // because at that instant the card -- not this strip -- has the
+        // pointer.)
+        onSidebarAlreadyOpenChanged: {
+            if (!edgeWindow.sidebarAlreadyOpen && edgeMouseArea.containsMouse)
+                edgeWindow.setLatch(true);
+        }
+
+        // The one opener and the one closer, shared by the hover timer and the
+        // click, so the gestures cannot drift apart -- and so the outcome is
+        // readable from outside.
+        //
+        // The log lines are the same instrument the suppression note below
+        // uses, for the same reason: "the edge did nothing" and "the edge
+        // opened a panel that did not draw" look identical from a screenshot,
+        // and the second one is what an invisible sidebar over a fullscreen
+        // client used to be.
+        function openSidebar(why) {
+            edgeWindow.revealed = true;
+            if (edgeWindow.isLeft)
+                GlobalStates.sidebarLeftOpen = true;
+            else
+                GlobalStates.sidebarRightOpen = true;
+            console.log(`[edge] ${edgeWindow.isLeft ? "left" : "right"} strip opened (${why})`);
+        }
+
+        function closeSidebar(why) {
+            edgeWindow.revealed = false;
+            edgeWindow.setLatch(true);
+            if (edgeWindow.isLeft)
+                GlobalStates.sidebarLeftOpen = false;
+            else
+                GlobalStates.sidebarRightOpen = false;
+            console.log(`[edge] ${edgeWindow.isLeft ? "left" : "right"} strip closed (${why})`);
+        }
 
         // How far the pointer may sit from this edge before the revealed sidebar
         // closes. Tracks the width each sidebar actually occupies, so moving onto
@@ -109,41 +195,73 @@ Scope {
             id: edgeMouseArea
             anchors.fill: parent
             hoverEnabled: true
-            // Two opening gestures, one per context:
+            // HOVER opens, like the top bar's liquid drops: entering the strip
+            // slides the sidebar out. Leaving the strip closes nothing by
+            // itself: the pointer poller below owns the close, once the pointer
+            // exits the sidebar's whole stay-band (so moving onto the panel
+            // keeps it up).
             //
-            //   * Normal desktop -- HOVER opens, like the top bar's liquid
-            //     drops: entering the strip slides the sidebar out. Leaving the
-            //     strip closes nothing by itself: the pointer poller below owns
-            //     the close, once the pointer exits the sidebar's whole
-            //     stay-band (so moving onto the panel keeps it up).
-            //   * Fullscreen window -- a CLICK opens. A video or a game means
-            //     the pointer drifts to the edges constantly, and a hover strip
-            //     there kept yanking a sidebar over the picture; the edge still
-            //     shows its hint (so the affordance is findable) but the panel
-            //     only comes out when it is actually asked for.
+            // A left CLICK opens too -- the same opener, so the two gestures
+            // cannot drift apart. It is redundant on a normal desktop (hover
+            // has usually opened it 450ms in, and the already-open guard makes
+            // the click a no-op), and it is the gesture that answers "I did not
+            // want to wait / I am not sure hovering is allowed to do this".
+            // Both are gated on the one thing that decides whether the panel
+            // would be seen at all: sidebar.showInFullscreen. See `suppressed`
+            // above for the fullscreen half of that.
             acceptedButtons: Qt.LeftButton
             onClicked: mouse => {
-                if (!edgeWindow.suppressed)
-                    return; // hover path handles the normal desktop
+                // A CLICK OPENS -- it never sends the panel away. This is the
+                // top edge's rule, verbatim (Bar.qml's fsEdgePress: "the press
+                // only ever opens"), and it is the only rule that can work
+                // here: the hover sharing this strip has usually opened the
+                // panel 450ms into the approach, so a click that arrived after
+                // that and toggled landed as "the click closed it" -- read from
+                // the chair as "the click does not work, only hover does".
+                //
+                // Open-only is right in every case instead: closed -> it comes
+                // out; already out -> the press is a no-op and the panel the
+                // hover just revealed stays revealed. (The panel's own edge
+                // sliver used to close it on exactly these pixels, which is the
+                // other half of the same bug -- a real click there found the
+                // card, not this strip, and dismissed what the hover had just
+                // opened. That sliver is gone.)
+                //
+                // Leaving the edge still closes it, as do Esc, the bar's own
+                // sidebar buttons and the SUPER shortcuts -- the edge is simply
+                // not a close gesture any more, exactly like the top edge.
+                //
+                // The same gate the hover uses -- `suppressed`, not the raw
+                // setting. The old `!sidebarsOverFullscreen` check refused the
+                // click whenever sidebar.showInFullscreen was off, which meant a
+                // click could not open a sidebar anywhere, not even on an
+                // ordinary desktop where nothing is fullscreen and the setting
+                // changes nothing. Suppression is the state that actually
+                // decides whether the panel would be seen (fullscreen client)
+                // or not (everything else), so the two gestures now agree.
+                if (edgeWindow.suppressed)
+                    return;
                 if (GlobalStates.screenLocked)
                     return;
                 if (edgeWindow.sidebarAlreadyOpen)
                     return;
-                edgeWindow.revealed = true;
-                if (edgeWindow.isLeft)
-                    GlobalStates.sidebarLeftOpen = true;
-                else
-                    GlobalStates.sidebarRightOpen = true;
+                // The click decides; the hover on its heels must not fight it.
+                openDelay.stop();
+                edgeWindow.openSidebar("click");
                 mouse.accepted = true;
             }
 
             onContainsMouseChanged: {
+                // Leaving the strip ends the latch: the next visit hovers as
+                // usual. Cleared on the way out, before anything reads it.
+                if (!containsMouse)
+                    edgeWindow.setLatch(false);
                 if (edgeWindow.suppressed) {
                     if (!containsMouse)
                         openDelay.stop();
                     return;
                 }
-                if (containsMouse)
+                if (containsMouse && !edgeWindow.hoverLatched)
                     openDelay.restart();
                 else
                     openDelay.stop();
@@ -151,11 +269,12 @@ Scope {
             // If the pointer is already resting on the strip when the surface
             // maps (shell start/reload with the cursor parked at the edge),
             // containsMouse initialises true and the changed handler never
-            // fires -- seed the delay here ONLY when not suppressed: under
-            // fullscreen the edge should never open from hover, so an already-
-            // present cursor at the edge at startup does not count as a gesture.
+            // fires -- seed the delay here ONLY when an opening hover is
+            // wanted at all: not suppressed, and not latched by a panel that
+            // was just closed from this very spot.
             Component.onCompleted: Qt.callLater(() => {
-                if (!edgeWindow.suppressed && edgeMouseArea.containsMouse)
+                if (!edgeWindow.suppressed && !edgeWindow.hoverLatched
+                    && edgeMouseArea.containsMouse)
                     openDelay.restart();
             });
 
@@ -165,10 +284,10 @@ Scope {
         // the intent signal (extended from 300ms on request -- accidental
         // edge parking still opened it); leaving the strip within it cancels.
         //
-        // Under fullscreen this delay is only ever armed by the single click
-        // (see onClicked), never by hover: hover arms the hint only, so a
-        // sustained hover at the edge under fullscreen does not turn into a
-        // click-equivalent open.
+        // With the sidebars allowed over fullscreen it is armed by hover there
+        // exactly as it is on a normal desktop. Suppressed (the setting off,
+        // fullscreen up) it is never armed at all: both arming sites and this
+        // fire are gated on suppression.
         Timer {
                 id: openDelay
                 interval: 450
@@ -177,27 +296,77 @@ Scope {
                     // the wait (fullscreen started, sidebar opened by other
                     // means, screen locked).
                     //
-                    // On the NORMAL desktop this timer is the hover gesture
-                    // itself: it was armed by onContainsMouseChanged (or by the
-                    // mid-startup seed) and its fire is what opens the panel.
+                    // This timer IS the hover gesture: it was armed by
+                    // onContainsMouseChanged (or by the mid-startup seed) and
+                    // its fire is what opens the panel.
+                    //
                     // This used to read `if (!suppressed) return;`, which is
                     // inverted -- suppressed is false on a normal desktop, so
                     // every fire bailed and the hover gesture was dead: the
                     // edge strips existed, armed and expired in silence and no
-                    // sidebar ever came out. A fire under fullscreen cannot
-                    // happen (both arming sites are gated on !suppressed), and
-                    // is refused here rather than opening a panel over a video.
+                    // sidebar ever came out. Suppressed (the setting off,
+                    // fullscreen up) means the edge really is inert there, so
+                    // the fire is refused rather than opening a panel over a
+                    // video -- and neither arming site lets a fire get this far
+                    // in that state anyway.
                     if (edgeWindow.suppressed)
+                        return;
+                    // A close from this strip, while the pointer stayed on it,
+                    // is a decision -- see hoverLatched. The pointer has to
+                    // leave and come back before a hover may open the panel
+                    // again.
+                    if (edgeWindow.hoverLatched)
                         return;
                     if (GlobalStates.screenLocked)
                         return;
                     if (edgeWindow.sidebarAlreadyOpen)
                         return;
-                    edgeWindow.revealed = true;
-                    if (edgeWindow.isLeft)
-                        GlobalStates.sidebarLeftOpen = true;
-                    else
-                        GlobalStates.sidebarRightOpen = true;
+                    edgeWindow.openSidebar("hover");
+                }
+            }
+        }
+
+        // ── When does the latch end ──────────────────────────────────────
+        //
+        // The moment the pointer is no longer on the edge -- and that CANNOT be
+        // waited for as a leave event. A close from the panel's own edge sliver
+        // means the CARD had the pointer, so this strip never received an enter;
+        // with no enter there is no leave, and the latch would outlive the
+        // gesture that set it: the edge would stay dead until the pointer
+        // happened to cross the strip again.
+        //
+        // So it is asked for instead of assumed, and only while a latch exists
+        // (a hand's exit from a ten-pixel strip, never in the steady state).
+        // Same instrument, same interval, as the close poller below: this file
+        // already reads the cursor when the question cannot be answered by an
+        // event, and this is the same kind of question.
+        Timer {
+            id: latchPoller
+            interval: root.pointerPollInterval
+            repeat: true
+            running: edgeWindow.hoverLatched
+            onTriggered: latchProbe.running = true
+        }
+
+        Process {
+            id: latchProbe
+            command: ["hyprctl", "cursorpos"]
+            stdout: StdioCollector {
+                onStreamFinished: {
+                    const parts = text.trim().split(",");
+                    if (parts.length < 2)
+                        return;
+                    const x = Number(parts[0]);
+                    const screenWidth = edgeWindow.targetScreen?.width ?? 0;
+                    if (isNaN(x) || screenWidth <= 0)
+                        return;
+                    // Still on the edge: the dismissal stands. Off it: the next
+                    // visit hovers as it always did.
+                    const onEdge = edgeWindow.isLeft
+                        ? x <= root.stripWidth
+                        : x >= screenWidth - root.stripWidth;
+                    if (!onEdge)
+                        edgeWindow.setLatch(false);
                 }
             }
         }
@@ -262,7 +431,12 @@ Scope {
             // suppressing it too would make the edge look dead with no way to
             // discover the click. Screen lock still hides it: nothing should
             // invite interaction over the lock screen.
+            // Suppression now means the edge really is inert there, so the hint
+            // goes with it: an affordance that invites a click which opens
+            // nothing (or opens a panel that cannot be seen) is worse than a
+            // quiet edge.
             readonly property bool armed: edgeMouseArea.containsMouse
+                && !edgeWindow.suppressed
                 && !GlobalStates.screenLocked && !edgeWindow.sidebarAlreadyOpen
 
             // Plain positioning rather than anchors: conditional anchors (setting
@@ -576,15 +750,21 @@ Scope {
             readonly property bool fullscreenHere:
                 monitorScope.fullscreenClient || monitorScope.coverHere
 
+            // Suppression only means something when the sidebars are NOT
+            // allowed over fullscreen: see sidebarsOverFullscreen above. With
+            // the setting on, a fullscreen window changes nothing about the
+            // edges -- which is what "the sidebars are available over
+            // fullscreen" has to mean in practice, because these strips are the
+            // only way to open them while one is up.
             EdgePanelWindow {
                 targetScreen: monitorScope.modelData
                 isLeft: true
-                suppressed: monitorScope.fullscreenHere
+                suppressed: monitorScope.fullscreenHere && !root.sidebarsOverFullscreen
             }
             EdgePanelWindow {
                 targetScreen: monitorScope.modelData
                 isLeft: false
-                suppressed: monitorScope.fullscreenHere
+                suppressed: monitorScope.fullscreenHere && !root.sidebarsOverFullscreen
             }
             BottomEdgePanelWindow {
                 targetScreen: monitorScope.modelData

@@ -78,11 +78,13 @@ Rectangle {
                 // on a machine with no output device), and `Audio.sink.audio`
                 // threw "Cannot read property 'audio' of null" into the log on
                 // every login because of it.
-                value: Audio.sink?.audio?.volume ?? 0
-                onMoved: {
-                    if (Audio.sink?.audio)
-                        Audio.sink.audio.volume = value
-                }
+                //
+                // Read and written through the audio service's scale, so this
+                // slider spans 0..100% rather than 0..200% (the sink's raw value
+                // is a fraction of two) -- `setSinkVolume` is what applies the
+                // ratio, and it is the only thing here that touches the node.
+                value: Audio.currentVolume()
+                onMoved: Audio.setSinkVolume(value)
             }
         }
 

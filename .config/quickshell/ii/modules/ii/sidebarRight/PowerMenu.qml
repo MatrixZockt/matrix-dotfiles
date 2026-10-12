@@ -10,10 +10,12 @@
 //             every app and window and setting exactly where it was left. It is
 //             emphatically NOT a logout: nothing is closed, nothing is killed,
 //             and waking it brings the same session back. Its sub-label names
-//             the mechanism that will actually be used -- "Suspend" or
-//             "Hibernate" -- read from systemd-logind rather than assumed,
-//             because the honest answer differs per machine and a menu that
-//             promises hibernate on a machine that cannot hibernate is a lie.
+//             the mechanism, which is the machine's one sleep and the same one
+//             closing the lid performs: a logind suspend. The label used to be
+//             read from logind's capability probe ("Suspend" or "Hibernate"),
+//             which could name a hibernate that the lid never does -- one
+//             action, two behaviours, on the same machine. See
+//             Session.suspend(), which is now the only sleep in the shell.
 //   Restart   Ends the session.
 //   Power off Ends the session, and the machine with it.
 //
@@ -30,7 +32,6 @@
 import QtQuick
 import QtQuick.Layouts
 import Quickshell
-import Quickshell.Io
 import qs
 import qs.services
 import qs.modules.common
@@ -54,41 +55,17 @@ PopupWindow {
     // that takes the question back if you change your mind and do nothing.
     property string confirmingKey: ""
 
-    // "hibernate" or "suspend", probed from logind rather than guessed.
-    // Empty until the probe answers, which is why the Sleep row falls back to a
-    // generic wording instead of showing a blank.
-    property string sleepMode: ""
-
-    readonly property string sleepModeLabel: root.sleepMode === "hibernate"
-        ? Translation.tr("Hibernate")
-        : (root.sleepMode === "suspend" ? Translation.tr("Suspend") : "")
-
     Timer {
         id: confirmTimeout
         interval: 4000
         onTriggered: root.confirmingKey = ""
     }
 
-    // Re-probed each time the menu opens rather than cached for the life of
-    // the shell: the answer can change (a swapfile added, `resume=` set on the
-    // kernel command line), and Sleep is the one row here whose real behaviour
-    // depends on it.
-    Process {
-        id: modeProbe
-        command: ["bash", Quickshell.shellPath("scripts/session/sleep.sh"), "--mode"]
-        stdout: SplitParser {
-            onRead: data => {
-                const mode = data.trim();
-                if (mode === "hibernate" || mode === "suspend")
-                    root.sleepMode = mode;
-            }
-        }
-    }
-
     onVisibleChanged: {
-        if (root.visible) {
-            modeProbe.running = true;
-        } else {
+        // There is nothing to probe on open any more: Sleep is not a capability
+        // that has to be discovered (see the row below), so opening the menu is
+        // a pure display event again.
+        if (!root.visible) {
             // Every path that hides this menu has to drop the flag, not just
             // close(): if it were left set, the sidebar would never close on
             // pointer-out again for the rest of the session.
@@ -151,8 +128,11 @@ PopupWindow {
             // asked "are you sure?" before a five-second round trip back would
             // be the most annoying row in the menu.
             danger: false,
-            subtitle: root.sleepModeLabel,
-            run: () => Session.sleep()
+            // Named rather than probed: the mechanism is a logind suspend, the
+            // same sleep the lid performs. There is no second candidate left to
+            // ask logind about -- see Session.suspend().
+            subtitle: Translation.tr("Suspend"),
+            run: () => Session.suspend()
         },
         {
             key: "reboot",

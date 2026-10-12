@@ -86,8 +86,22 @@ Singleton {
     property bool online: false
     // Set between "asked it to start" and "answered". Distinct from `online`
     // so the UI can say "loading" instead of lying with a zeroed gauge.
+    //
+    // It SURVIVES a failed health check, and that is the whole point of it: a
+    // refused connection is the normal state for the entire boot, because
+    // llama.cpp binds its port only after the weights are in VRAM (see poll()).
     property bool loading: false
-    property int loadStartedMs: 0
+    // When the current start was asked for, and how long it may go unanswered.
+    //
+    // `real`, NOT `int`: Date.now() is ~1.7e12 and QML's int is 32-bit, so an
+    // int here would hold a wrapped, meaningless number and the deadline below
+    // would fire instantly or never. GlobalStates.loadingWaitStartedAt is a
+    // `real` for exactly this reason.
+    property real loadStartedMs: 0
+    // The unit's own TimeoutStartSec is 300 ("give the model time to load
+    // (it's ~5GB)"), so this matches the limit systemd already applies to this
+    // start instead of inventing a second opinion about it.
+    readonly property real loadDeadlineMs: 300000
     property string lastError: ""
 
     // ── model identity (GET /props) ──────────────────────────────────────
@@ -622,7 +636,32 @@ Singleton {
             }
         }, () => {
             root.online = false;
-            root.loading = false;
+            // A FAILED HEALTH CHECK IS NOT A FAILED START, and this line used
+            // to treat it as one (`root.loading = false;`). llama.cpp prints
+            // "listening on http://..." only once the model is loaded, so
+            // every poll between `systemctl start` and "model loaded" gets a
+            // refused connection -- and the first of them lands within a
+            // fraction of a second, because startSystemdProc polls as soon as
+            // systemctl returns. The flag was therefore cancelled about a
+            // second into a boot that takes ~4s for the local 8B and minutes
+            // for anything bigger (measured 2026-10-11: process start
+            // 10:39:18, "listening" 10:39:22), so both the island and the
+            // popup read "stopped" while 7.5GB was going into VRAM. The press
+            // that state invites is a second Run on a server that is already
+            // coming up -- which `toggle()` then answers with a STOP.
+            //
+            // A start that genuinely never answers must still stop claiming to
+            // be one, so the deadline ends it. Only the deadline does: a stop
+            // clears the flag itself, and so does a systemctl start that
+            // reports FAIL.
+            if (root.loading && root.loadStartedMs > 0
+                    && Date.now() - root.loadStartedMs > root.loadDeadlineMs) {
+                const waited = Math.round(root.loadDeadlineMs / 1000);
+                root.loading = false;
+                root.lastError = Translation.tr("llama-server did not answer within %1s")
+                    .arg(waited);
+                root._appendLog(`timeout  no /health after ${waited}s -- giving up`);
+            }
             root.slots = [];
             root.genTokensPerSec = 0;
             root.promptTokensPerSec = 0;
@@ -854,6 +893,7 @@ Singleton {
         root.busy = true;
         root.lastError = "";
         root.loading = true;
+        root.loadStartedMs = Date.now();
         root.slots = [];
         root.genTokensPerSec = 0;
         root.promptTokensPerSec = 0;
@@ -905,7 +945,25 @@ Singleton {
     Process {
         id: startSystemdProc
         stdout: StdioCollector {
-            onStreamFinished: (text) => {
+            // NO HANDLER PARAMETER, and this is the bug that hid every start.
+            //
+            // `streamFinished` carries no arguments (see Quickshell.Io's type
+            // info: the signal is declared bare). `onStreamFinished: (text) =>
+            // ...` therefore bound `text` to undefined and SHADOWED the
+            // collector's own `text` property, so the comparison below was
+            // `"" === "OK"` -- always false. Every start was reported as
+            // "systemd: failed to start llama-server-local" the instant
+            // systemctl returned, roughly 70ms into a boot that takes 2.5-4s
+            // (measured 2026-10-11: the verdict lands at 71ms, /health answers
+            // at 2.5s), and that false verdict cleared `loading` before the
+            // first health poll had even run. Nothing downstream could ever
+            // show "starting…": the island's second line was blank and the
+            // popup's offline pane read "stopped" while the weights loaded.
+            //
+            // Reading the property is what the rest of this file already does
+            // in a handler block (the uptime and model-list collectors above
+            // both use a bare `text`).
+            onStreamFinished: {
                 root.busy = false;
                 const ok = (text ?? "").trim() === "OK";
                 if (ok) {
@@ -925,7 +983,10 @@ Singleton {
     Process {
         id: stopSystemdProc
         stdout: StdioCollector {
-            onStreamFinished: (text) => {
+            // Same bare handler as startSystemdProc -- this one never read
+            // `text`, but the parameter alone is the trap that was copied
+            // there from it, so it goes too.
+            onStreamFinished: {
                 root.busy = false;
                 root._appendLog("systemd: stopped llama-server-local");
                 root.online = false;

@@ -34,12 +34,25 @@ key="${1:-}"
 # The shell's IPC socket. `call` answers on stdout and exits non-zero when the
 # target is not there, which is the only way this can fail: the shell is
 # either up (it answers) or not (nothing to show a task manager in anyway).
-if qs -c "$shell" ipc call taskManager open "$key" >/dev/null 2>&1; then
+#
+# The socket's own answer is kept, because it is the whole reason a failure can
+# give: "Couldn't open the task manager" with no cause is a dead end, while the
+# socket answering "target taskManager not found" or "connection refused" is the
+# thing to act on.
+ipc_out="$(qs -c "$shell" ipc call taskManager open "$key" 2>&1)"
+ipc_status=$?
+if [ "$ipc_status" -eq 0 ]; then
     # Let the shell's "starting" card go if something raised one (the
     # launcher entry does). Harmless when nothing did.
     qs -c "$shell" ipc call loading dismiss >/dev/null 2>&1
     exit 0
 fi
 
-qs -c "$shell" ipc call loading fail "Couldn't open the task manager" >/dev/null 2>&1
+detail="$(printf '%s\n' "$ipc_out" | tr -d '\r' \
+    | grep -v '^[[:space:]]*$' | head -n 1 | cut -c1-140)"
+if [ -n "$detail" ]; then
+    qs -c "$shell" ipc call loading fail "Couldn't open the task manager (${detail})" >/dev/null 2>&1
+else
+    qs -c "$shell" ipc call loading fail "Couldn't open the task manager (the shell is not answering its IPC)" >/dev/null 2>&1
+fi
 exit 1

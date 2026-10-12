@@ -38,6 +38,17 @@ Item {
     property string caption: ""
     property real load: -1
     property var history: []
+    // How many of `history`'s newest samples the chart draws (0 = all of
+    // them).
+    //
+    // A series sampled faster than the processor's covers less TIME per sample,
+    // so a chart of it has to show fewer of them to span a comparable window --
+    // the same reason the caller picks the slice rather than the widget. See
+    // SystemNow.gpuWindowPoints, whose value the GPU gauge passes here: the
+    // full 60-sample history is fifteen seconds at four ticks a second, and a
+    // graph that paints all fifteen only reads as a plateau long after the
+    // number above it has already moved.
+    property int points: 0
     property color accent: Appearance.colors.colPrimary
     property bool compact: false
     // `dense` is the middle size: the same instrument as the full tile, with
@@ -114,7 +125,7 @@ Item {
             }
             height: Math.round(parent.height * (root.dense ? 0.3 : 0.38))
             values: root.history ?? []
-            points: ResourceUsage.historyLength
+            points: root.points > 0 ? root.points : ResourceUsage.historyLength
             alignment: Graph.Alignment.Right
             color: root.accent
             fillOpacity: 0.24

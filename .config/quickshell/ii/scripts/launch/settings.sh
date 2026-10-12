@@ -135,16 +135,41 @@ fi
 # Nothing is listening: start it. Detached, so it outlives a shell reload, and on
 # the page that was asked for -- the app reads these two as its opening position
 # (services/SettingsNav.qml).
+#
+# Its output goes to a log rather than to the void, because a launch that fails
+# has to be able to say WHY. "Couldn't open the settings app" on its own leaves
+# the user with nothing to act on, while the app's own last line -- a QML type
+# that would not resolve, a page that threw on load, "cannot open display" -- is
+# the actual answer. Truncated per launch, so what the card quotes is from THIS
+# run and not the one before it.
+applog="${XDG_RUNTIME_DIR:-/tmp}/ii-${shell}-settings-app.log"
+: >"$applog" 2>/dev/null || applog="/dev/null"
+
 setsid env QS_SETTINGS_PAGE="$page" QS_SETTINGS_SECTION="$section" \
-    qs -p "$qml_path" >/dev/null 2>&1 &
+    qs -p "$qml_path" >"$applog" 2>&1 &
 
 # Then wait for it to answer, because a window the compositor is still placing
 # is not something the shell notices on its own, and a launch that never
-# arrives would otherwise leave a click that did nothing at all. Up in well
-# under a second normally; twelve is the honest "something is wrong" line.
-for _ in $(seq 1 120); do
+# arrives would otherwise leave a click that did nothing at all.
+#
+# The wait ends one of three ways, and only one of them is a failure:
+#
+#   * it answers                     -- opened (up in well under a second here)
+#   * the process is GONE            -- it is not coming, and the log says why
+#   * still alive after a full minute -- wedged, and that is the reason
+#
+# It used to end after twelve seconds flat and call the app broken, which is the
+# "sometimes apps can't be opened" report: this app is a whole second Quickshell
+# instance, and on a loaded machine it can still be loading at twelve seconds --
+# at which point the script reported a failure and the app appeared a moment
+# later anyway. A process that is alive is a launch in progress, so the clock
+# here is only ever about a process that has stopped making progress.
+seen_pid=""
+deadline=$((SECONDS + 60))
+while [ "$SECONDS" -lt "$deadline" ]; do
     sleep 0.1
     pid="$(settings_pid)"
+    [ -n "$pid" ] && seen_pid="$pid"
     if listening "$pid"; then
         answer
         if [ -n "$page" ]; then
@@ -152,7 +177,19 @@ for _ in $(seq 1 120); do
         fi
         exit 0
     fi
+    # A process that APPEARED and then went away is the failure; "no pid yet"
+    # is not one (qs takes a moment to reach the process table).
+    if [ -n "$seen_pid" ] && [ -z "$pid" ]; then
+        sleep 0.3          # let the app's final line reach the log
+        break
+    fi
 done
 
-qs -c "$shell" ipc call loading fail "Couldn't open the settings app" >/dev/null 2>&1
+reason="$(tail -n 5 "$applog" 2>/dev/null | tr -d '\r' \
+    | grep -v '^[[:space:]]*$' | tail -n 1 | cut -c1-140)"
+if [ -n "$reason" ]; then
+    qs -c "$shell" ipc call loading fail "Couldn't open the settings app (exited: ${reason})" >/dev/null 2>&1
+    exit 1
+fi
+qs -c "$shell" ipc call loading fail "Couldn't open the settings app (no answer in 60s)" >/dev/null 2>&1
 exit 1

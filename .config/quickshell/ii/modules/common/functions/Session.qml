@@ -1,12 +1,10 @@
 pragma Singleton
 import Quickshell
-// `qs` is the config root, and it is where GlobalStates lives -- referenced by
-// sleep() below. Imported explicitly rather than assumed to be injected into
-// every file's scope: this is the only file in modules/common/functions/ that
-// names GlobalStates, so nothing else here would have proved the dependency,
-// and a missing name only fails when the function is first called -- which for
-// sleep() is a button the user is reaching for at the end of the day.
-import qs
+// Imports are spelled out rather than assumed to be injected into every file's
+// scope: a missing name only fails when the function that uses it is first
+// called, and the functions here are reached for at the end of a day -- log
+// out, shut down -- which is a bad moment to discover one. (`import qs`, the
+// config root, was here for sleep()'s in-process lock; see suspend() below.)
 import qs.services
 import qs.modules.common
 
@@ -36,20 +34,31 @@ Singleton {
     // exactly where it was left. Deliberately NOT a logout -- nothing is closed
     // and nothing is killed, which is the whole point of it.
     //
-    // The lock comes first and in-process, so it is up before the machine goes
-    // anywhere: the shell's own lock screen (the same one SUPER+L raises, via
-    // the same `screenLocked` flag) rather than spawning a second, separate
-    // hyprlock on top of it. The ordering matters -- once the script has asked
-    // for the sleep there is no guarantee another line of QML would ever run.
+    // ONE call, and it is the same one logind performs when the lid closes
+    // (`HandleLidSwitch=suspend`, /etc/systemd/logind.conf.d/50-lid-power.conf,
+    // and the same call the power button is mapped to). Nothing of our own is
+    // added on top, and that is the point rather than an omission: this used to
+    // raise the lock in-process, blank the panel and prefer hibernate, and each
+    // of those three made sleeping from the menu DIFFERENT from closing the
+    // lid:
     //
-    // The script decides hibernate-vs-suspend by asking systemd-logind what this
-    // machine can actually do, and blanks the panel with Hyprland's DPMS
-    // dispatcher before the sleep starts. See scripts/session/sleep.sh.
-    function sleep() {
-        GlobalStates.screenLocked = true;
-        Quickshell.execDetached(["bash", Quickshell.shellPath("scripts/session/sleep.sh")]);
-    }
-
+    //   * the pre-lock painted the login screen on a LIT panel -- exactly what
+    //     before-sleep.sh's ordering exists to avoid, because the hook raises
+    //     the lock behind an already-dark panel so the prompt is only ever met
+    //     on the way back;
+    //   * blanking the panel first cut off "Going to sleep" before it could be
+    //     read, so a laptop that was leaving looked identical to one that had
+    //     died -- the one question that label exists to answer;
+    //   * hibernate was chosen from logind's capability probe, but the lid only
+    //     ever suspends, so the two "Sleep"s could do different things on one
+    //     machine.
+    //
+    // What is left is what was always shared: logind performs the sleep, and
+    // hypridle's before_sleep_cmd / after_sleep_cmd (custom/scripts/
+    // before-sleep.sh and after-resume.sh) do the notice, the panel, the lock
+    // and the wake. hypridle gates EVERY suspend -- it holds a delay inhibitor
+    // and acts on logind's PrepareForSleep -- so this is not a hope about this
+    // call site: it is the same path the lid and the power button take.
     function suspend() {
         Quickshell.execDetached(["bash", "-c", "systemctl suspend || loginctl suspend"]);
     }

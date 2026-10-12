@@ -5,7 +5,7 @@ import QtQuick.Controls
 import Quickshell
 import Quickshell.Hyprland
 import Quickshell.Wayland
-import Quickshell.Services.Mpris
+import Quickshell.Services.Mpris as MprisSvc
 import Quickshell.Io
 // For PowerProfiles + the PowerProfile enum: the three-button power-mode row
 // in the System tab writes PPD profiles directly (same live handle the quick
@@ -54,6 +54,27 @@ Scope {
     property Item anchorItem: null
 
     readonly property bool open: GlobalStates.nowBarPanelOpen
+
+    // ── The System tab's sampler claim ───────────────────────────────────
+    // The disk and network rows read HardwareStats, which samples only while
+    // somebody is looking, so the card has to say when it is. The claim is held
+    // by NAME and for exactly as long as the tab is the one on screen (see
+    // HardwareStats.setActive), which is what stops this card and the overlay's
+    // resource widget from switching each other's sampling off -- the failure a
+    // shared boolean made unavoidable once there was more than one reader.
+    readonly property bool systemSampling: root.open && root.mode === root.modePerf
+    function syncSampling() {
+        HardwareStats.setActive("nowBarSystem", root.systemSampling);
+    }
+    // The change handler alone is not enough: it does not run for the value a
+    // property is BORN with, so a card that is already open on the System tab
+    // when the shell loads (every reload of this file, and every session that
+    // restores the panel) would never register its claim -- the rows would sit
+    // at "0 B/s" until the user happened to switch tabs and come back. The
+    // registration therefore also happens at startup, from the SINGLE
+    // Component.onCompleted this object is allowed to have (see below: a second
+    // one is a hard load failure), which is the same pair Resources.qml keeps.
+    onSystemSamplingChanged: root.syncSampling()
 
     readonly property var fallbackScreen: Quickshell.screens.length > 0 ? Quickshell.screens[0] : null
     property var cardScreen: null
@@ -129,6 +150,12 @@ Scope {
             root.lastPlayingPath = root.playingPath;
         }
         root.publishPanelState();
+        // The hardware sampler's claim, for a card that is born open on the
+        // System tab. Same reason as the seeding above: the change handler is
+        // not called for an initial value, and this object gets exactly one
+        // Component.onCompleted -- which is why this call lives HERE rather
+        // than next to the property it guards.
+        root.syncSampling();
     }
     readonly property real k: Math.max(0, Math.min(1, root.t))
     function lerp(a, b, kk) { return a + (b - a) * kk; }
@@ -340,10 +367,23 @@ Scope {
     // the IPC handler's functions are NOT properties of `root` -- calling
     // `root.powerMode()` from `setPowerMode` threw "Property 'powerMode' ... is
     // not a function" on every press.
+    //
+    // It also reports the NOTICE's record (PowerMode.lastChange and its
+    // counter), which is what the mode-switch card prints. That record lives in
+    // the power service, and the service cannot carry an IpcHandler of its own
+    // -- adding one there failed the whole singleton at load ("IpcHandler is
+    // not a type") and took every service importing it down with it. The panel
+    // already has a working handler, and the buttons that drive a switch live
+    // here, so the probe belongs here anyway.
     function powerModeText() {
+        const c = PowerMode.lastChange;
+        const last = c
+            ? `${c.from}->${c.to} profileBefore=${c.profileBefore}`
+            : "none";
         return `mode=${PowerMode.modeFor(PowerProfiles.profile)} `
              + `config=${Config.options?.battery?.powerMode ?? "?"} `
-             + `perfAvailable=${PowerProfiles.hasPerformanceProfile}`;
+             + `perfAvailable=${PowerProfiles.hasPerformanceProfile}`
+             + ` armed=${PowerMode.armed} seq=${PowerMode.changeSeq} last=${last}`;
     }
     function applyMode(p) {
         if (root.modeApplying)
@@ -483,14 +523,6 @@ Scope {
         Behavior on scale { animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(pfv) }
     }
 
-    // Root NVMe carrying "/", abbreviated: "1024 GB SAMSUNG MZVL2".
-    function rootStorageString() {
-        const d = (SystemFacts.disks ?? []).find(d => (d.mounts ?? []).includes("/"));
-        if (!d) return Translation.tr("—");
-        const gb = (d.size ?? 0) / (1024 * 1024 * 1024);
-        return (gb >= 100 ? Math.round(gb) : gb.toFixed(0)) + " GB " + (d.model ?? "").split(" ").slice(0, 2).join(" ");
-    }
-
     // ── Horizontal swipe over the PANEL: one gesture, one implementation ──
     //
     // These live on the Scope, not on the MouseArea, because the handler is
@@ -505,6 +537,15 @@ Scope {
     // gesture used to work only in the strip of empty panel above the card and
     // nowhere else. The fix is not to move the card (that would steal the
     // card's own clicks) but to give the card the same handler.
+    // The scroller the view on screen wants a two-finger vertical gesture to
+    // drive, published by the VIEW itself (see TradingTab.publishScrollTarget)
+    // and null when that view is not showing. The card's swipe overlay is the
+    // only item that ever sees a wheel over the card -- Qt delivers to the item
+    // under the cursor and then walks its PARENT chain, never a sibling -- so a
+    // scroller inside a view is unreachable unless the view hands it over.
+    // The music tracklist stays the fallback below (it has no claim to make:
+    // it is the card's default scroller), and its own `visible` still gates it.
+    property var cardScrollTarget: null
     property real panelAccX: 0
     property real panelAccY: 0
     property bool panelSwipeHorizontal: false
@@ -609,6 +650,28 @@ Scope {
     // even name it (it reads "90:00", which is indistinguishable from an
     // hour and a half and from a typo).
     property bool timerEditing: false
+
+    // ── How the card last went away, and when ──────────────────────────
+    //
+    // The card has five ways out (a press on the veil, Escape, the close
+    // shortcut, a press that the compositor's grab reads as "outside", and a
+    // desktop switch) and from the outside they are indistinguishable: a card
+    // that will not close looks the same whichever one is broken. So the one
+    // that fired is recorded here and reported by `state()`, which is the
+    // difference between "Escape does nothing" being a guess and being a
+    // reading.
+    property string lastClose: ""
+    property double lastCloseAt: 0
+    function noteClose(reason) {
+        root.lastClose = String(reason ?? "");
+        root.lastCloseAt = Date.now();
+    }
+    // Whether the press reached the veil at all, and where. "A press outside
+    // does nothing" and "the press never arrived" are the same screenshot and
+    // two completely different bugs -- one is this file, the other is the
+    // compositor's delivery -- so the veil counts what actually lands on it.
+    property int veilPresses: 0
+    property var veilPressPos: null
 
     // The countdown you READ. The formatter itself is DateTime.duration --
     // the same one the island's clock view uses, so a 90 minute timer cannot
@@ -738,7 +801,46 @@ Scope {
     IpcHandler {
         target: "nowbarPanel"
         function open(): void { GlobalStates.nowBarPanelOpen = true; }
-        function close(): void { GlobalStates.nowBarPanelOpen = false; }
+        function close(): void { root.close("ipc"); }
+
+        // What the card is doing right now, and how it last went away. The
+        // dismissal paths are indistinguishable from outside the shell -- a
+        // card that will not close looks the same whichever one is broken -- so
+        // this reports them rather than leaving them to be argued about:
+        //
+        //   qs -c ii ipc call nowbarPanel state
+        function state(): string {
+            return JSON.stringify({
+                open: root.open,
+                visible: panel.visible,
+                // The surface's real geometry. It is the ONE number that decides
+                // whether "a press outside the card" includes the bar strip, so
+                // it is read back rather than assumed from the anchors.
+                panelX: panel.x, panelY: panel.y, panelW: panel.width, panelH: panel.height,
+                // Where the veil and the card actually ARE. The veil is the only
+                // thing that dismisses on a press, so a "click outside does
+                // nothing" report is really a question about these two rects --
+                // and a veil that is a fraction of the surface, or a card larger
+                // than it looks, is invisible in the source and obvious here.
+                veil: (() => {
+                    const p = panelSwipeArea.mapToItem(null, 0, 0);
+                    return [Math.round(p.x), Math.round(p.y),
+                            Math.round(panelSwipeArea.width), Math.round(panelSwipeArea.height)];
+                })(),
+                card: (() => {
+                    const p = card.mapToItem(null, 0, 0);
+                    return [Math.round(p.x), Math.round(p.y),
+                            Math.round(card.width), Math.round(card.height)];
+                })(),
+                t: Math.round(root.t * 100) / 100,
+                mode: root.mode,
+                timerEditing: root.timerEditing,
+                veilPresses: root.veilPresses,
+                veilPressPos: root.veilPressPos,
+                lastClose: root.lastClose,
+                lastCloseAgo: root.lastCloseAt > 0 ? Date.now() - root.lastCloseAt : null
+            });
+        }
         function toggle(): void { GlobalStates.nowBarPanelOpen = !GlobalStates.nowBarPanelOpen; }
         function setMode(m: int): void { root.setMode(m); }
 
@@ -947,6 +1049,23 @@ Scope {
         tAnim.to = root.open ? 1 : 0;
         tAnim.start();
 
+        // ── An interval edit does not outlive the card it was opened in ──
+        //
+        // Here rather than in `close()`, because this is the one place every
+        // close passes through -- including a caller that assigns
+        // GlobalStates.nowBarPanelOpen directly -- and a flag that survives a
+        // close is the reason Escape could do nothing at all on the next press:
+        // the window's Shortcut was disabled while `timerEditing` was set, and
+        // the item catcher answered by cancelling an edit with no editor on
+        // screen, so the key was spent on a state the user could not see.
+        //
+        // Cancelled, not committed: closing the card is not "I finished
+        // typing" (the editor's own Escape cancels too, and the card is
+        // click-away), and cancelling is what hands focus back to the card's
+        // key catcher.
+        if (!root.open && root.timerEditing)
+            root.cancelTimerEdit();
+
         if (root.open) {
             const screen = root.anchorItem ? root.anchorItem.QsWindow?.window?.screen : null;
             root.cardScreen = screen ?? root.fallbackScreen;
@@ -959,8 +1078,14 @@ Scope {
         }
     }
     // A claim release, not a blind clear: a rebuilt panel must not switch the
-    // meter off for the panel that replaced it. See AudioVisualizer.
-    Component.onDestruction: AudioVisualizer.releasePanel(root)
+    // meter off for the panel that replaced it. See AudioVisualizer. The
+    // hardware sampler's claim is released on the way out for the same reason
+    // and one more: a reload that rebuilds this card must not leave a claim
+    // behind that keeps HardwareStats reading files for a tab nobody can see.
+    Component.onDestruction: {
+        AudioVisualizer.releasePanel(root)
+        HardwareStats.setActive("nowBarSystem", false)
+    }
     // Tab changes count too: the card is open either way, and a `cava` that
     // nobody is drawing from is just a wakeup per frame.
     //
@@ -977,7 +1102,35 @@ Scope {
         else
             AudioVisualizer.releasePanel(root);
     }
-    function close() { GlobalStates.nowBarPanelOpen = false; }
+
+    // Escape, in one place, in the order the key is scoped: the interval
+    // editor first, then a ringing alarm, and only then the card itself. The
+    // window's `Shortcut` and the item catcher at the bottom of the card both
+    // call this, so the two cannot drift apart -- they used to hold their own
+    // copies of the same three branches, and the window's copy was the one that
+    // could be disabled.
+    function escaped() {
+        if (root.timerEditing) {
+            root.cancelTimerEdit();
+            return;
+        }
+        if (TimerService.alarmActive) {
+            TimerService.stopAlarm();
+            return;
+        }
+        root.close("escape");
+    }
+
+    function close(reason) {
+        // `reason` is optional so the many existing callers keep working; the
+        // ones that ARE a dismissal path name themselves, and the rest report
+        // as a plain close. What happens to an open interval edit when the card
+        // goes away is NOT here -- it is in `onOpenChanged`, which catches the
+        // close no matter which of the five paths caused it, including a caller
+        // that assigns the global directly.
+        root.noteClose(reason ?? "close");
+        GlobalStates.nowBarPanelOpen = false;
+    }
 
     // ── Nothing inside the music tab closes this card ───────────────────
     //
@@ -1068,7 +1221,7 @@ Scope {
                 return;
             }
             root.lastWorkspaceId = id;
-            root.close();
+            root.close("desktop switch");
         }
     }
 
@@ -1131,7 +1284,7 @@ Scope {
     GlobalShortcut {
         name: "nowbarPanelClose"
         description: "Puts the now bar's panel away"
-        onPressed: root.close()
+        onPressed: root.close("close shortcut")
     }
 
     // Outside press. GlobalFocusGrab is the shell's one shared compositor
@@ -1139,7 +1292,7 @@ Scope {
     Connections {
         target: GlobalFocusGrab
         function onDismissed() {
-            if (root.open) root.close();
+            if (root.open) root.close("outside press");
         }
     }
 
@@ -1150,11 +1303,56 @@ Scope {
         // Kept mapped through the closing animation, then released.
         visible: root.open || root.t > 0.01
         color: "transparent"
-        exclusiveZone: 0
+        // ── The whole screen, bar strip included ────────────────────────
+        //
+        // -1, not 0: the surface ignores every other surface's exclusive zone,
+        // so it is the OUTPUT's size rather than the output minus the bar. That
+        // one number is the difference between "a press outside the card closes
+        // it" and "a press on the top 45px does nothing".
+        //
+        // With `0` the bar's own reservation (Appearance.sizes.baseBarHeight +
+        // the outer gaps) pushed this surface down to y=45, and the strip above
+        // it belonged to the BAR -- a different surface, and a window the focus
+        // grab below deliberately keeps as a grab member. So a press there was
+        // input inside a grabbing window, which is exactly the case the shared
+        // grab never dismisses on, and the bar's background swallowed it. The
+        // comment at the top of this file promises the card "closes when you
+        // press anywhere outside it ... 'outside' means the whole desktop, not
+        // just the card's edges" -- this is what makes that true rather than
+        // nearly true.
+        //
+        // -1 and NOT a negative margin or a hand-set height: the anchors below
+        // already say top/bottom/left/right, and this is the only thing that
+        // was overriding them. Nothing is reserved for anybody either way
+        // (`exclusionMode: Ignore` stays), so the bar keeps its strip while the
+        // card is shut -- the panel is unmapped then, and a layer surface that
+        // is not on screen is not in anyone's way.
+        exclusiveZone: -1
         exclusionMode: ExclusionMode.Ignore
         WlrLayershell.namespace: "quickshell:barPanel"
         WlrLayershell.layer: WlrLayer.Overlay
         WlrLayershell.keyboardFocus: root.open ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
+
+        // Escape puts the card away, and it is answered from the WINDOW rather
+        // than from whatever happens to be focused inside it: the surface holds
+        // the keyboard exclusively while it is open, so an Escape that no item
+        // consumes is an Escape that looks dead.
+        //
+        // It is enabled for as long as the card is open, and the SCOPING moved
+        // into the handler. It used to be `enabled: root.open && !root.timerEditing`,
+        // which made the timer editor a way for this key to do nothing at all:
+        // an edit left open when the card closed (press the digits, then press
+        // the veil) kept `timerEditing` true across the close, so on the next
+        // open the only Escape handler on the surface was DISABLED and the item
+        // catcher below answered by cancelling an edit nobody could see -- one
+        // press that looks exactly like a dead key. `root.escaped()` keeps the
+        // same order of answers (edit, then alarm, then the card) with no state
+        // in which the key is unrouted.
+        Shortcut {
+            sequence: "Escape"
+            enabled: root.open
+            onActivated: root.escaped()
+        }
 
         anchors {
             top: true
@@ -1168,13 +1366,7 @@ Scope {
             else GlobalFocusGrab.removeDismissable(panel);
         }
 
-        // Any press that is not on the card closes the panel. The card is
-        // declared AFTER this, so it sits on top and keeps its own clicks.
-        MouseArea {
-            anchors.fill: parent
-            acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
-            onPressed: root.close()
-        }
+
 
         // Horizontal swipe over the panel's empty space (and over the card --
         // the card's own area does not accept wheel either, so the event
@@ -1192,14 +1384,50 @@ Scope {
         // crossing fires ONE step, and the accumulator resets 180ms after
         // the fingers stop -- one gesture = one view, both finger counts,
         // the same feel as over the island itself.
+        // The catcher: the wheel belongs to the view, and a LEFT PRESS on the
+        // empty space -- the veil around the card -- puts the card away. It
+        // used to accept no buttons at all and lean on the compositor grab for
+        // dismissal, but a press that lands on this surface is a press INSIDE
+        // the grabbing window, so Hyprland never dismissed the grab and the
+        // veil swallowed the press: clicking away from the card did nothing,
+        // and the only exits were the chevron and the island. The card is drawn
+        // on top, so a click on it never reaches this handler. (The app search
+        // menu closes the same way.)
+        //
+        // PRESS, not click -- every other popup in this shell dismisses on
+        // `onPressed` (see BarAnchoredPanel), and this one waited for the
+        // RELEASE. That is one extra thing that has to go right before the card
+        // goes away, and it is the half that goes wrong: the press is also the
+        // moment the compositor hands the keyboard to the surface, and a press
+        // spent on that is a press with no matching release to complete a
+        // click. On press there is nothing to complete and nothing to lose.
         MouseArea {
             id: panelSwipeArea
             anchors.fill: parent
-            acceptedButtons: Qt.NoButton
+            acceptedButtons: Qt.LeftButton
             onWheel: wheel => root.handlePanelWheel(wheel)
+            onPressed: mouse => {
+                root.veilPresses++;
+                root.veilPressPos = [Math.round(mouse.x), Math.round(mouse.y)];
+                root.close("veil press");
+            }
+
+            // ── Focus restoration ───────────────────────────────────────────
+            // Reload the album art (and anything else bound to a transient
+            // external snapshot) when the window regains focus, so the card
+            // stays fresh on alt-tab return without churning the art on every
+            // move event.
+            //
+            // These three live INSIDE the MouseArea on purpose: they are
+            // Item properties, and the panel window they used to be stranded
+            // on has no `focus` at all -- which is why the load failed with
+            // "Cannot assign to non-existent property onFocusChanged".
+            focusPolicy: Qt.NoFocus
+            focus: true
+            onFocusChanged: if (focus) root.refreshArtIfStale()
         }
 
-        // ── The card ─────────────────────────────────────────────────────
+            // ── The card ─────────────────────────────────────────────────────
         // Full size at dead centre from the first frame; the open/close
         // motion is a scale around its own middle, so it blooms out of the
         // centre of the screen instead of stretching from a corner.
@@ -1333,7 +1561,7 @@ Scope {
                         implicitWidth: 24
                         implicitHeight: 24
                         colRipple: Appearance.colors.colLayer1Hover
-                        onClicked: root.close()
+                        onClicked: root.close("chevron")
                         MaterialSymbol {
                             anchors.centerIn: parent
                             text: "keyboard_arrow_up"
@@ -1420,6 +1648,10 @@ Scope {
                         TradingTab {
                             anchors.fill: parent
                             active: root.mode === root.modeTrading && root.open
+                            // The view publishes the scroller its two-finger
+                            // swipe should drive. Handed down because an id in
+                            // another file is not reachable from here.
+                            cardHost: root
                         }
                     }
 
@@ -1633,6 +1865,26 @@ Scope {
                                         Layout.alignment: Qt.AlignVCenter
                                         spacing: 8
 
+                                        // Shuffle/loop, Spotify-style, on the same
+                                        // row as the transport they modify. Lit ring
+                                        // + filled glyph while engaged; they route
+                                        // through MPRIS (the bridge maps LoopStatus
+                                        // onto loop-playlist, matching the daemon
+                                        // default), so the app, sidebar, bar and
+                                        // any MPRIS client all agree.
+                                        TransportMark {
+                                            id: panelShuffle
+                                            objectName: "panelShuffleMark"
+                                            Layout.alignment: Qt.AlignVCenter
+                                            glyph: "shuffle"
+                                            enabled: root.seekable
+                                            modeOn: MprisController.hasShuffle
+                                            onTriggered: () => {
+                                                const p = MprisController.shownPlayer;
+                                                if (p) p.shuffle = !p.shuffle;
+                                            }
+                                        }
+
                                         TransportMark {
                                             id: panelSkipPrev
                                             objectName: "panelSkipPrevMark"
@@ -1678,6 +1930,26 @@ Scope {
                                             glyph: "skip_next"
                                             enabled: root.seekable
                                             onTriggered: () => MprisController.shownPlayer?.next()
+                                        }
+
+                                        // Loop: cycles None -> Playlist -> None
+                                        // (repeat-one/"Track" also accepted by the
+                                        // bridge). Same lit-if-engaged grammar.
+                                        TransportMark {
+                                            id: panelLoop
+                                            objectName: "panelLoopMark"
+                                            Layout.alignment: Qt.AlignVCenter
+                                            glyph: "repeat"
+                                            enabled: root.seekable
+                                            modeOn: MprisController.loopSupported
+                                                && MprisController.loopState === MprisSvc.MprisLoopState.Playlist
+                                            onTriggered: () => {
+                                                const p = MprisController.shownPlayer;
+                                                if (!p) return;
+                                                const on = MprisController.loopState === MprisSvc.MprisLoopState.Playlist;
+                                                p.loopState = on ? MprisSvc.MprisLoopState.None
+                                                    : MprisSvc.MprisLoopState.Playlist;
+                                            }
                                         }
                                     }
                                 }
@@ -4396,11 +4668,17 @@ ColumnLayout {
                                                 // card is awake; mechanism-derived while it
                                                 // sleeps; the pstate verdict lives on in the
                                                 // Razer app's own GPU page.
+                                                //
+                                                // What comes AFTER the cap is
+                                                // gpuCaption()'s call: the
+                                                // model's memory while a model
+                                                // is loaded, the mechanism word
+                                                // otherwise.
                                                 if (root.gpuCapMeasured && root.gpuCapW > 0)
-                                                    return Translation.tr("cap %1 W").arg(Math.round(root.gpuCapW));
+                                                    return root.gpuCaption(Translation.tr("cap %1 W").arg(Math.round(root.gpuCapW)), "");
                                                 if (root.gpuCapBoosted)
-                                                    return Translation.tr("cap 115 W · boost");
-                                                return Translation.tr("cap 55 W · idle");
+                                                    return root.gpuCaption(Translation.tr("cap 115 W"), Translation.tr("boost"));
+                                                return root.gpuCaption(Translation.tr("cap 55 W"), Translation.tr("idle"));
                                             }
                                             return Translation.tr("package · ceiling 90°");
                                         }
@@ -4468,87 +4746,65 @@ ColumnLayout {
                                                 ? Appearance.colors.colPrimary
                                                 : Appearance.colors.colOnLayer0
 
-                                        // ── The window ──
+                                        // ── The window: each metric's own scale ──
                                         //
-                                        // Auto-fitted, but never tighter than
-                                        // a floor: scaling raw min→max is the
-                                        // obvious thing to do and it is a lie,
-                                        // because a series that drifted 0.3%
-                                        // would fill its box edge to edge and
-                                        // read as "something is happening".
+                                        // 0 at the baseline, 1 at the top, for
+                                        // all four series. Every history is
+                                        // already a fraction of its own ceiling:
+                                        // cpuUsage and memoryUsedPercentage are
+                                        // 0-1, gpuClockPct is the card's
+                                        // utilization, and tempLoadHistory
+                                        // arrives normalised against the 30-90 °C
+                                        // window (SystemNow.tempLoad) whose
+                                        // ceiling the caption above states. So the
+                                        // height of the line IS the number above
+                                        // it -- 90% draws near the top, 44% a
+                                        // little under half -- and the band agrees
+                                        // with the popped-out Performance card,
+                                        // which plots these same histories through
+                                        // Graph (`y = height - value * height`).
                                         //
-                                        // The floor is the smallest spread
-                                        // worth magnifying. It was 10 points
-                                        // of a percentage, and that was much
-                                        // too coarse -- real CPU load on an
-                                        // idle desktop moves 8%→12%, so a
-                                        // 10-point floor crushed every graph
-                                        // into a 6 px fringe along the
-                                        // baseline and the whole band read as
-                                        // one flat smear. 4 points shows real
-                                        // variation without inventing it.
+                                        // The band used to auto-fit instead: the
+                                        // window ran from the series' own minimum
+                                        // to its maximum, never tighter than a
+                                        // 4-point floor, so a metric sitting at
+                                        // 90% and moving one point drew a line
+                                        // along the baseline. That looked alive and
+                                        // told the one lie a usage graph cannot
+                                        // afford -- "the machine is idle" while
+                                        // the headline above it said 90% -- so the
+                                        // min/max fit, its floor and the 0.2/1.28
+                                        // padding are gone.
+                                        readonly property real windowLo: 0
+                                        readonly property real windowSpan: 1
+                                        // How many of the series' newest samples
+                                        // this graph draws, and where that
+                                        // number comes from.
                                         //
-                                        // tempLoadHistory is already
-                                        // normalised against SystemNow's
-                                        // 30-90 °C window, so the temperature
-                                        // floor arrives there pre-divided.
-                                        readonly property real spread: {
-                                            const s = spark.series;
-                                            if (!s || s.length === 0) return 0;
-                                            // Non-finite samples are SKIPPED,
-                                            // not just guarded downstream.
-                                            // Infinity compares greater than
-                                            // everything, so it would win the
-                                            // hi search and turn spread into
-                                            // Infinity -- which then makes every
-                                            // normalised y NaN and erases the
-                                            // whole graph. NaN loses both
-                                            // comparisons and is silently
-                                            // dropped either way; being
-                                            // explicit keeps the two cases
-                                            // behaving the same.
-                                            let lo = Infinity, hi = -Infinity;
-                                            for (let i = 0; i < s.length; i++) {
-                                                const v = Number(s[i]);
-                                                if (!Number.isFinite(v)) continue;
-                                                if (v < lo) lo = v;
-                                                if (v > hi) hi = v;
-                                            }
-                                            const floor = spark.isTemp ? 2 / 60 : 0.04;
-                                            if (!Number.isFinite(hi)
-                                                || !Number.isFinite(lo))
-                                                return floor;
-                                            return Math.max(hi - lo, floor);
+                                        // 0 means "all of them" (the processor
+                                        // and memory histories are a minute of
+                                        // one-second samples and are read as
+                                        // such). The GPU's history is the same
+                                        // 60 samples at four a second, and the
+                                        // fifteen seconds that adds up to is
+                                        // what the graph PAINTED -- so a load
+                                        // that steps to 100% only became a
+                                        // legible plateau after the whole
+                                        // fifteen had passed, fifteen to twenty
+                                        // seconds after the number above it
+                                        // already said 100%. The slice is the
+                                        // fix: the same data, the newest five
+                                        // seconds of it, matching the reading.
+                                        readonly property int window:
+                                            metricCell.modelData.key === "gpu"
+                                                ? SystemNow.gpuWindowPoints : 0
+                                        readonly property var shown: {
+                                            const s = spark.series ?? [];
+                                            return spark.window > 0 && s.length > spark.window
+                                                ? s.slice(s.length - spark.window) : s;
                                         }
-                                        readonly property real windowLo: {
-                                            const s = spark.series;
-                                            if (!s || s.length === 0) return 0;
-                                            let lo = Infinity;
-                                            for (let i = 0; i < s.length; i++) {
-                                                const v = Number(s[i]);
-                                                if (!Number.isFinite(v)) continue;
-                                                if (v < lo) lo = v;
-                                            }
-                                            // Every sample unusable: fall back
-                                            // to 0 rather than propagating
-                                            // Infinity into the normalised y.
-                                            if (!Number.isFinite(lo)) lo = 0;
-                                            // A fifth of the spread below the
-                                            // lowest sample and the rest above
-                                            // it. The span below is deliberately
-                                            // a little OVER the span above: with
-                                            // an exact 1.2 the arithmetic put the
-                                            // peak at norm 1.0 -- dead on the top
-                                            // edge, so a spike lost the upper
-                                            // half of its 1.6px stroke to the
-                                            // clip. 1.28 lands the peak around
-                                            // norm 0.94 and leaves it whole.
-                                            return lo - spark.spread * 0.2;
-                                        }
-                                        readonly property real windowSpan:
-                                            spark.spread * 1.28
                                         readonly property int count:
-                                            (spark.series && spark.series.length) || 0
+                                            (spark.shown && spark.shown.length) || 0
                                         // One sample's bar, as a fraction of the
                                         // graph's height, clamped at 0 so a
                                         // sample below the window's floor sits
@@ -4623,7 +4879,7 @@ ColumnLayout {
                                         // a peak and buys never showing a value
                                         // the machine did not report.
                                         readonly property var curveY: {
-                                            const s = spark.series;
+                                            const s = spark.shown;
                                             const n = spark.count;
                                             if (!s || n === 0 || spark.width <= 0)
                                                 return [];
@@ -4864,8 +5120,33 @@ ColumnLayout {
                                             // once a second, so immediate is
                                             // not needed.
                                             renderStrategy: Canvas.Cooperative
-                                            visible: spark.curvePoints.length > 2
+                                            // Nothing to draw without data, and nothing
+                                            // sensible to draw in a collapsed layout: the
+                                            // panel window shrinks to its minimum while the
+                                            // card is away, which collapses these boxes to a
+                                            // few pixels -- and a curve laid out across a
+                                            // 2px box is a vertical spike whose wash fills
+                                            // the whole box. That frame used to be the one
+                                            // texture the canvas kept: reopening the card
+                                            // showed the last thing painted while it was
+                                            // shrinking (a solid block under a headline
+                                            // reading 4%) instead of the flat line the data
+                                            // described. Gating on a real width keeps the
+                                            // spike from ever being painted.
+                                            visible: spark.curvePoints.length > 2 && spark.width > 16
                                             onPaint: spark.paintGraph(getContext("2d"))
+                                            // Becoming visible again has to repaint.
+                                            //
+                                            // With Cooperative rendering the paint runs on
+                                            // the render thread, and a `requestPaint()`
+                                            // issued while the surface is unmapped can be
+                                            // dropped outright -- which is exactly the
+                                            // state the canvas is in when the card is
+                                            // closed, so the stored texture could be the
+                                            // last frame of a previous session. Qt re-asks
+                                            // for nothing when a hidden item comes back;
+                                            // this is that ask.
+                                            onVisibleChanged: if (visible) requestPaint()
                                             // The curve is rebuilt once a tick,
                                             // and the box moves on resize. Both
                                             // need a repaint; Canvas has no
@@ -4923,31 +5204,61 @@ ColumnLayout {
                                 spacing: 0
 
                                 Repeater {
-                                    // CPU FIRST, then downwards in the
-                                    // order Windows' Task Manager uses:
-                                    // processor, memory, disk, graphics. The
-                                    // ledger used to open on "Memory used"
-                                    // and leave the processor fifth, so the
-                                    // one fact the whole panel is about --
-                                    // what this machine IS -- was buried under
-                                    // three rows of how much RAM is free.
+                                    // The rows, in the order the machine is read:
+                                    // processor, graphics, memory, then the display
+                                    // and the two interfaces.
                                     //
-                                    // Memory stays as its own three rows
-                                    // (used / free / swap) because they are
-                                    // three different numbers, and they follow
-                                    // the processor together rather than being
-                                    // scattered. Threads and uptime are the
-                                    // two "about the running system" facts
-                                    // and sit last, under the hardware.
+                                    // This block used to be a SPEC SHEET -- the
+                                    // processor's model, how much RAM was free,
+                                    // the root disk's capacity, thread count,
+                                    // uptime -- and the objection to it is not
+                                    // that it was wrong but that none of it
+                                    // changes while you look at it. What the
+                                    // panel now shows is what the machine is
+                                    // DOING, including the numbers a power mode
+                                    // moves (governor and EPP, the enforced
+                                    // wattage ceiling, the driven refresh rate),
+                                    // which is the one thing a spec sheet can
+                                    // never show.
+                                    //
+                                    // Free, Storage, Swap, Threads and Uptime went
+                                    // with the rewrite: three were quantities of
+                                    // things NOT in use, threads are already the
+                                    // caption under the processor gauge, and
+                                    // uptime is a fact about the session rather
+                                    // than the hardware. The two inventory rows
+                                    // that remain -- processor and graphics --
+                                    // stay because the live numbers around them
+                                    // mean nothing without knowing which chip
+                                    // they came off. Every other row can change
+                                    // between two openings of this card, and
+                                    // every one of them renders "—" rather than
+                                    // 0 when its source is missing: a blank or a
+                                    // zero would read as a measurement.
+                                    //
+                                    // Panel, Disk, Network and GPU clock went the
+                                    // same way in the second pass. The panel's own
+                                    // ceiling is what the Display row already
+                                    // implies (the mode it is DRIVEN at, plus how
+                                    // fast that panel can go) and the rest of it
+                                    // belongs in Settings > Display, which lists the
+                                    // modes (2560x1600@240.00Hz among them) rather
+                                    // than under a live readout; disk and network
+                                    // throughput are acts of copying, not facts
+                                    // about this hardware; and the clock row's two
+                                    // numbers answered questions the rows around
+                                    // it answer better -- how parked the card is,
+                                    // IS the wattage it is drawing against its
+                                    // cap, which is the number one row up.
                                     model: [
-                                        { k: Translation.tr("Processor"),   v: root.cpuDisplayName() },
-                                        { k: Translation.tr("Memory used"), v: `${root.formatKB1(ResourceUsage.memoryUsed)} / ${root.formatKB1(ResourceUsage.memoryTotal)} GB` },
-                                        { k: Translation.tr("Free"),         v: `${root.formatKB1(ResourceUsage.memoryFree)} GB` },
-                                        { k: Translation.tr("Swap"),         v: `${root.formatKB1(ResourceUsage.swapUsed)} / ${root.formatKB1(ResourceUsage.swapTotal)} GB` },
-                                        { k: Translation.tr("Storage"),      v: root.rootStorageString() },
-                                        { k: Translation.tr("Graphics"),     v: root.gpuDisplayName() },
-                                        { k: Translation.tr("Threads"),      v: SystemFacts.cpu.threads > 0 ? String(SystemFacts.cpu.threads) : "—" },
-                                        { k: Translation.tr("Uptime"),       v: SystemFacts.uptime(SystemFacts.system.uptime) },
+                                        { k: Translation.tr("Processor"),  v: root.cpuDisplayName() },
+                                        { k: Translation.tr("Clock"),      v: SystemNow.cpuClockText() },
+                                        { k: Translation.tr("CPU policy"), v: SystemNow.cpuPolicyText() },
+                                        { k: Translation.tr("Graphics"),   v: root.gpuIdentityRow() },
+                                        { k: Translation.tr("GPU power"),  v: root.gpuDrawRow() },
+                                        { k: Translation.tr("VRAM"),       v: SystemNow.vramText() },
+                                        { k: Translation.tr("Memory"),     v: `${root.formatKB1(ResourceUsage.memoryUsed)} / ${root.formatKB1(ResourceUsage.memoryTotal)} GB` },
+                                        { k: Translation.tr("Display"),    v: root.displayModeRow() },
                                     ]
                                     delegate: Item {
                                         required property var modelData
@@ -5348,8 +5659,11 @@ ColumnLayout {
                                                     return Translation.tr(
                                                         "The firmware is holding the charge here. Linux cannot see the limit -- it is set in the BIOS (F2 on boot).");
                                                 return GpuPower.available
+                                                    // One value per arg() call: QML's String.arg takes a
+                                                    // single argument, so handing it two logged "Invalid
+                                                    // arguments" and left the row printing %1 and %2 raw.
                                                     ? Translation.tr("dGPU %1 · %2 W of that is the card").arg(
-                                                        GpuPower.pstate,
+                                                        GpuPower.pstate).arg(
                                                         root.gpuWatts() !== null
                                                             ? root.gpuWatts().toFixed(1)
                                                             : "?")
@@ -5414,15 +5728,18 @@ ColumnLayout {
                     // scrollfling.js instead of moving the list here. Same
                     // gain, same momentum, same bounds as every other list in
                     // the shell, and no per-surface copy to drift.
-                    // Only one scroller in this card: the track list. (The
-                    // other view mentioned in older notes here -- a category
-                    // pane -- does not exist, and the reference to it was
-                    // dead: an undefined id throws on every wheel event over
-                    // the card, which is another way this path never did
-                    // anything.) Asking the shared helper anyway means that
-                    // if a second scroller is added later, it is picked up
-                    // automatically instead of being wired up by hand again.
-                    const scroller = Fling.pickScrollable([trackList]);
+                    // The list is in visual order, and the FIRST one that can
+                    // actually move wins. `cardScrollTarget` leads because it
+                    // is the scroller of the view that is on screen -- the
+                    // trading tab's news today -- and it is null in every
+                    // other mode, so the music tracklist below it keeps the
+                    // gesture there. Note what is NOT here: the trading list
+                    // is reached through the view's own publication, not by
+                    // naming an id from this file, because ids do not cross
+                    // files -- and the older note about a "category pane"
+                    // referred to an id that never existed, which threw on
+                    // every wheel event over the card.
+                    const scroller = Fling.pickScrollable([root.cardScrollTarget, trackList]);
                     if (scroller && !root.panelSwipeHorizontal) {
                         const pd = wheel.pixelDelta;
                         const hasPixels = pd && (pd.x !== 0 || pd.y !== 0);
@@ -5463,16 +5780,13 @@ ColumnLayout {
             focus: true
             Keys.onPressed: event => {
                 if (event.key === Qt.Key_Escape) {
-                    // Escape is scoped: first it closes the interval editor,
-                    // then it silences a ringing alarm, and only then the
-                    // panel itself.
-                    if (root.timerEditing) {
-                        root.cancelTimerEdit();
-                    } else if (TimerService.alarmActive) {
-                        TimerService.stopAlarm();
-                    } else {
-                        root.close();
-                    }
+                    // One implementation of the key, shared with the window's
+                    // Shortcut -- see `escaped()`. The two used to hold their
+                    // own copies of these branches, and the window's copy was
+                    // the one that could be disabled while an edit was
+                    // (wrongly) still open, which is how Escape became a key
+                    // that did nothing on the first press.
+                    root.escaped();
                     event.accepted = true;
                 } else if (event.key === Qt.Key_Right) {
                     root.setMode(root.mode + 1);
@@ -5959,16 +6273,20 @@ ColumnLayout {
         if (key === "cpu") return HardwareStats.cpuThreads > 0
             ? Translation.tr("%1 threads").arg(HardwareStats.cpuThreads) : "";
         if (key === "ram") return Translation.tr("of %1").arg(ResourceUsage.maxAvailableMemoryString);
-        // Names the DENOMINATOR, because the gauge now reports capacity
-        // rather than "busy". Without it, a 7% reading on an idle laptop reads
-        // as broken rather than as "7% of the 55 W the board permits" -- which
-        // is the exact confusion the switch away from utilization was meant
-        // to fix, reintroduced from the other side.
-        if (key === "gpu") return SystemNow.gpuPowerLimitW > 0
-            ? Translation.tr("of %1 W limit").arg(Math.round(SystemNow.gpuPowerLimitW))
-            : (root.shortGpuName() !== ""
-                ? root.shortGpuName()
-                : (SystemNow.gpuClockMhz >= 0 ? Translation.tr("%1 MHz").arg(Math.round(SystemNow.gpuClockMhz)) : ""));
+        // Names the CHIP. The percentage beside it is a busy fraction now
+        // (utilization), the same kind of number as the CPU and RAM tiles, so
+        // there is no denominator left to state -- and on a machine with two
+        // graphics chips, WHICH chip the number belongs to is the useful thing
+        // a caption can add.
+        //
+        // The wording here used to be "of 55 W limit", which belonged to the
+        // capacity reading this gauge no longer draws. The wattage did not go
+        // anywhere: it is the GPU power row further down this same tab, where
+        // it reads "4.2 of 55 W" and is labelled as watts rather than implied
+        // by a percentage.
+        if (key === "gpu") return root.shortGpuName() !== ""
+            ? root.shortGpuName()
+            : (SystemNow.gpuClockMhz >= 0 ? Translation.tr("%1 MHz").arg(Math.round(SystemNow.gpuClockMhz)) : "");
         if (key === "temp") return root.tempState(SystemNow.tempC);
         return "";
     }
@@ -5990,6 +6308,146 @@ ColumnLayout {
             .replace(/\s+(Corporation|Inc\.?|Corp\.?|Ltd\.?)\b/g, "")
             .trim();
     }
+
+    // ── The System tab's live rows ───────────────────────────────────────
+    //
+    // Each of these answers something the four gauges above cannot, because a
+    // percentage is not a number you can act on: "GPU 13%" does not say whether
+    // the card is being held at a 55 W ceiling or a 140 W one, and a memory bar
+    // does not say the machine has a 240 Hz panel it is driving at 60. Every
+    // value here comes off the tick SystemNow already runs or the counters
+    // HardwareStats already keeps, so a row costs one function call and no
+    // sampling of its own.
+
+    // ── Disk and network rows: REMOVED ──────────────────────────────────
+    //
+    // `diskActivityRow`, `networkActivityRow` and the three helpers that existed
+    // only for them (`rateText` for the units, `busiestDisk` and
+    // `busiestNetwork` for picking which drive and which interface to name) are
+    // gone with their rows: throughput is a quantity that moves when something
+    // copies, not a measurement of this hardware, and both rows were the kind a
+    // reader skips past to reach the ones they came for.
+    //
+    // Nothing lost a source. HardwareStats still samples every disk and every
+    // interface -- the Performance view and the task manager draw them -- so the
+    // only thing that left is the pair of rows on this tab.
+
+    // The display, read from the COMPOSITOR rather than from a spec sheet: the
+    // mode it is being driven at right now. This machine runs 60 Hz while the
+    // panel advertises a single 240 Hz mode, and whether that is deliberate or a
+    // power mode's doing is not something a bare "60 Hz" can tell you -- which
+    // is why the two rows travel together.
+    function focusedMonitor() {
+        const list = HyprlandData.monitors ?? [];
+        return list.find(m => m.focused) ?? (list.length > 0 ? list[0] : null);
+    }
+    function displayModeRow() {
+        const m = root.focusedMonitor();
+        if (!m) return "—";
+        return `${m.width}×${m.height} @ ${Math.round(m.refreshRate ?? 0)} Hz`;
+    }
+    // ── Panel row: REMOVED ──────────────────────────────────────────────
+    //
+    // `panelMaxRow` reported the display's own ceiling (fastest advertised rate,
+    // plus VRR) as a row beside a live readout. It is a fact about the panel, not
+    // about what the machine is doing with it, so the ceiling moved out and the
+    // mode it is being DRIVEN at kept the row above (displayModeRow, read from
+    // the compositor). The ceiling itself is still one page away, listed as a
+    // mode on Settings > Display (DisplayConfig.qml reads the same list), so
+    // nothing became unknowable -- it just stopped being a row that never
+    // changes sitting among rows that do.
+
+    // The card, named, then the ceiling it COULD be given: "RTX 4070 · 140 W
+    // max". Three different wattages now live on this tab and they are not
+    // interchangeable:
+    //
+    //   * 140 W -- power.max_limit: what the silicon may be allowed at all. A
+    //     property of the board, read off the same nvidia-smi sample as
+    //     everything else here.
+    //   * 50 W -- the enforced limit: what the power-mode buttons have currently
+    //     allowed it. It is the denominator on the GPU power row and the divisor
+    //     behind the GPU gauge above, so those two cannot disagree.
+    //   * the live draw itself, on the GPU power row.
+    //
+    // None of the three is the machine's total draw. Omitted when the card has
+    // never answered (the driver returns [N/A] for a parked card), so an unknown
+    // ceiling shortens the row instead of printing a number nobody measured.
+    function gpuIdentityRow() {
+        const name = root.gpuDisplayName();
+        return SystemNow.gpuPowerMaxW > 0
+            ? `${name} · ${Math.round(SystemNow.gpuPowerMaxW)} W max`
+            : name;
+    }
+
+    // The watts, WITH the ceiling they belong to -- the ceiling being the part a
+    // power mode moves. nvidia-smi's plain power.limit answers [N/A] on this
+    // driver; the enforced limit is what the board actually applies, and it is
+    // the same denominator the GPU gauge above reports its percentage of, so the
+    // two surfaces cannot contradict each other.
+    //
+    // WHOSE WATTS THESE ARE, because the row used to leave it open.
+    //
+    // This is the graphics card's OWN board draw, measured by the card, which is
+    // why its label now reads "GPU power" rather than "Power draw". It is not
+    // this machine: on mains the laptop cannot report total system watts at all
+    // (ACPI exposes AC0's online flag and no current), and the processor
+    // package's energy counter is root-only. On battery the whole-machine figure
+    // IS available -- that is what the battery column beside this one shows --
+    // but the two are different measurements, and this row no longer reads as
+    // the other one. Checked against the card side by side: this row's draw and
+    // limit track nvidia-smi's power.draw and enforced.power.limit exactly.
+    // ── The GPU cell's caption, in full ──────────────────────────────────
+    //
+    // One line, two facts, and they take turns rather than share. The cell is
+    // about 150 px wide and its caption is the smallest type in the card, so
+    // cap + mechanism + memory at once would elide into a smear.
+    //
+    // The second fact is the memory a locally running model holds, and while
+    // there is one it WINS the slot, because that is the number the reader
+    // compares against: reported as the model's own reservation (LlamaService
+    // -- the same figure its tab prints) rather than as the device total, which
+    // happens to be the same number here only because the model is the only
+    // thing using the card. The complaint this answers was exactly that gap --
+    // "the local llm shows vram 7.4 out of 8, but the System tab does not show
+    // that that is the true value".
+    //
+    // With no model loaded the memory is not interesting and the mechanism word
+    // is (is the card held at 55 W, or boosted?), so that is what shows
+    // instead, exactly as it did before.
+    function gpuVramShort() {
+        if (LlamaService.vramMiB > 0)
+            return Translation.tr("VRAM %1/%2 GB")
+                .arg(LlamaService.vramGiB.toFixed(1))
+                .arg(LlamaService.vramTotalGiB.toFixed(1));
+        return "";
+    }
+    function gpuCaption(capText, mechanism) {
+        const mem = root.gpuVramShort();
+        if (mem !== "")
+            return `${capText} · ${mem}`;
+        return mechanism === "" ? capText : `${capText} · ${mechanism}`;
+    }
+
+    function gpuDrawRow() {
+        if (SystemNow.gpuPowerDrawW < 0) return "—";
+        return SystemNow.gpuPowerLimitW > 0
+            ? `${SystemNow.gpuPowerDrawW.toFixed(1)} of ${Math.round(SystemNow.gpuPowerLimitW)} W`
+            : `${SystemNow.gpuPowerDrawW.toFixed(1)} W`;
+    }
+    // ── GPU clock row: REMOVED ──────────────────────────────────────────
+    //
+    // It read "210 / 3105 MHz · 45 °C". The clock goes, and so does the GPU
+    // TEMPERATURE that rode on the end of it -- which leaves the card's
+    // temperature with no home on this tab at all (the band's Temp cell is the
+    // processor package sensor, and gt_cur_freq_mhz on this machine belongs to
+    // the Intel chip, which is why the row's clock was the 4070's but its bed
+    // was not). If it is missed, the GPU power row has the room: "6.7 of 50 W ·
+    // 46 °C", and SystemNow.gpuTempC is still sampled either way.
+    //
+    // What answered the question the row was really asked -- how parked is the
+    // card? -- is the wattage one row up, drawn against the cap in force. That
+    // is the same fraction the gauge above already divides, and 210 MHz never
+    // said it: MHz is a number you have to know the ceiling to read.
 
     // What a temperature means, in a word. The bar and the chart show the
     // level and the trend; neither of those answers the question a temperature

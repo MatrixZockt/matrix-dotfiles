@@ -1,0 +1,23 @@
+[Unit]
+Description=Make the power profile follow AC, and the CPU cap and panel refresh follow the profile
+# Same anchor as power-failsafe and ppd-nvidia-boost: there is no
+# graphical-session.target on this setup (it stays inactive), so default.target
+# is the only anchor that actually starts. The daemon is cheap while idle -- one
+# file read every 5 s, plus a hyprctl check every 30 s -- and it needs no
+# display until it has something to change, so starting it early is harmless.
+After=default.target
+PartOf=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/power-autoswitch
+Restart=on-failure
+RestartSec=10
+# Every decision has to be answerable after the fact, the same way
+# power-failsafe does it: "why is my CPU capped at 20 W" is a journal query.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=power-autoswitch
+
+[Install]
+WantedBy=default.target

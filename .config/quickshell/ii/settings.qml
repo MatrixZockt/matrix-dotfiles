@@ -472,7 +472,7 @@ Window {
         }
         // The graphs need the sampler. The way back turns it off again --
         // Overview deliberately costs nothing while it is the face showing.
-        HardwareStats.active = true;
+        HardwareStats.setActive("taskManager", true);
     }
 
     function convertBackToSettings() {
@@ -482,6 +482,6 @@ Window {
             root.currentPage = root.settingsPageBeforeTm;
         root.settingsPageBeforeTm = -1;
         root.taskManagerKey = "";
-        HardwareStats.active = false;
+        HardwareStats.setActive("taskManager", false);
     }
 }

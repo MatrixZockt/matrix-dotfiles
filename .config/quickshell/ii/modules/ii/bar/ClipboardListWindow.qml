@@ -1,5 +1,10 @@
 pragma ComponentBehavior: Bound
 
+// `qs` itself, not only its submodules: GlobalStates (the shell's cross-
+// component state singleton, and the SUPER-press signal this popup dismisses
+// on) is published at the package root. Without this import the connection
+// below resolves to nothing and Qt logs "GlobalStates is not defined".
+import qs
 import qs.modules.common
 import qs.modules.common.widgets
 import qs.modules.common.functions
@@ -543,6 +548,15 @@ Scope {
                     searchInput.clear();
                     root.cursor = 0;
                     searchInput.forceActiveFocus();
+                } else {
+                    // The window is off screen, so the keyboard has gone back to
+                    // the window underneath -- this surface held it exclusively
+                    // (see the keyboardFocus note below). THAT is the moment the
+                    // paste keystroke can be sent; sending it while the popup
+                    // was still up put the text into this popup's own search
+                    // field instead. See Cliphist.paste and
+                    // scripts/clipboard/paste-keystroke.sh.
+                    Cliphist.sendPendingPaste();
                 }
             }
 
@@ -905,6 +919,35 @@ Scope {
                     }
                 }
             }
+        }
+    }
+
+    // ── A fresh SUPER press dismisses the popup ────────────────────────────
+    //
+    // SUPER is the "get me out of here" key everywhere else on this desktop, and
+    // it is what dismisses this popup -- but the dismissal belongs HERE, on the
+    // shell's own record of the key going down, and not in the compositor's
+    // SUPER bind.
+    //
+    // It used to be a `qs ipc call clipboard close` in custom/keybinds.lua's
+    // SUPER_L/SUPER_R bind. In this build a Lua FUNCTION body in `hl.bind`
+    // registers as a plain RELEASE bind (the same quirk that makes
+    // `{ drag = true }` a no-op -- see the note on the resize drag in that
+    // file), so that "on press" close actually fired on the way UP: SUPER+V
+    // opened the popup and letting go of SUPER shut it again a beat later,
+    // which is exactly the reported "you have to hold SUPER to keep it open".
+    //
+    // `superDown` is driven by the workspaceNumber global's pressed/released
+    // dispatch -- the same signal the bar's workspace-number hint reads, so the
+    // edge is the real one by construction. Rising (a fresh press) dismisses;
+    // releasing changes nothing, which is what makes SUPER+V survive: SUPER is
+    // already down when V opens the popup, so there is no rising edge left to
+    // fire until the user presses SUPER again on purpose.
+    Connections {
+        target: GlobalStates
+        function onSuperDownChanged() {
+            if (GlobalStates.superDown)
+                root.close();
         }
     }
 

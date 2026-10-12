@@ -15,12 +15,18 @@
 -- mission-center (an external app that only knew Windows' idea of specs).
 taskManager = "$HOME/.config/quickshell/$qsConfig/scripts/launch/task-manager.sh"
 
--- File manager, on SUPER + E: the Explorer app (~/.local/bin/hypr-explorer,
--- sources in ~/.local/lib/hypr-explorer). A regular GTK4 desktop window -- the
--- config's catch-all rule keeps it tiled, so it attaches like every other
--- application instead of being a layer popup. The same binary serves the
--- portal's picker mode (the file-chooser dialogs every app opens).
-fileManager = "$HOME/.local/bin/hypr-explorer"
+-- File manager, on SUPER + E: the shell's own Files app -- the QML file
+-- manager (explorer-shaped: drives, tabs, details/tiles).
+--
+-- This line used to point at the GTK Explorer in ~/.local/bin/hypr-explorer,
+-- and because an override here REPLACES the base line, SUPER + E kept opening
+-- that app no matter what the base config said. The base default is this same
+-- value; the override is kept (rather than deleted) so the file says which
+-- program the key is meant to open. Through the launch script like the
+-- settings app: a copy that is already open is raised instead of a second one
+-- being started. The classic file managers are the fallback, so the key is
+-- never dead.
+fileManager = "$HOME/.config/quickshell/$qsConfig/scripts/launch/filemanager.sh || $HOME/.config/hypr/hyprland/scripts/launch_first_available.sh 'dolphin' 'nautilus' 'nemo' 'thunar'"
 
 -- Settings app, on SUPER + ESCAPE (and wherever the shell's own buttons open it).
 --

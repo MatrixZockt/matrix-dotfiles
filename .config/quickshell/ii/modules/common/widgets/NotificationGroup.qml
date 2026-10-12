@@ -40,6 +40,17 @@ MouseArea { // Notification group area
     // hinge on which one this is.
     property bool popup: false
 
+    // Is the pointer over the app-name button?
+    //
+    // Owned by the CARD rather than left inside the header because someone
+    // outside has to be able to read it: the card's own tooltip (in
+    // NotificationListView) has to stand down while the name's tooltip is up,
+    // or hovering the name paints two labels at once. It is assigned from the
+    // hit area below rather than bound to it -- an object cannot see an id
+    // declared in its children, only the other way round -- and this way the
+    // only writer is the hover handler itself.
+    property bool appNameHovered: false
+
     // The list-wide "show everything" switch, owned by NotificationListView
     // and pushed down here. FALSE by default, so the popup -- which is the
     // other user of this component -- keeps its old behaviour of never being
@@ -327,7 +338,22 @@ MouseArea { // Notification group area
                 // card, briefly, and the text is already fully visible -- so
                 // it keeps the jump.
                 if (root.popup) {
+                    // The card and the app go together.
+                    //
+                    // The popup's click is "take me there", and the notification
+                    // that asked the question has been answered: leaving it in
+                    // the corner means a card that describes what the user is
+                    // now looking at, hanging over the window they just
+                    // brought forward, until its own timeout gets around to it.
+                    // It is the same departure the delete button performs
+                    // (slide out, then discard), so the click and the delete
+                    // differ in what they DO, not in how the card leaves.
+                    //
+                    // Dismissed AFTER the jump, not before: `focusSender` is
+                    // what raises or launches the app, and it reads the
+                    // notification to do it.
                     root.openSenderApp();
+                    root.destroyWithAnimation();
                     return;
                 }
                 // In the SIDEBAR the app NAME launches, and the rest of
@@ -564,6 +590,81 @@ MouseArea { // Notification group area
                                 Appearance.colors.colOnLayer2
                             readonly property bool hovered: appNameHit.containsMouse
 
+                            // The hover PLATE.
+                            //
+                            // The colour step alone was the whole affordance,
+                            // and a line of text that changes tone under the
+                            // pointer reads as a list row being highlighted --
+                            // not as a button. The card's other controls (the
+                            // chevron, the row's action plates) all answer
+                            // hover with a wash behind them, so the name
+                            // answering the same way is what makes it one of
+                            // them: a target, not a label.
+                            //
+                            // Sized to the PAINTED text rather than to the box:
+                            // the box is `Layout.fillWidth` and can be most of
+                            // the row, and a highlight that wide would look
+                            // like the row was selected. `paintedWidth` is what
+                            // an ELIDED line actually drew, so the plate stops
+                            // where the words stop instead of running on into
+                            // the ellipsis and past it.
+                            Rectangle {
+                                id: appNamePlate
+                                // The label gets ROOM inside the box: 8px either
+                                // side, 5px above and below. At 6/3 the wash sat
+                                // exactly on the glyphs -- touching the border on
+                                // the top and bottom of every ascender and
+                                // descender -- and a box that tight reads as the
+                                // text having been SELECTED rather than as a
+                                // button waiting to be pressed. These are the
+                                // numbers the plate is anchored by, so the
+                                // hit area below follows them (one rectangle,
+                                // one target) and a bigger label only grows the
+                                // box with it.
+                                //
+                                // Declared before the anchors that use them, so
+                                // `padH` is already set when the left inset
+                                // below asks for it.
+                                readonly property real padH: 8
+                                readonly property real padV: 5
+
+                                // Both sides, not just the right.
+                                //
+                                // The width already gives the words `padH` on
+                                // the right; on the LEFT the label is flush with
+                                // the box, because it has to be -- the name lines
+                                // up with the notification body underneath it, so
+                                // the text cannot be pushed inwards without
+                                // breaking that alignment. The plate therefore
+                                // reaches `padH` back out of the box instead, and
+                                // the two paddings come out equal. Before this the
+                                // wash started dead on the first glyph with all of
+                                // its air on the far side of the word.
+                                //
+                                // The reach lands in the row's 10px gap to the
+                                // app icon, so the plate still clears the icon by
+                                // 2px -- it never covers it.
+                                anchors.left: parent.left
+                                anchors.leftMargin: -padH
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: Math.min(appName.paintedWidth, appNameBox.width) + padH * 2
+                                height: appName.implicitHeight + padV * 2
+                                radius: Appearance.rounding.verysmall
+                                // A `colPrimary` wash, not a `colLayerNHover`
+                                // token: those carry `1 - contentTransparency`
+                                // in their alpha and land a couple of values
+                                // from invisible on a solid card. Same recipe as
+                                // the chevron's plate.
+                                color: ColorUtils.applyAlpha(Appearance.colors.colPrimary, 0.16)
+                                opacity: appNameBox.hovered ? 1 : 0
+                                Behavior on opacity {
+                                    NumberAnimation {
+                                        duration: root.hoverDuration
+                                        easing.type: root.hoverCurve
+                                    }
+                                }
+                            }
+
                             StyledText {
                                 id: appName
                                 anchors.left: parent.left
@@ -595,11 +696,47 @@ MouseArea { // Notification group area
                             // would silently never light up.
                             MouseArea {
                                 id: appNameHit
-                                anchors.fill: parent
+                                // The plate IS the target: same rectangle, so the
+                                // thing that lights up under the pointer is the
+                                // thing a click acts on. It used to fill the box,
+                                // which is `Layout.fillWidth` -- the wash would
+                                // then end at the words while the click zone ran
+                                // on into the empty space beside them, so a click
+                                // out there opened the app instead of expanding
+                                // the card (the opposite of what this header is
+                                // documented to do).
+                                anchors.fill: appNamePlate
                                 hoverEnabled: true
                                 acceptedButtons: Qt.NoButton
                                 propagateComposedEvents: true
                                 cursorShape: Qt.PointingHandCursor
+
+                                // Report the hover UP to the card: the card's
+                                // own tooltip stands down while this one is up
+                                // (see NotificationListView), and the plate and
+                                // the name's colour read the same flag.
+                                onContainsMouseChanged: root.appNameHovered = containsMouse
+
+                                StyledToolTip {
+                                    // The name is a button, and nothing else on
+                                    // the card said what pressing it does: the
+                                    // card's tooltip talks about the card, and
+                                    // the pointer cursor is only visible once
+                                    // the pointer is already there. This is the
+                                    // label for the control itself.
+                                    //
+                                    // `alternativeVisibleCondition` rather than
+                                    // the parent's `hovered`: the plate already
+                                    // reads `containsMouse`, and a tooltip that
+                                    // needs a different hover property of the
+                                    // same MouseArea to be real is a tooltip
+                                    // that silently never shows up (the trap
+                                    // the `hovered` note above is about).
+                                    text: Translation.tr("Click to open %1")
+                                        .arg(root.notificationGroup?.appName || Translation.tr("the app"))
+                                    extraVisibleCondition: false
+                                    alternativeVisibleCondition: appNameBox.hovered
+                                }
                             }
                         }
                         StyledText {

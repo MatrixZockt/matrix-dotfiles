@@ -234,6 +234,65 @@ else
     printf '%s\n' "$QML_ERR" | head -12 | sed 's/^/          /'
 fi
 
+# The "sheet" arrangement is drawn TWICE -- by the SDDM greeter
+# (hypr/custom/sddm-theme/Main.qml) and by the in-session lock
+# (modules/ii/lock/LockSurface.qml). LockSurface's own header says its geometry
+# is "copied from the SDDM theme's Main.qml", and NOTHING notices when the copy
+# stops matching: no error, no config, just two screens that no longer look
+# alike. That is the same shape as the LoginLayouts bug (the lock asked for a
+# template the SDDM fragments had and the shell's hand-written list did not), so
+# it gets the same treatment -- one fact, checked instead of assumed.
+#
+# The failure this exists for, exactly: both columns are anchored by their
+# vertical CENTRE, so walking the column's BOTTOM up to the 8.5% margin moves
+# the centre by the margin plus HALF the column, the half-height being the
+# centre-to-bottom distance. Subtracting the FULL height instead (the state
+# before 2026-10-11) parked the whole form -- account tile, password line,
+# return key -- 107 px above the bottom-left corner it is drawn for, while the
+# clock above kept its own 8.5% from the top. The two-corner rhythm this
+# arrangement is built around came out one-sided, and the input line was the
+# most visible part of it. One factor of two, in two files.
+SHEET_GEOM=$(python3 - <<'PY'
+import os, re
+home = os.path.expanduser("~")
+files = {
+    "the login screen": f"{home}/.config/hypr/custom/sddm-theme/Main.qml",
+    "the lock":         f"{home}/.config/quickshell/ii/modules/ii/lock/LockSurface.qml",
+}
+# The margin plus the centre-to-bottom distance, and nothing else.
+want = "parent.height / 2 - height / 2"
+seen, problems = {}, []
+for label, path in files.items():
+    try:
+        txt = open(path, encoding="utf-8", errors="replace").read()
+    except OSError as e:
+        problems.append(f"cannot read {label} ({path}): {e}")
+        continue
+    # The sheet column is the only thing in either file that offsets the
+    # CENTRE by a slice of parent.height, so this finds exactly one expression
+    # and does not need to know the margin's value -- that is the design's, and
+    # pinning it here would fail on a deliberate change made in both files.
+    found = [re.sub(r"\s+", " ", m)
+             for m in re.findall(r"Math\.round\(parent\.height[^)]*\)", txt)]
+    if len(found) != 1:
+        problems.append(f"{label} has {len(found)} centre offsets on parent.height, expected exactly 1")
+    elif want not in found[0]:
+        problems.append(f"{label} offsets its sheet column by something other than "
+                        f"the margin plus half the column: {found[0]}")
+    else:
+        seen[label] = found[0]
+if len(seen) == 2 and len(set(seen.values())) != 1:
+    problems.append("the login screen and the lock disagree: " + " vs ".join(seen.values()))
+print("\n".join(problems) if problems else "OK")
+PY
+)
+if [ "$SHEET_GEOM" = "OK" ]; then
+    ok "the login screen and the lock agree on the sheet column's offset (margin + half the column)"
+else
+    fail "the sheet column's offset is wrong or has drifted apart:"
+    printf '%s\n' "$SHEET_GEOM" | sed 's/^/          /'
+fi
+
 LUA_N=0
 LUA_BAD=0
 while IFS= read -r f; do

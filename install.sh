@@ -126,6 +126,31 @@ if [[ $RAZER_CC_SYSTEM -eq 1 ]]; then
     echo "  polkit  org.matrix.razercc actions + rule installed (passwordless for matrix)"
 fi
 
+# Removable media: the rule that lets the session user mount a stick, a card or
+# a phone without the admin password. Same shape of elevated step as the
+# Command Center's above -- and the same file the file manager's own note names
+# (modules/filemanager/FileManagerContent.qml, mountVolume). Silent-sudo only:
+# an install that is already running unattended must not stop to ask, and the
+# file can always be deployed by hand from extras/etc/polkit-1/rules.d/.
+REMOVABLE_POLKIT=0
+if [[ -f "$REPO/extras/etc/polkit-1/rules.d/10-ii-removable-mount.rules" && $DRY_RUN -eq 0 ]]; then
+    if [ "$(id -u)" -eq 0 ]; then
+        REMOVABLE_POLKIT=1
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        REMOVABLE_POLKIT=1
+    else
+        echo "  (skipped: run 'sudo bash install.sh' or copy extras/etc/polkit-1/rules.d/10-ii-removable-mount.rules to /etc/polkit-1/rules.d/)"
+    fi
+fi
+if [[ $REMOVABLE_POLKIT -eq 1 ]]; then
+    sudo_or=""
+    [ "$(id -u)" -ne 0 ] && sudo_or="sudo"
+    $sudo_or install -Dm 0644 "$REPO/extras/etc/polkit-1/rules.d/10-ii-removable-mount.rules" \
+        /etc/polkit-1/rules.d/10-ii-removable-mount.rules
+    $sudo_or systemctl restart polkit 2>/dev/null || true
+    echo "  polkit  removable-media rule installed (mount / umount / blockdev, no password)"
+fi
+
 # Make AppImages and loose executables launch on double-click, permanently:
 # register appimage-run as the default handler for their mime types. This
 # writes [Default Applications] entries into ~/.config/mimeapps.list, which

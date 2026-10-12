@@ -45,10 +45,16 @@ RowLayout {
         }
     }
 
+    // Through the audio service, because this one row serves TWO scales: the
+    // System row is handed the default sink (the shell's 0..1, 100% = the loud
+    // end), every row below it an application's stream (PipeWire's own, 100% =
+    // its unity gain). Reading `node.audio.volume` here made the System slider
+    // reach only half the range -- its right end was the sink's 1.0, which the
+    // shell calls 50% -- and its tooltip said "200%" at the loud end.
     WSlider {
         Layout.fillWidth: true
         Layout.rightMargin: 10
-        value: root.node?.audio.volume ?? 0
-        onMoved: root.node.audio.volume = value
+        value: Audio.nodeVolumeFraction(root.node)
+        onMoved: Audio.setNodeVolumeFraction(root.node, value)
     }
 }

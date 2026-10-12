@@ -218,8 +218,24 @@ Singleton {
      */
     function playNow(track) {
         if (!track?.streamUrl) return;
+        // `replace`, not `append-play`: playlist-clear spares the CURRENTLY
+        // playing file, so with append-play a running local song kept playing
+        // and the stream was queued behind it -- "I clicked online, an offline
+        // song played". replace stops the current file and starts the stream
+        // now.
+        //
+        // `force-media-title` rides along as a per-file option: without it
+        // mpv names a bare stream after its URL, and the top bar read
+        // "stream?app_name=ii" as the song name. The bridge reads this
+        // property for the bar's label.
         MusicPlayer.cmd(["playlist-clear"]);
-        MusicPlayer.cmd(["loadfile", track.streamUrl, "append-play"]);
+        // mpv 0.38+: per-file options are the FIFTH loadfile argument (after
+        // the insertion index), not the fourth. The 4th-arg shape was rejected
+        // with "invalid parameter" on this build (v0.41).
+        MusicPlayer.cmd(["loadfile", track.streamUrl, "replace", -1, {
+            "force-media-title": (track.artist && track.artist.length > 0
+                ? track.artist + " - " : "") + (track.title ?? "Online track")
+        }]);
         MusicPlayer.cmd(["set_property", "pause", false]);
         MusicPlayer.refreshQueue();
     }

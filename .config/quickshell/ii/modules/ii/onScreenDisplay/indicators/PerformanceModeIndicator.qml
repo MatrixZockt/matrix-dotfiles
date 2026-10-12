@@ -134,6 +134,7 @@ Item {
     readonly property int refreshMax: 5
 
     Timer {
+        id: refreshTimer
         interval: 900
         running: true
         repeat: true
@@ -145,6 +146,31 @@ Item {
             root.refreshes += 1;
             facts.running = false;
             facts.running = true;
+        }
+    }
+
+    // A switch that arrives while this card is STILL ON SCREEN reuses it: the
+    // OSD loads the indicator by source URL (OnScreenDisplay.qml) and that URL
+    // has not changed, so the component is not rebuilt -- only its bindings
+    // re-evaluate. Which meant the second switch of a quick pair kept the first
+    // one's measurement: the before column moved (PowerMode.before is a
+    // binding), the after column did not (the schedule above had already run
+    // out), both columns read the same, and the arrow -- the entire point of
+    // the row -- did not appear. Measured 2026-10-12 on two switches 5 s apart,
+    // which is exactly how someone compares two modes.
+    //
+    // So the measurement restarts with the SWITCH, not with the card: the old
+    // numbers are dropped (a "—" is honest while the new ones are being read,
+    // and the read takes ~50 ms) and the full schedule runs again. The OSD
+    // pushes its own dismissal back on a switch, so there is time for it.
+    Connections {
+        target: PowerMode
+        function onChangeSeqChanged() {
+            root.now = null;
+            root.refreshes = 0;
+            facts.running = false;
+            facts.running = true;
+            refreshTimer.restart();
         }
     }
 

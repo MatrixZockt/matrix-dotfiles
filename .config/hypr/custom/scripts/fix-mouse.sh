@@ -44,6 +44,17 @@
 #      script read that as success. Now it is the escalation: the shell has had
 #      its chance to answer, so the reload takes over.
 #
+#   4. THE KEYBOARD HELD SOMEWHERE ELSE.                             [step 2b]
+#
+#      The three above are all about the POINTER; this one is about the
+#      KEYBOARD, and from the chair it looks different: the pointer is fine and
+#      clicks land everywhere, but a text field never takes input, so the click
+#      that should put a caret in it appears to do nothing. A stuck Hyprland
+#      SUBMAP is the case here -- every key goes to the submap, so nothing can
+#      be typed anywhere -- and it is also the one case where this key never
+#      ran at all, because ordinary binds do not fire while a submap is
+#      entered. The bind is submap_universal for that reason.
+#
 # What it deliberately does NOT do: restart the shell for cause 1 or 2. That is
 # SUPER+CTRL+B's job (reload-shell.sh), it is slower, and it disturbs every
 # surface -- so it is reserved for cause 3 and for no shell at all, the two cases
@@ -106,6 +117,52 @@ log "before: state=${state_before:-<no answer>} names=${names_before:-<none>}"
 # purpose: they are supposed to hold input, and dropping them would be a
 # different bug.
 ipc focusGrab release >/dev/null 2>&1 || true
+
+# ── 2b. Keyboard focus: clicks land, a field never takes input ───────────────
+#
+# WHY THIS IS A CAUSE OF ITS OWN. Everything above is about the POINTER: those
+# end with clicks landing again. This one is about the KEYBOARD, and it reads
+# differently from the chair -- the pointer is fine, clicks land everywhere, and
+# a text field still never takes input, so the click that should put a caret in
+# it looks like it did nothing. What can hold the keyboard:
+#
+#   * A STUCK SUBMAP. Every key goes to the submap, so nothing can be typed
+#     anywhere -- and a field that IS focused still looks dead. Only one submap
+#     exists on this desktop (virtual-machine, SUPER+ALT+F1), and while it is
+#     entered this key would not run at all, which is why the bind is
+#     submap_universal. Reset only when one is actually entered, so a deliberate
+#     one is not thrown away on a stray press.
+#   * THE SESSION LOCK. With GlobalStates.screenLocked set, the lock screen holds
+#     the keyboard exclusively. `lock backdrop` reports it while UNLOCKED on
+#     purpose, so it is read here -- and only REPORTED: unlocking from a keybind
+#     would be a bug of its own, not a fix.
+#   * THE APP, having missed a focus/enter event. Nothing can clear that from
+#     here: this build rejects focusing by address from outside the config
+#     (`hl.dsp.focus` wants a real window OBJECT -- see custom/general.lua), so
+#     for that case this step contributes the log and nothing else.
+#
+# AND THE READ THAT NAMES A CULPRIT. `hyprctl layers` lists every mapped surface
+# with its namespace and geometry, and it is the only place a PERSISTENT claimant
+# shows up at all -- `focusGrab liveNames` names dismissable windows only, and
+# the bar and the on-screen keyboard are persistent. A shell surface sitting
+# full-screen over the field (the sleep notice and the search overlay both map
+# full-panel here) is then in the log rather than guessed at afterwards.
+submap_now="$(hyprctl submap 2>/dev/null | head -1)"
+log "keyboard: submap=${submap_now:-<no answer>}"
+if [ -n "${submap_now:-}" ] && [ "$submap_now" != "default" ]; then
+    if hyprctl dispatch 'hl.dsp.submap("reset")' >/dev/null 2>&1; then
+        log "keyboard: cleared submap '${submap_now}' -- every key was going to it"
+    else
+        log "keyboard: could NOT clear submap '${submap_now}'"
+    fi
+fi
+
+locked="$(ipc lock backdrop | sed -n 's/.*locked=\([a-z]*\).*/\1/p')"
+log "keyboard: session locked=${locked:-<no answer>}"
+
+surfaces="$(hyprctl layers 2>/dev/null \
+    | sed -n 's/.*namespace: \(quickshell:[A-Za-z0-9:-]*\).*/\1/p' | sort -u | tr '\n' ' ')"
+log "keyboard: mapped shell surfaces: ${surfaces:-<none>}"
 
 # ── 3. Clear the transient full-screen notice ───────────────────────────────
 # The "going to sleep" wash is the one overlay surface mapped for the whole

@@ -413,15 +413,25 @@ hl.bind("CTRL + SUPER + B", hl.dsp.exec_cmd("$HOME/.config/hypr/custom/scripts/r
 --     the shell already exposes for it.
 --   * a shell that is mapped but MUTE -- it holds its surfaces, it answers
 --     nothing, so every step above is swallowed. That one escalates.
+--   * and the KEYBOARD held somewhere else, which is not a pointer failure at
+--     all: clicks land everywhere, but a text field never takes input. A stuck
+--     submap is that case -- every key goes to the submap, so nothing can be
+--     typed anywhere.
 --
 -- It is deliberately NOT SUPER+CTRL+B. That key reloads the whole shell (kill +
 -- relaunch), which is slow and disturbs every surface; this one drops the held
 -- input and the grab in place, so windows, panels and the bar never move, and
 -- only escalates to the reload when the shell really is the problem.
 --
+-- submap_universal, deliberately: a submap is one of the things this key
+-- clears, and a bind that does not fire from inside a submap could never clear
+-- one -- the desktop would keep swallowing every key with no way back. It is
+-- the same exception the VM submap's own escape key takes.
+--
 -- See custom/scripts/fix-mouse.sh for the whole story.
 hl.bind("CTRL + SUPER + M", hl.dsp.exec_cmd("$HOME/.config/hypr/custom/scripts/fix-mouse.sh"),
-    { description = "Utilities: Fix pointer clicks (clear held input / stuck grab)" })
+    { submap_universal = true,
+      description = "Utilities: Fix input (held keys / stuck grab / stuck submap)" })
 
 -- SUPER+CTRL+SHIFT+B is INTENTIONALLY UNBOUND (2026-10-03).
 --

@@ -122,8 +122,16 @@ if [[ $RAZER_CC_SYSTEM -eq 1 ]]; then
         /usr/share/polkit-1/actions/org.matrix.razercc.policy
     $sudo_or install -Dm 0644 "$REPO/extras/etc/polkit-1/rules.d/60-razercc.rules" \
         /etc/polkit-1/rules.d/60-razercc.rules
+    # The wake path's one root step: the speaker amp is re-programmed by
+    # restarting its system unit after every suspend/resume, and restarting a
+    # system unit from a session is what asked for the admin password on every
+    # wake. See the rule's own header -- polkitd named that command as the
+    # caller on 2026-10-13.
+    $sudo_or install -Dm 0644 "$REPO/extras/etc/polkit-1/rules.d/20-razer-speakers.rules" \
+        /etc/polkit-1/rules.d/20-razer-speakers.rules
     $sudo_or systemctl restart polkit 2>/dev/null || true
     echo "  polkit  org.matrix.razercc actions + rule installed (passwordless for matrix)"
+    echo "  polkit  razer-speakers restart allowed (waking from sleep asks nothing)"
 fi
 
 # Removable media: the rule that lets the session user mount a stick, a card or

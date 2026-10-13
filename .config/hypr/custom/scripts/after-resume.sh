@@ -106,6 +106,7 @@ set -u
 # is exactly the set the loop belonged to. Set the window to 0 to disable the
 # guard.
 RESUME_SLEEP_GUARD_SEC=90
+GUARD_WHY="ii: post-resume grace period"
 if [ "$RESUME_SLEEP_GUARD_SEC" -gt 0 ] && command -v systemd-inhibit >/dev/null 2>&1; then
     # Detached from this script's lifetime on purpose: the guard has to OUTLIVE
     # the notebook's own work (which can spend up to ~40s waiting on the
@@ -113,13 +114,33 @@ if [ "$RESUME_SLEEP_GUARD_SEC" -gt 0 ] && command -v systemd-inhibit >/dev/null 
     # exiting or the script finishing cannot take it down with them, and the
     # redirects detach it from the journal pipes as well.
     setsid systemd-inhibit --what=sleep --mode=block \
-        --why="ii: post-resume grace period" \
+        --why="$GUARD_WHY" \
         sleep "$RESUME_SLEEP_GUARD_SEC" >/dev/null 2>&1 </dev/null &
     disown 2>/dev/null || true
     # Recorded so the guard is answerable after the fact, in the same spirit as
     # the rest of this setup: "why did my machine not sleep at 08:12" is a
     # journal query.
-    logger -t after-resume "post-resume sleep guard armed for ${RESUME_SLEEP_GUARD_SEC}s" 2>/dev/null || true
+    #
+    # VERIFIED, not assumed. On 2026-10-13 08:14 this was armed and the machine
+    # still slept 27 seconds later, with logind naming no block inhibitor and
+    # systemd-inhibit's own error going to the redirect above -- so the journal
+    # could not say whether the guard had ever been registered, and that is the
+    # one fact needed to tell "something bypassed the guard" apart from "the
+    # guard was never there". Ask logind what it actually holds: the inhibitor
+    # is listed for as long as it is real.
+    guard_held=0
+    for _ in $(seq 1 10); do
+        if systemd-inhibit --list 2>/dev/null | grep -qF "$GUARD_WHY"; then
+            guard_held=1
+            break
+        fi
+        sleep 0.2
+    done
+    if [ "$guard_held" = 1 ]; then
+        logger -t after-resume "post-resume sleep guard armed for ${RESUME_SLEEP_GUARD_SEC}s (verified held)" 2>/dev/null || true
+    else
+        logger -t after-resume "WARNING: post-resume sleep guard NOT held -- sleep is not blocked for ${RESUME_SLEEP_GUARD_SEC}s" 2>/dev/null || true
+    fi
 fi
 
 # 1. Panel and compositor first, so the desktop is usable immediately.
@@ -141,7 +162,18 @@ fi
 #    the service's own ExecStartPre covers the rest.
 sleep 2
 if command -v systemctl >/dev/null 2>&1; then
-    systemctl restart razer-speakers.service >/dev/null 2>&1 || true
+    # --no-ask-password, and a refusal is logged rather than swallowed.
+    #
+    # This restart is what turns the speakers back on, and it is authorized by
+    # extras/etc/polkit-1/rules.d/20-razer-speakers.rules. It used to be a plain
+    # `systemctl restart ... || true`, which on a machine without that rule did
+    # not fail quietly: polkit asked for the admin password, the shell's agent
+    # put that dialog on top of the freshly woken lock screen, and the password
+    # typed to unlock went into it instead (polkitd named this exact command as
+    # the caller, 2026-10-13). With the flag the same situation fails in the
+    # journal, and nothing can ever raise a prompt on the wake screen.
+    systemctl --no-ask-password restart razer-speakers.service >/dev/null 2>&1 \
+        || logger -t after-resume "could not restart razer-speakers.service -- install extras/etc/polkit-1/rules.d/20-razer-speakers.rules" 2>/dev/null || true
     # WAIT for the unit to finish, and this is load-bearing rather than
     # defensive: it is a oneshot with RemainAfterExit AND an ExecStartPost that
     # re-runs the register writes ~5s later, and its ExecStart resets the

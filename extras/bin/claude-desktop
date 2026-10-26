@@ -1,0 +1,93 @@
+#!/bin/bash
+# Claude Desktop, launched at the desktop's scale.
+#
+# WHY THIS FILE EXISTS. Claude is an Electron app and it runs through XWayland
+# here (verified: `hyprctl clients` reports xwayland = true for
+# com.anthropic.Claude, and its GPU/renderer processes carry
+# `--ozone-platform=x11`). XWayland on this desk draws at the panel's native
+# pixels (xwayland:force_zero_scaling = true, custom/general.lua), so a Chromium
+# app that is not told the scale draws its UI at 1x into that surface and the
+# whole window comes up visibly smaller than everything else on screen -- the
+# exact report: "claude opened in the wrong scaling, its not scaled properly
+# like it should with the dashboard".
+#
+# The desktop already solved this compatibility twice for the same class of
+# app: ~/.local/bin/freebuff-desktop and ~/.local/bin/whatsapp-desktop both
+# launch their Electron build with `--ozone-platform=x11
+# --force-device-scale-factor="$(panel_scale)"`. Claude was the one left out,
+# which is why it is the one that came up wrong. This file makes it the third,
+# so a scale change from the Appearance settings reaches all three together
+# (panel_scale reads the compositor, not a hard-coded 1.5).
+#
+# HOW EVERY LAUNCH REACHES THIS FILE (this is the part that makes the fix
+# permanent rather than a one-off manual resize):
+#   * extras/applications/com.anthropic.Claude.desktop -- the versioned copy of
+#     the local override -- points every Exec at the ABSOLUTE path of this file,
+#     so a click on the icon, "New Chat", a claude:// link and app search all
+#     land here. It used to rely on ~/.local/bin preceding /usr/bin on PATH,
+#     which is true for the session but not a guarantee worth resting on.
+#   * scripts/launch/open.sh (the shell's own launcher) is called with the bare
+#     name `claude-desktop`, which resolves here for the same reason.
+#   * install.sh copies extras/bin -> ~/.local/bin and
+#     extras/applications -> ~/.local/share/applications, so a reinstall of the
+#     dotfiles restores both this wrapper and the entry instead of silently
+#     losing the scale fix.
+# The absolute path in APP= below is what keeps this file from re-executing
+# itself.
+APP="/usr/lib/claude-desktop/claude-desktop"
+
+# A socket file is not proof of a server; ask each candidate for real. (The
+# stale /tmp/.X11-unix/X0 on this desk answers nothing -- see the same note in
+# freebuff-desktop, where picking it by name cost a launch.)
+x_display_answers() {
+    [ -S "/tmp/.X11-unix/X${1#:}" ] || return 1
+    DISPLAY="$1" timeout 2 xrandr --current >/dev/null 2>&1
+}
+
+find_x_display() {
+    local n d
+    if [ -n "${DISPLAY:-}" ] && x_display_answers "$DISPLAY"; then
+        printf '%s' "$DISPLAY"; return 0
+    fi
+    for n in 0 1 2 3; do
+        d=":$n"
+        if x_display_answers "$d"; then printf '%s' "$d"; return 0; fi
+    done
+    return 1
+}
+
+# The scale the compositor is actually running, so a fractional panel (this one
+# is 2560x1600 at 1.5) gets its own value instead of whatever the app guesses.
+panel_scale() {
+    local s
+    s=$(hyprctl monitors -j 2>/dev/null | python3 -c '
+import json,sys
+try: print(json.load(sys.stdin)[0]["scale"])
+except Exception: print("")' 2>/dev/null)
+    case "$s" in ''|*[!0-9.]*) s=1.5 ;; esac
+    printf '%s' "$s"
+}
+
+if xdisp=$(find_x_display); then
+    export DISPLAY="$xdisp"
+    [ -z "${XAUTHORITY:-}" ] && [ -f "$HOME/.Xauthority" ] && export XAUTHORITY="$HOME/.Xauthority"
+    # Same pointer fix as the other two wrappers: an X11 client does not inherit
+    # the compositor's XCURSOR_THEME, so without this the pointer switches to
+    # the stock X artwork the moment it crosses into the window.
+    export XCURSOR_THEME=Bibata-Modern-Ice
+    export XCURSOR_SIZE="${XCURSOR_SIZE:-24}"
+    # GPU raster + zero-copy + VA-API: the same set the desktop entry used to
+    # pass by hand, now owned by this file alone so there is one place to
+    # change. A launch from a terminal (or another app's "open with") gets the
+    # same window as a click on the icon.
+    exec "$APP" --ozone-platform=x11 \
+        --force-device-scale-factor="$(panel_scale)" \
+        --enable-gpu-rasterization --enable-zero-copy \
+        --enable-features=VaapiVideoDecodeLinuxGL,VaapiVideoDecoder,CanvasOopRasterization \
+        "$@"
+fi
+
+# No X server: start exactly as the packaged launcher would. Worse looking is
+# better than not opening at all -- and this is the path a session without
+# XWayland takes anyway.
+exec "$APP" "$@"

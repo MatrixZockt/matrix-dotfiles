@@ -41,6 +41,12 @@
 #        build -- it is a non-legacy (Lua) parser and answers "keyword can't
 #        work with non-legacy parsers. Use eval."
 #
+#        The eval below also restates the panel's BIT DEPTH (BITDEPTH further
+#        down). This OLED is a 10 bpc part and the compositor's default is 8;
+#        custom/general.lua's monitor rule and this eval both say bitdepth=10,
+#        because they are two writers of one rule and either could otherwise
+#        undo the other.
+#
 # WHY IT DOES NOT FLAP
 #   * The profile is only written on an AC transition, never every tick, so a
 #     profile picked by hand stays picked until the wall socket actually
@@ -56,6 +62,8 @@
 #   power-autoswitch --status     one-shot report, no changes
 #   power-autoswitch --dry-run    log the decisions, change nothing
 #   power-autoswitch --converge   apply the current profile's cap now, exit
+#   power-autoswitch --refresh    re-assert the panel's rate for the current
+#                                 profile now, exit (no cap: no pkexec)
 set -uo pipefail
 
 HOME_DIR="${HOME:-/home/user}"
@@ -69,6 +77,25 @@ II_CONFIG="$HOME_DIR/.config/illogical-impulse/config.json"
 MONITOR="${MONITOR:-eDP-1}"
 PANEL_MODE="${PANEL_MODE:-2560x1600}"
 DISPLAY_SCALE_FILE="$HOME_DIR/.cache/display/scale"
+
+# Panel bit depth, restated in every rule this script applies.
+#
+# This panel is a 10 bpc part (EDID base 10 bpc, DisplayID native 12 bpc / RGB
+# 10 bpc) and the compositor's default is 8, so a rule that omits the key
+# leaves the output at XRGB8888 with 256 codes per channel. custom/general.lua
+# carries the same value in its monitor rule -- that one is what survives a
+# `hyprctl reload`; this one is what re-asserts the depth whenever the profile
+# moves the refresh, so the two writers cannot drift apart. Measured 2026-10-15
+# at both rates this machine runs (60 Hz uncompressed, 240 Hz through DSC):
+# currentFormat XRGB2101010, i915 `max bpc` 10.
+#
+# 6 / 8 / 10 are the values Hyprland accepts, so a garbage value would be a
+# rule Hyprland refuses -- and a refused rule can leave the panel on the base
+# config's scale. Validate rather than pass through.
+case "${BITDEPTH:-}" in
+    6|8|10) ;;
+    *)     BITDEPTH=10 ;;
+esac
 
 # Validated, not merely defaulted: ${VAR:-fallback} trusts any inherited
 # value, and this environment exports a stray PORT=0, so a polluted
@@ -130,12 +157,20 @@ VENDOR_TURBO=1
 DRY_RUN=0
 STATUS_ONLY=0
 CONVERGE_NOW=0
+REFRESH_ONLY=0
 for arg in "$@"; do
     case "$arg" in
         --dry-run)   DRY_RUN=1 ;;
         --status)    STATUS_ONLY=1 ;;
         --converge)  CONVERGE_NOW=1 ;;
-        -h|--help)   sed -n '2,60p' "$0"; exit 0 ;;
+        --refresh)   REFRESH_ONLY=1 ;;
+        # The help is the header comment, up to the first line of code, rather
+        # than a fixed `sed -n '2,60p'`. That range was 60 for as long as the
+        # header happened to be shorter than 61 lines, and adding the --refresh
+        # entry above pushed the flag list past it -- so --help cut off at the
+        # "Headless and observable:" heading and listed no flags at all. A
+        # stop-on-first-code-line read cannot go stale that way.
+        -h|--help)   awk 'NR > 1 { if ($0 ~ /^set -uo pipefail/) exit; print }' "$0"; exit 0 ;;
         *)           echo "unknown argument: $arg" >&2; exit 2 ;;
     esac
 done
@@ -294,7 +329,7 @@ apply_refresh() {
         return 0
     fi
     local out
-    out="$(hyprctl eval "hl.monitor({ output=\"$MONITOR\", mode=\"$mode\", position=\"0x0\", scale=$scale })" 2>&1)"
+    out="$(hyprctl eval "hl.monitor({ output=\"$MONITOR\", mode=\"$mode\", position=\"0x0\", scale=$scale, bitdepth=$BITDEPTH })" 2>&1)"
     if [ "${out:-}" != "ok" ]; then
         log "refresh eval refused: ${out:-no output} (left at $cur)"
         return 1
@@ -408,6 +443,24 @@ fi
 # poll anyway).
 if [ "$CONVERGE_NOW" = 1 ]; then
     converge
+    exit $?
+fi
+
+# ── re-assert the panel's rate only, and exit ───────────────────────────────
+# WHY THIS EXISTS. `hyprctl reload` -- which apply-display.sh runs for every
+# scale or quality change -- re-applies the CONFIG's monitor rule, and that
+# rule asks for the panel's preferred mode. On power-saver that puts a 60 Hz
+# panel back on 240 Hz until the drift check below notices, up to REFRESH_CHECK
+# seconds later. The owner's rule is that the refresh moves WHEN THE POWER MODE
+# MOVES and at no other time, so the script that caused the reload asks for the
+# right rate back immediately instead of leaving the timer to find it.
+#
+# Same apply_refresh() the loop uses -- one policy table. Deliberately no cap
+# and no profile write, so there is no pkexec and a synchronous caller can run
+# it without a password prompt standing between the reload and the fix.
+if [ "$REFRESH_ONLY" = 1 ]; then
+    hypr_signature || { log "no live Hyprland socket - refresh left alone"; exit 1; }
+    apply_refresh "${REFRESH_FOR[$(ppd_profile)]:-preferred}"
     exit $?
 fi
 

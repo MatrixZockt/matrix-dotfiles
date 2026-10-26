@@ -7,6 +7,23 @@
 #   stuck waiting on the disk" (io). This is the machine reporting its own
 #   pain, not a guess from load average.
 #
+#   ...AND THE DISCRETE GPU. A CUDA, encode or 3D job keeps the CPU almost
+#   idle, so PSI stays near zero while the card works -- measured 2026-10-17
+#   with four 4K NVENC streams: PSI 0-2 %, GPU pinned at P0 2445 MHz, and the
+#   enforced ceiling still the eco 55 W with nvidia-powerd stopped, because
+#   the profile was power-saver. GPU draw now counts as pressure at the
+#   threshold: the ladder below fires for it like it does for a stalled CPU,
+#   and -- the half that was actually broken -- the calm counter cannot stand
+#   the boost back down while the card is still working.
+#
+#   Draw, not utilization: measured on the same card, a 720p30 encode (what a
+#   video player looks like) reports util 0 % and 7.8 W at P8, while four
+#   4K120 streams report util 25-31 % and 25-37 W at P0. The encoder owns the
+#   card either way, so util says nothing; and "a client is attached" would
+#   raise the whole machine to Performance for the length of every video. So
+#   the signal is GPU_WATTS of draw, with an attached client in P0 as the
+#   fallback for a bursty job that idles between kernel launches.
+#
 # WHAT IT DOES WHEN THE MACHINE HURTS
 #   1. powerprofilesctl set performance   (CPU side: governor, EPP, limits)
 #   2. systemctl start nvidia-powerd       (GPU side: Dynamic Boost raises
@@ -17,10 +34,10 @@
 # WHY IT CANNOT FIRE ON A BURST -- the fail-safe ladder, all of which must
 # hold before it touches anything:
 #
-#   * The pressure must exceed the threshold for CONSECUTIVE samples
-#     (default 3 x 5 s = 15 s of sustained stall), not one bad 10 s window.
-#     nvidia-smi, browser spells, a compiler warming up -- all of those
-#     spike one sample and are forgotten.
+#   * The pressure must exceed ITS OWN RESOURCE'S line for CONSECUTIVE
+#     samples (default 3 x 5 s = 15 s of sustained stall), not one bad 10 s
+#     window. nvidia-smi, browser spells, a compiler warming up -- all of
+#     those spike one sample and are forgotten.
 #   * A minimum COOLDOWN between actions, so a flapping machine cannot get
 #     profile flips every 15 s.
 #   * Once switched, it does not switch back. Returning to power-saver is
@@ -28,9 +45,28 @@
 #   * Every decision is logged to the journal (systemd user service), so
 #     "why did it fire" is always answerable.
 #
-set -uo pipefail
-
-THRESHOLD=${THRESHOLD:-12}      # PSI avg10 "some" percent that counts as pain
+# ── ONE LINE PER RESOURCE, NOT ONE FOR ALL THREE ──────────────────────────
+#
+# A single threshold cannot describe this machine. MEASURED 2026-10-25, at
+# idle with nothing stalling: cpu some avg10 = 0.00, memory some avg10 = 0.00,
+# io some avg10 = 11.9-17.2 and holding there for hours (Brave reading tabs,
+# the shell writing its state, journal traffic). Against a 12 % line the
+# watchdog was therefore in permanent pain: 43 raises and 41 stand-downs in
+# six hours, each pair flipping the profile through power-autoswitch (two
+# pkexec calls) and firing a critical notification. That flapping is what the
+# user sees, not a stall -- because there was never a stall.
+#
+# So each resource is measured against what that resource looks like here:
+#   cpu 30 -- a core is genuinely oversubscribed (heavy build, VM, game)
+#   mem 30 -- reclaim is fighting something
+#   io  50 -- a real disk stall, not a browser read
+#
+# THRESHOLD still overrides all three at once, for a machine that has not been
+# measured yet.
+CPU_PAIN=${CPU_PAIN:-${THRESHOLD:-30}}  # PSI cpu "some avg10" that counts as pain
+MEM_PAIN=${MEM_PAIN:-${THRESHOLD:-30}}  # PSI memory "some avg10"
+IO_PAIN=${IO_PAIN:-${THRESHOLD:-50}}    # PSI io "some avg10"
+GPU_WATTS=${GPU_WATTS:-15}      # dGPU draw that counts as work (playback sits at ~8 W)
 CONSECUTIVE=${CONSECUTIVE:-3}   # samples it must persist (x INTERVAL)
 INTERVAL=${INTERVAL:-5}         # seconds between samples
 COOLDOWN=${COOLDOWN:-300}       # min seconds between actions
@@ -94,12 +130,48 @@ psi_some() {
     awk -F'[= ]' '$1 == "some" { for (i = 1; i <= NF; i++) if ($i == "avg10") { print $(i+1); exit } }' "/proc/pressure/$1" 2>/dev/null | cut -d. -f1
 }
 
-peak_psi() {
+# Echo "<resource> <percent> <points over its own line>": the resource that
+# is furthest past ITS line, not the largest raw number. io sitting at 14 of
+# its 50 is not pain; cpu sitting at 31 of its 30 is.
+peak_pain() {
+    local c m i oc om oi
     c=$(psi_some cpu); m=$(psi_some memory); i=$(psi_some io)
-    worst=$c
-    [ "${m:-0}" -gt "$worst" ] 2>/dev/null && worst=$m
-    [ "${i:-0}" -gt "$worst" ] 2>/dev/null && worst=$i
-    echo "${worst:-0}"
+    c=${c:-0}; m=${m:-0}; i=${i:-0}
+    oc=$((c - CPU_PAIN)); om=$((m - MEM_PAIN)); oi=$((i - IO_PAIN))
+    if [ "$oc" -ge "$om" ] && [ "$oc" -ge "$oi" ]; then
+        printf 'cpu %s %s\n' "$c" "$oc"
+    elif [ "$om" -ge "$oi" ]; then
+        printf 'memory %s %s\n' "$m" "$om"
+    else
+        printf 'io %s %s\n' "$i" "$oi"
+    fi
+}
+
+# 1 when the discrete GPU is doing work, 0 when it is parked.
+#
+# A parked card, a suspended card, a missing nvidia-smi and a driver that
+# answers "N/A" all read as 0 -- never as pressure.
+gpu_busy() {
+    local line ps pw
+    # timeout: nvidia-smi blocks forever against a wedged driver (Xid, a stuck
+    # reset), and this runs in the sampling loop -- a hang there would stop the
+    # whole ladder, including the CPU half that has nothing to do with the GPU.
+    line=$(timeout 3 nvidia-smi --query-gpu=pstate,power.draw --format=csv,noheader,nounits 2>/dev/null)
+    [ -n "$line" ] || { echo 0; return; }
+    ps=$(printf '%s' "$line" | cut -d, -f1 | tr -d ' ')
+    pw=$(printf '%s' "$line" | cut -d, -f2 | tr -d ' ')
+    case "${pw:-}" in ''|*[!0-9.]*) echo 0; return ;; esac
+    # Any draw above the playback floor is work, whatever state the card is in.
+    awk -v p="$pw" -v t="$GPU_WATTS" 'BEGIN { exit !(p + 0 >= t + 0) }' \
+        && { echo 1; return; }
+    # Below it, only a real client in P0 counts: a bursty job can idle between
+    # kernel launches, but with no client attached the driver parks in P8.
+    if [ "$ps" = "P0" ] \
+        && [ -n "$(timeout 3 nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | head -1)" ]; then
+        echo 1
+        return
+    fi
+    echo 0
 }
 
 desired_mode() {
@@ -123,17 +195,29 @@ PY
 
 apply_performance() {
     # $1 = the streak length that fired (for the notification's "for how long")
-    local streak=$1
+    # $2 = the resource that hurt, $3 = its value (log + notification)
+    local streak=$1 res=${2:-psi} value=${3:-?}
     # The user's setting wins. If the config already says performance, there is
     # nothing here to raise: the profile is theirs and the boost is on, so
     # engaging would only mean standing down later -- which is exactly the "it
     # jumped back to power saving" this used to cause.
     if [ "$(desired_mode)" = "performance" ]; then
-        log "pressure sustained (${streak}x >= ${THRESHOLD}%), but the user's mode is already performance — no action"
+        log "pressure sustained (${res} ${value}%, ${streak} samples), but the user's mode is already performance — no action"
         last_action=$(date +%s)
         return 0
     fi
-    log "pressure sustained (${streak}x >= ${THRESHOLD}%): acting"
+    # Already raised and still holding: a long GPU or compile job now stays
+    # above the threshold for its whole run, so without this the ladder would
+    # re-fire every COOLDOWN, re-notifying each time about a boost that is
+    # already on. Nothing to do is the correct answer here.
+    if [ "${engaged:-0}" = "1" ] \
+        && [ "$(powerprofilesctl get 2>/dev/null)" = "performance" ] \
+        && systemctl is-active --quiet nvidia-powerd.service; then
+        log "still under load (${res} ${value}%, ${streak} samples), boost already on — holding"
+        last_action=$(date +%s)
+        return 0
+    fi
+    log "pressure sustained (${res} ${value}%, ${streak} samples): acting"
     powerprofilesctl set performance 2>/dev/null \
         && log "cpu profile -> performance" \
         || log "WARN: powerprofilesctl set performance failed"
@@ -148,7 +232,7 @@ apply_performance() {
     engaged_at=$(date +%s)
     quiet_since=0
     notify -i "local_fire_department" "Performance mode engaged" \
-        "System was stalling for ${streak}x${INTERVAL}s. Switched CPU to Performance and enabled GPU Dynamic Boost."
+        "${res} pressure ${value}% for ${streak}x${INTERVAL}s. Switched CPU to Performance and enabled GPU Dynamic Boost."
     blink fire "Power failsafe: machine was stalling — switched to Performance"
     last_action=$(date +%s)
 }
@@ -208,18 +292,30 @@ stand_down() {
     blink green "Failsafe: machine calm — back to ${mode}"
 }
 
-log "watching PSI cpu/memory/io: fires after ${CONSECUTIVE} consecutive samples >= ${THRESHOLD}% (interval ${INTERVAL}s, cooldown ${COOLDOWN}s)"
+log "watching PSI: fires after ${CONSECUTIVE} samples past their resource line (cpu ${CPU_PAIN}%, memory ${MEM_PAIN}%, io ${IO_PAIN}%), interval ${INTERVAL}s, cooldown ${COOLDOWN}s"
 log "auto-restore: ${RESTORE_QUIET}s of sustained calm while profile is still performance -> back to power-saver"
 
 while true; do
-    p=$(peak_psi)
-    if [ "${p:-0}" -ge "$THRESHOLD" ]; then
+    read -r res p over < <(peak_pain)
+    g=$(gpu_busy)
+    # A busy dGPU is pressure too, even with the CPU calm. Raised past every
+    # line rather than a separate branch, so the streak and the calm counter
+    # are fed by one number and cannot disagree: a GPU job that is still
+    # running keeps the boost up, and stops it from standing down ninety
+    # seconds in.
+    if [ "$g" = "1" ]; then
+        gpu=1
+        res=gpu; p=100; over=1
+    else
+        gpu=0
+    fi
+    if [ "$over" -ge 0 ]; then
         count=$((count + 1))
-        log "pressure ${p}% (${count}/${CONSECUTIVE})"
+        log "pressure ${res}=${p}% gpu-busy=${gpu} (${count}/${CONSECUTIVE})"
         if [ "$count" -ge "$CONSECUTIVE" ]; then
             now=$(date +%s)
             if [ $((now - last_action)) -ge "$COOLDOWN" ]; then
-                apply_performance "$count"
+                apply_performance "$count" "$res" "$p"
             else
                 log "still stalling, but cooling down ($((COOLDOWN - (now - last_action)))s left) — no action"
             fi
@@ -227,7 +323,7 @@ while true; do
         fi
     else
         # A single quiet sample resets the streak: bursts must be consecutive.
-        [ "$count" -gt 0 ] && log "pressure cleared (${p}%), streak reset"
+        [ "$count" -gt 0 ] && log "pressure cleared (${res}=${p}%, gpu-busy=${gpu}), streak reset"
         count=0
         # ── Auto-restore: stand down after sustained calm ──
         if [ "$engaged" = "1" ]; then

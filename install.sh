@@ -159,6 +159,69 @@ if [[ $REMOVABLE_POLKIT -eq 1 ]]; then
     echo "  polkit  removable-media rule installed (mount / umount / blockdev, no password)"
 fi
 
+# Account recovery: ii-recover goes to /usr/local/sbin, root-owned, and its store
+# directory /var/lib/ii-recovery is created root-owned too. Both are the security
+# property, not housekeeping: the helper is run as root (pkexec from the settings
+# app's Account page, or directly from a console when the password is gone), and a
+# helper or a recovery record the session user could rewrite would be a way to
+# reset the password with a code of one's own choosing. The settings page reads
+# this file (0644, salt+hash only) so it can show whether a code is set -- the
+# code itself is 100 random bits behind scrypt and is never stored.
+#
+# Changing a password needs none of this: /usr/bin/passwd is setuid and does that
+# on its own (see extras/bin/ii-passwd).
+RECOVER_SYSTEM=0
+if [[ -f "$REPO/extras/sbin/ii-recover" && $DRY_RUN -eq 0 ]]; then
+    if [ "$(id -u)" -eq 0 ]; then
+        RECOVER_SYSTEM=1
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        RECOVER_SYSTEM=1
+    else
+        echo "  (skipped: run 'sudo bash install.sh' or copy extras/sbin/ii-recover to /usr/local/sbin/)"
+    fi
+fi
+if [[ $RECOVER_SYSTEM -eq 1 ]]; then
+    sudo_or=""
+    [ "$(id -u)" -ne 0 ] && sudo_or="sudo"
+    $sudo_or install -Dm 0755 "$REPO/extras/sbin/ii-recover" /usr/local/sbin/ii-recover
+    $sudo_or install -d -m 0755 -o root -g root /var/lib/ii-recovery
+    echo "  recover ii-recover installed (root-owned); /var/lib/ii-recovery ready"
+    echo "          generate a code from Settings > Account, or: sudo ii-recover --setup"
+fi
+
+# Lid state at resume: this Blade's firmware never reports the lid as open
+# after a resume and _LID keeps answering "closed", so the driver, the input
+# switch, the proc file and logind all agree on a wrong value -- and on
+# 2026-10-16 the post-resume lid watcher slept a machine whose lid was open.
+# The kernel's own quirk table answers exactly this firmware for sibling Razer
+# models, but not for this one, and `button` is built into the kernel (no
+# button.ko) so the parameter has to be set at boot from userspace. The unit's
+# header carries the measurement and the revert recipe; a failure here is
+# visible in `systemctl --failed` and named by lid-guard.sh in the journal.
+LID_UNIT=0
+if [[ -f "$REPO/extras/etc/systemd/system/lid-init-state.service" && $DRY_RUN -eq 0 ]]; then
+    if [ "$(id -u)" -eq 0 ]; then
+        LID_UNIT=1
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        LID_UNIT=1
+    else
+        echo "  (skipped: run 'sudo bash install.sh' or copy extras/etc/systemd/system/lid-init-state.service to /etc/systemd/system/)"
+    fi
+fi
+if [[ $LID_UNIT -eq 1 ]]; then
+    sudo_or=""
+    [ "$(id -u)" -ne 0 ] && sudo_or="sudo"
+    $sudo_or install -Dm 0644 "$REPO/extras/etc/systemd/system/lid-init-state.service" \
+        /etc/systemd/system/lid-init-state.service
+    $sudo_or systemctl daemon-reload
+    # --now, because the parameter is not a boot-time-only convenience: it is
+    # read on the resume path, and the first resume after this install should
+    # already be the fixed one.
+    $sudo_or systemctl enable --now lid-init-state.service >/dev/null 2>&1 || \
+        echo "  (could not enable lid-init-state.service -- enable it by hand)"
+    echo "  unit    lid-init-state.service installed (lid reported open at resume)"
+fi
+
 # Make AppImages and loose executables launch on double-click, permanently:
 # register appimage-run as the default handler for their mime types. This
 # writes [Default Applications] entries into ~/.config/mimeapps.list, which

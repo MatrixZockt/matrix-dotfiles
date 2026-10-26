@@ -1,0 +1,536 @@
+#!/usr/bin/env python3
+"""
+ii-recover -- the way back in when the login password is gone.
+
+THE MODEL, honestly stated
+    A 20-character recovery code is generated from the OS CSPRNG (100 bits) and
+    stored ONLY as a memory-hard scrypt hash. With the hash in hand, guessing the
+    code is infeasible: every guess costs 64 MiB and ~0.3 s, and the search space
+    is 10^30. That part of the promise is real and it is the whole point.
+
+    What this is NOT: protection against someone who has the laptop. This machine
+    boots a plain btrfs root with no LUKS anywhere, so five minutes and a USB stick
+    gets around any password screen -- they can edit /etc/shadow directly and never
+    need the recovery code. The code exists so that YOU, the person who wrote it
+    down, can get back into your own account without a rescue disk. It is an
+    anti-lockout tool, not a lock.
+
+WHY THE FILES ARE ROOT-OWNED
+    /var/lib/ii-recovery/<user>.json holds {salt, hash, kdf params}. It is
+    deliberately world-READABLE (0644): the hash is useless without the code, and
+    readable means the settings app can show "recovery code set on <date>" and
+    `--check` can verify a code without a password prompt. It is deliberately NOT
+    writable by the user: a recovery secret the account owner can rewrite is a
+    user-to-root path (set a known code, then reset the password with it), so the
+    directory and the file are root-owned and only root may write them.
+
+COMMANDS
+    --setup [--user U] [--force]     root only. Generates a new code, stores its
+                                     hash, prints the code ONCE on stdout (human
+                                     framing on stderr, so a GUI can read stdout
+                                     alone). Refuses to overwrite unless --force.
+    --status [--user U]              anyone. "SET <iso date>" or "UNSET".
+    --check  [--user U]              anyone. Reads a code, prints OK or FAIL.
+    --reset  [--user U]              root only. Reads a code, then the new
+                                     password twice; on a correct code it changes
+                                     the password with the system's own passwd, so
+                                     PAM policy still applies.
+    --remove [--user U]              root only. Deletes the stored code.
+
+Usage from the settings app goes through the shell's own polkit prompt:
+    pkexec /usr/local/sbin/ii-recover --setup
+At a locked-out console (Ctrl+Alt+F3, log in as root), no polkit is involved:
+    ii-recover --reset matrix
+
+NOTHING SECRET IS EVER LOGGED. Failures go to syslog with the user name and the
+attempt count only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import hmac
+import json
+import os
+import pwd
+import re
+import secrets
+import select
+import signal
+import subprocess
+import sys
+import termios
+import time
+from datetime import datetime, timezone
+
+STORE_DIR = "/var/lib/ii-recovery"
+VERSION = 1
+
+# Crockford base32: 32 symbols, no I/L/O/U, so nothing a person writes down is
+# ambiguous. 20 characters is exactly 100 bits.
+ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+CODE_LEN = 20
+GROUP = 4
+
+SCRYPT_N = 1 << 16  # 65536 -> 64 MiB per guess
+SCRYPT_R = 8
+SCRYPT_P = 1
+SCRYPT_DKLEN = 32
+SCRYPT_MAXMEM = 256 * 1024 * 1024  # the default cap is too low for n=2^16
+
+FAIL_DELAY = 2.0  # seconds burned on a wrong code
+ANSI = re.compile(rb"\x1b\[[0-9;?]*[a-zA-Z]")
+
+PROMPT_NEW = re.compile(rb"(?<!Re)New password:")
+PROMPT_RETYPE = re.compile(rb"Retype new password:")
+PROMPT_CURRENT = re.compile(rb"Current password:")
+OUT_SUCCESS = re.compile(rb"password updated successfully|password changed", re.I)
+OUT_WEAK = re.compile(rb"BAD PASSWORD", re.I)
+OUT_MISMATCH = re.compile(rb"do(?:es)? not match|They don't match", re.I)
+
+
+# ---------------------------------------------------------------- code handling
+
+
+def new_code() -> str:
+    """5 bits per character from the CSPRNG: 20 characters, 100 bits."""
+    raw = "".join(secrets.choice(ALPHABET) for _ in range(CODE_LEN))
+    return "-".join(raw[i : i + GROUP] for i in range(0, CODE_LEN, GROUP))
+
+
+def normalise_code(text: str) -> str:
+    """
+    Accept a code the way people write it down: any case, with or without the
+    dashes, and with Crockford's I/L -> 1 and O -> 0 folding so a handwritten
+    letter for a digit (or vice versa) still works.
+    """
+    folded = text.upper().replace("I", "1").replace("L", "1").replace("O", "0")
+    return "".join(ch for ch in folded if ch.isalnum())
+
+
+def derive(code: str, salt: bytes) -> bytes:
+    return hashlib.scrypt(
+        normalise_code(code).encode("ascii"),
+        salt=salt,
+        n=SCRYPT_N,
+        r=SCRYPT_R,
+        p=SCRYPT_P,
+        dklen=SCRYPT_DKLEN,
+        maxmem=SCRYPT_MAXMEM,
+    )
+
+
+def store_path(user: str) -> str:
+    return os.path.join(STORE_DIR, f"{user}.json")
+
+
+def load_record(user: str) -> dict | None:
+    try:
+        with open(store_path(user), "r", encoding="utf-8") as handle:
+            record = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or record.get("version") != VERSION:
+        return None
+    if record.get("user") != user or "salt" not in record or "hash" not in record:
+        return None
+    return record
+
+
+def verify(user: str, code: str) -> bool:
+    record = load_record(user)
+    if record is None:
+        return False
+    try:
+        salt = base64.b64decode(record["salt"])
+        expected = base64.b64decode(record["hash"])
+    except (KeyError, ValueError):
+        return False
+    # The params come from the file so an older code still verifies if the cost
+    # is ever raised. Clamped so a tampered file cannot make this allocate wildly.
+    n = min(max(int(record.get("n", SCRYPT_N)), 1 << 14), 1 << 20)
+    r = min(max(int(record.get("r", SCRYPT_R)), 1), 32)
+    p = min(max(int(record.get("p", SCRYPT_P)), 1), 16)
+    try:
+        got = hashlib.scrypt(
+            normalise_code(code).encode("ascii"),
+            salt=salt,
+            n=n,
+            r=r,
+            p=p,
+            dklen=len(expected) or SCRYPT_DKLEN,
+            maxmem=SCRYPT_MAXMEM,
+        )
+    except (ValueError, OverflowError):
+        return False
+    return hmac.compare_digest(got, expected)
+
+
+def read_code(prompt: str = "Recovery code: ") -> str:
+    """
+    Read a code without showing it on screen. getpass is used at a terminal so
+    typing is not echoed; piped input (the settings app) is read plainly.
+    """
+    if sys.stdin.isatty():
+        import getpass
+
+        try:
+            return getpass.getpass(prompt)
+        except (EOFError, KeyboardInterrupt):
+            sys.exit(1)
+    line = sys.stdin.readline()
+    return line
+
+
+def say(text: str) -> None:
+    """Human framing goes to stderr: stdout carries only machine-read values."""
+    sys.stderr.write(text + "\n")
+    sys.stderr.flush()
+
+
+def log(message: str) -> None:
+    try:
+        import syslog
+
+        syslog.openlog("ii-recover")
+        syslog.syslog(syslog.LOG_WARNING, message)
+        syslog.closelog()
+    except Exception:
+        pass
+
+
+# ------------------------------------------------------------------- identities
+
+
+def human_users() -> list[str]:
+    out = []
+    for entry in pwd.getpwall():
+        if 1000 <= entry.pw_uid < 65534 and not entry.pw_shell.endswith(("nologin", "false")):
+            out.append(entry.pw_name)
+    return out
+
+
+def default_user() -> str | None:
+    """
+    Whose account this is about. Under pkexec/sudo the invoking user is in the
+    environment; at a bare root console nothing is, and guessing 'root' would be
+    exactly the wrong answer, so we refuse and make the caller name the account.
+    """
+    for var in ("PKEXEC_UID", "SUDO_UID"):
+        uid = os.environ.get(var)
+        if uid and uid.isdigit():
+            try:
+                return pwd.getpwuid(int(uid)).pw_name
+            except KeyError:
+                pass
+    if os.geteuid() != 0:
+        return pwd.getpwuid(os.geteuid()).pw_name
+    return None
+
+
+def resolve_user(requested: str | None) -> str:
+    user = requested or default_user()
+    if not user:
+        say("Which account? Name it, e.g.  ii-recover --reset matrix")
+        users = human_users()
+        if users:
+            say("accounts on this machine: " + ", ".join(users))
+        sys.exit(2)
+    try:
+        pwd.getpwnam(user)
+    except KeyError:
+        say(f"No such account: {user}")
+        sys.exit(2)
+    return user
+
+
+def require_root(action: str) -> None:
+    if os.geteuid() != 0:
+        say(f"{action} needs root: run it as root, or via pkexec for a prompt.")
+        sys.exit(2)
+
+
+# ------------------------------------------------------------------ passwd glue
+
+
+def set_password(user: str, password: str) -> tuple[bool, str]:
+    """
+    Hand the new password to the system's own `passwd` on a pty, so the PAM
+    password stack (and therefore any policy in /etc/security) still runs. Echo is
+    off before the prompt is printed, so nothing is written back; the password is
+    only ever in this process's memory.
+    """
+    import pty
+
+    master, slave = pty.openpty()
+    env = dict(os.environ)
+    env.update({"LC_ALL": "C", "LANG": "C"})
+    proc = subprocess.Popen(
+        ["/usr/bin/passwd", user],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        env=env,
+        close_fds=True,
+        start_new_session=True,
+    )
+    os.close(slave)
+
+    payload = password.encode("utf-8") + b"\n"
+    pending = {"new", "confirm"}
+    buf = b""
+    deadline = time.monotonic() + 25
+    result: tuple[bool, str] | None = None
+
+    try:
+        while result is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                result = (False, "passwd stopped responding")
+                break
+            if not select.select([master], [], [], min(remaining, 0.5))[0]:
+                if proc.poll() is not None:
+                    result = (
+                        (True, "changed")
+                        if proc.returncode == 0 and OUT_SUCCESS.search(buf)
+                        else (False, clean_line(buf))
+                    )
+                continue
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                continue
+            buf += chunk
+            tail = buf[-600:]
+
+            if OUT_WEAK.search(tail):
+                result = (False, "the system refused that password: " + clean_line(tail))
+                break
+            if OUT_MISMATCH.search(tail):
+                result = (False, "the two passwords did not match")
+                break
+            if OUT_SUCCESS.search(tail):
+                result = (True, "changed")
+                break
+            for name, pattern in (("confirm", PROMPT_RETYPE), ("new", PROMPT_NEW)):
+                if pattern.search(tail) and name in pending:
+                    pending.discard(name)
+                    os.write(master, payload)
+                    break
+            else:
+                if PROMPT_CURRENT.search(tail):
+                    # Root is never asked for the current password; if that ever
+                    # changes, stop rather than write the new password into a
+                    # prompt meant for the old one.
+                    result = (False, "passwd asked for the current password")
+                    break
+    finally:
+        try:
+            if proc.poll() is None:
+                proc.send_signal(signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+        os.close(master)
+    # Do not let the password linger in this frame longer than necessary.
+    payload = b""
+    return result or (False, "unknown failure")
+
+
+def clean_line(buf: bytes, *secrets_: str) -> str:
+    text = " ".join(ANSI.sub(b"", buf).decode("utf-8", "replace").split())
+    for secret in secrets_:
+        if secret:
+            text = text.replace(secret, "***")
+    return text[:200] or "passwd failed"
+
+
+# -------------------------------------------------------------------- commands
+
+
+def cmd_setup(user: str, force: bool) -> int:
+    require_root("Storing a recovery code")
+    if os.path.exists(store_path(user)) and not force:
+        say(f"{user} already has a recovery code. Use --force to replace it.")
+        return 1
+
+    code = new_code()
+    salt = secrets.token_bytes(16)
+    digest = derive(code, salt)
+    record = {
+        "version": VERSION,
+        "user": user,
+        "created": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "kdf": "scrypt",
+        "n": SCRYPT_N,
+        "r": SCRYPT_R,
+        "p": SCRYPT_P,
+        "salt": base64.b64encode(salt).decode("ascii"),
+        "hash": base64.b64encode(digest).decode("ascii"),
+    }
+
+    os.makedirs(STORE_DIR, mode=0o755, exist_ok=True)
+    # Root-owned, world-readable, never user-writable. Written via a temp file so
+    # a crash cannot leave a half-written record behind.
+    path = store_path(user)
+    tmp = f"{path}.new"
+    with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644), "w", encoding="utf-8") as handle:
+        json.dump(record, handle, indent=2)
+        handle.write("\n")
+    if os.geteuid() == 0:
+        os.chown(tmp, 0, 0)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+    # The ownership is the security property, so verify it rather than assume it:
+    # a user-writable recovery secret would be a way to reset the password with a
+    # code of one's own choosing.
+    if os.geteuid() == 0:
+        os.chown(path, 0, 0)
+        stat = os.stat(path)
+        if stat.st_uid != 0 or (stat.st_mode & 0o777) != 0o644:
+            os.unlink(path)
+            say(f"Refusing to use {path}: it is not root-owned 0644 (uid {stat.st_uid}).")
+            return 1
+
+    say("")
+    say("  Your recovery code -- write it down now, it is not shown again:")
+    say("")
+    say("      " + code)
+    say("")
+    say(f"  Only a hash of it is stored ({path}); there is no way to read it back.")
+    say("  Keep it somewhere you would find it while locked out of this machine.")
+    say("")
+    print(code, flush=True)
+    log(f"recovery code set for {user}")
+    return 0
+
+
+def cmd_status(user: str) -> int:
+    record = load_record(user)
+    if record is None:
+        print("UNSET")
+        return 1
+    print("SET " + str(record.get("created", "unknown")))
+    return 0
+
+
+def cmd_check(user: str, code: str) -> int:
+    if not code.strip():
+        print("FAIL")
+        return 1
+    if verify(user, code):
+        print("OK")
+        return 0
+    print("FAIL")
+    return 1
+
+
+def cmd_remove(user: str) -> int:
+    require_root("Removing a recovery code")
+    path = store_path(user)
+    if not os.path.exists(path):
+        say(f"{user} has no recovery code stored.")
+        return 1
+    os.unlink(path)
+    say(f"Recovery code removed for {user}. Password reset now needs root only.")
+    log(f"recovery code removed for {user}")
+    return 0
+
+
+def cmd_reset(user: str, code: str) -> int:
+    require_root("Resetting a password")
+
+    if not verify(user, code):
+        # Burn a little time and record the attempt. 100 bits makes this moot, but
+        # it costs nothing and keeps a leaked hash from being hammered quickly.
+        log(f"FAILED recovery attempt for {user}")
+        time.sleep(FAIL_DELAY)
+        say("That code is not right.")
+        say("The stored code is root-owned and cannot be read back, so the only way")
+        say("to recover is the code you wrote down when it was generated.")
+        print("FAIL")
+        return 1
+
+    say(f"Code accepted for {user}.")
+    say("New password (typed twice, not echoed):")
+    first = sys.stdin.readline().rstrip("\n")
+    second = sys.stdin.readline().rstrip("\n")
+    if not first:
+        say("Empty password -- refusing.")
+        print("FAIL")
+        return 1
+    if first != second:
+        say("The two entries did not match.")
+        print("FAIL")
+        return 1
+
+    ok, detail = set_password(user, first)
+    first = second = ""
+    if not ok:
+        say(f"Password not changed: {detail}")
+        log(f"recovery reset failed for {user}: {detail[:80]}")
+        print("FAIL")
+        return 1
+
+    log(f"password reset via recovery code for {user}")
+    say(f"Done. {user} now has that password; the recovery code is unchanged.")
+    print("OK")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="ii-recover",
+        description="Recover an account with a stored code, or manage that code.",
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--setup", action="store_true", help="generate and store a new code (root)")
+    group.add_argument("--status", action="store_true", help="is a code set? (anyone)")
+    group.add_argument("--check", action="store_true", help="verify a code (anyone)")
+    group.add_argument("--reset", action="store_true", help="reset a password with the code (root)")
+    group.add_argument("--remove", action="store_true", help="delete the stored code (root)")
+    parser.add_argument("--user", default=None, help="account to act on")
+    parser.add_argument("--force", action="store_true", help="--setup: replace an existing code")
+    # The account may also be a bare word: the settings page tells a locked-out
+    # person, sitting at a text console, to run `ii-recover --reset <you>`.
+    # That line used to be rejected by this parser ("unrecognized arguments"),
+    # which is a poor thing to hand somebody who is already stuck outside their
+    # own machine. Both spellings now mean the same thing, and naming two
+    # different accounts is reported rather than silently half-honoured.
+    parser.add_argument("account", nargs="?", default=None,
+                        help="account to act on; same as --user")
+    args = parser.parse_args()
+
+    if args.account is not None:
+        if args.user is not None and args.user != args.account:
+            parser.error("the account was named twice, as --user and as a bare word")
+        args.user = args.account
+
+    user = resolve_user(args.user)
+
+    if args.setup:
+        return cmd_setup(user, args.force)
+    if args.status:
+        return cmd_status(user)
+    if args.check:
+        return cmd_check(user, read_code())
+    if args.remove:
+        return cmd_remove(user)
+    if args.reset:
+        return cmd_reset(user, read_code())
+    return 2
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

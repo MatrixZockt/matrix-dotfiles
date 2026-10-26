@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""
+ii-passwd -- change a login password, driven by the settings app.
+
+Why this exists instead of calling `passwd` straight from QML: `passwd` is an
+interactive program. It prints "Current password:" and waits, then "New password:"
+and waits, and it only turns terminal echo off once it starts reading. Feeding it
+a pipe from a GUI process is a race -- whatever is written before it manages to
+disable echo can come straight back on its output, which for this program means
+your password. So this wrapper hands it a real pty, waits for each prompt before
+answering it, and reduces the whole exchange to one line the caller can act on.
+
+Protocol
+    stdin   : current password, new password, new password -- one per line, in
+              that order. The current password line is ignored if `passwd` does
+              not ask for it (which is what happens when root runs it).
+    stdout  : exactly one status line, never a secret:
+                  OK                 password changed
+                  ERR bad-current    the current password was rejected
+                  ERR weak           the new password was refused by the system
+                  ERR mismatch       the two new passwords did not match
+                  ERR locked         too many failed attempts (pam_faillock)
+                  ERR timeout        passwd stopped responding
+                  ERR <other>        anything else, sanitised
+    exit    : 0 when the status is OK, 1 otherwise.
+
+No privileges are needed. /usr/bin/passwd is setuid root and checks the current
+password through PAM (/etc/pam.d/passwd includes system-auth, which also means a
+wrong guess here counts against pam_faillock exactly like a wrong guess anywhere
+else -- the caller should not let the user hammer it). Nothing in this file
+touches /etc/shadow itself, and the passwords live only in this process's memory:
+they are never written to a log, never put in argv, and redacted from any output
+we relay.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import pty
+import re
+import select
+import signal
+import subprocess
+import sys
+import time
+
+# passwd's messages, matched with LC_ALL=C forced in the child so they are stable.
+ANSI = re.compile(rb"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|[\x00-\x08\x0b-\x1f]")
+
+# All patterns are byte patterns: pty output arrives as bytes.
+PROMPT_CURRENT = re.compile(rb"Current password:")
+PROMPT_NEW = re.compile(rb"(?<!Re)New password:")
+PROMPT_RETYPE = re.compile(rb"Retype new password:")
+
+OUT_SUCCESS = re.compile(rb"password updated successfully|password changed", re.I)
+OUT_CURRENT_BAD = re.compile(
+    rb"Authentication failure|Authentication token manipulation error"
+    rb"|incorrect password|password unchanged",
+    re.I,
+)
+OUT_LOCKED = re.compile(rb"account is locked|temporarily locked|faillock", re.I)
+OUT_MISMATCH = re.compile(rb"do(?:es)? not match|They don't match|mismatch", re.I)
+OUT_WEAK = re.compile(rb"BAD PASSWORD", re.I)
+
+READ_TIMEOUT = 25.0
+
+
+def redact(text: bytes, secrets: list[bytes]) -> str:
+    """Turn pty output into one clean line, with any echoed secret removed."""
+    clean = ANSI.sub(b"", text).decode("utf-8", "replace")
+    for secret in secrets:
+        if secret:
+            clean = clean.replace(secret.decode("utf-8", "replace"), "***")
+    clean = " ".join(clean.split())
+    return clean[:300]
+
+
+def reason_from(text: bytes) -> str:
+    """The human-readable half of passwd's complaint, e.g. 'BAD PASSWORD: too short'."""
+    clean = " ".join(ANSI.sub(b"", text).decode("utf-8", "replace").split())
+    clean = clean.replace("passwd:", " ").strip()
+    return clean[:200] or "passwd refused the change"
+
+
+def weak_reason(text: bytes) -> str:
+    """Just the sentence explaining why the new password was refused."""
+    clean = " ".join(ANSI.sub(b"", text).decode("utf-8", "replace").split())
+    match = re.search(r"BAD PASSWORD:?\s*(.+?)(?:\s+(?:passwd|Have|Retype|New|Current):?|$)", clean)
+    if match:
+        return match.group(1).strip()[:160]
+    return "the system refused it"
+
+
+def run_passwd(user: str, answers: dict[str, bytes]) -> tuple[bool, str]:
+    """
+    Drive `passwd [user]` on a pty. Returns (ok, status).
+
+    The pty is essential rather than decorative: with it, passwd behaves exactly
+    as it does at a terminal, including disabling echo before it reads.
+    """
+    master, slave = pty.openpty()
+    env = dict(os.environ)
+    env.update({"LC_ALL": "C", "LANG": "C"})
+
+    argv = ["/usr/bin/passwd"]
+    if user:
+        argv.append(user)
+
+    proc = subprocess.Popen(
+        argv,
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        env=env,
+        close_fds=True,
+        start_new_session=True,  # own session, so a signal to us cannot leak in
+    )
+    os.close(slave)
+
+    pending = {"current", "new", "confirm"}
+    buf = b""
+    deadline = time.monotonic() + READ_TIMEOUT
+    status: tuple[bool, str] | None = None
+
+    try:
+        while status is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                status = (False, "ERR timeout")
+                break
+            if not select.select([master], [], [], min(remaining, 0.5))[0]:
+                if proc.poll() is not None:
+                    # Child gone: whatever it said is already in buf.
+                    status = finish(proc.returncode, buf)
+                continue
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                if proc.poll() is not None:
+                    status = finish(proc.returncode, buf)
+                    continue
+                continue
+            buf += chunk
+            tail = buf[-600:]
+
+            # Outcomes, most specific first. Order matters: a single failure can
+            # print several of these lines, and 'password unchanged' trails most
+            # of them, so the specific diagnoses have to be tested before it.
+            if OUT_SUCCESS.search(tail):
+                status = (True, "OK")
+                break
+            if OUT_LOCKED.search(tail):
+                status = (False, "ERR locked")
+                break
+            if OUT_MISMATCH.search(tail):
+                status = (False, "ERR mismatch")
+                break
+            if OUT_WEAK.search(tail):
+                # Do not retry silently: the caller shows the reason and lets the
+                # user choose a stronger password. Retrying here would chew
+                # through passwd's own attempt limit and hide the reason.
+                status = (False, f"ERR weak: {weak_reason(tail)}")
+                break
+            if OUT_CURRENT_BAD.search(tail):
+                status = (False, "ERR bad-current")
+                break
+
+            # Then prompts, newest first, each answered at most once.
+            for name, pattern in (
+                ("retype", PROMPT_RETYPE),
+                ("new", PROMPT_NEW),
+                ("current", PROMPT_CURRENT),
+            ):
+                match = pattern.search(tail)
+                if not match:
+                    continue
+                if name == "retype":
+                    slot = "confirm"
+                elif name == "new":
+                    slot = "new"
+                else:
+                    slot = "current"
+                if slot not in pending:
+                    continue
+                pending.discard(slot)
+                if slot == "current" and not answers.get("current"):
+                    continue
+                os.write(master, answers[slot] + b"\n")
+                break
+    finally:
+        try:
+            if proc.poll() is None:
+                proc.send_signal(signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+        os.close(master)
+
+    return status or (False, "ERR unknown")
+
+
+def finish(returncode: int, buf: bytes) -> tuple[bool, str]:
+    """No recognised outcome and the child has exited -- classify what is left."""
+    if returncode == 0 and OUT_SUCCESS.search(buf):
+        return (True, "OK")
+    return (False, f"ERR exit:{returncode} {reason_from(buf)}")
+
+
+def read_stdin_lines(count: int) -> list[bytes]:
+    out = []
+    for _ in range(count):
+        line = sys.stdin.buffer.readline()
+        out.append(line.rstrip(b"\r\n"))
+    return out
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="ii-passwd",
+        description="Change a login password and report the result in one line.",
+    )
+    parser.add_argument(
+        "--user",
+        default="",
+        help="account to change (default: you). Only root may name another account; "
+        "passwd refuses the rest, which is the point.",
+    )
+    args = parser.parse_args()
+
+    user = args.user or os.environ.get("USER") or ""
+    current, new, confirm = read_stdin_lines(3)
+    answers = {"current": current, "new": new, "confirm": confirm}
+
+    try:
+        ok, status = run_passwd(user, answers)
+    except Exception as exc:  # a crash here must not look like success
+        if os.environ.get("II_PASSWD_DEBUG"):
+            import traceback
+
+            traceback.print_exc()
+        print(f"ERR internal: {exc.__class__.__name__}", flush=True)
+        return 1
+
+    print(status, flush=True)
+    if not ok:
+        # The reason is helpful for a human reading a terminal; the status line
+        # above is what the settings app parses.
+        sys.stderr.write(status.split(" ", 1)[-1] + "\n")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

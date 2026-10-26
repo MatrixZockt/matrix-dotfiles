@@ -1,0 +1,97 @@
+# Report the lid as OPEN at every resume, instead of believing _LID.
+#
+# WHY THIS EXISTS.
+#
+# On this Blade (Razer Blade 16 - RZ09-0510) the firmware never reports the lid
+# as open after a resume and _LID keeps answering "closed" -- so at resume the
+# driver, the input switch, /proc/acpi/button/lid/LID0/state and logind all
+# agree on a value the lid's owner can see is wrong. On the morning of
+# 2026-10-16 that slept a machine whose user was logged in:
+#
+#   journalctl -b -1
+#     10:19:46  resume (the lid was opened to wake it)
+#     10:20:24  lid-guard: "lid shut for 19 reads at 36s into the grace"
+#               -- nineteen live _LID answers of "closed", for an open lid
+#     10:20:29  PM: suspend entry (deep)
+#
+# THE KERNEL ALREADY KNOWS THIS FIRMWARE. drivers/acpi/button.c carries a DMI
+# quirk table for exactly this behaviour, worded for the sibling machines:
+#
+#   "notification of the LID device only happens on close, not on open and
+#    _LID always returns closed"      (Razer Blade Stealth 13 Late 2019,
+#                                      Razer Blade Pro 17 Early 2020)
+#
+# and it answers it with ACPI_BUTTON_LID_INIT_OPEN -- which, at init and at
+# resume, calls acpi_lid_notify_state(button, true) WITHOUT consulting _LID:
+#
+#   static void acpi_lid_initialize_state(struct acpi_button *button)
+#   {
+#           switch (lid_init_state) {
+#           case ACPI_BUTTON_LID_INIT_OPEN:
+#                   acpi_lid_notify_state(button, true);
+#                   break;
+#   ...
+#
+# A genuine close is unaffected -- it arrives as a notification, _LID is
+# evaluated, the state really does change and it is reported. The kernel's own
+# comment on that path is the guarantee the whole arrangement rests on:
+# "the close event is reliable".
+#
+# RZ09-0510 IS NOT IN THAT TABLE, so its default is lid_init_state=method,
+# which believes _LID, and the table cannot be extended from userspace. This
+# unit throws the same switch by hand.
+#
+# WHY A UNIT AND NOT THE USUAL MECHANISMS.
+#
+#   modprobe.d      `button` is built into this kernel -- there is no
+#                   button.ko, so a modprobe.d file would never be read.
+#   kernel cmdline  would work (`button.lid_init_state=open`), but it means
+#                   hand-editing the Limine entry, where a mistake is a machine
+#                   that does not boot. This file cannot break booting.
+#   the parameter   is writable at runtime (0644, and its store function
+#                   accepts ignore/open/method/disabled), and it is read on the
+#                   resume path, so setting it once at boot is enough.
+#
+# WHO READS THE RESULT.
+#
+#   lid-guard.sh (hypr/custom/scripts) is the post-resume watcher. It reads
+#   logind's LidClosed -- with this unit in place that property is "open" for
+#   the whole grace after a wake -- and it REFUSES to act at all when this
+#   parameter is not selecting `open`, because a value a stale firmware can
+#   produce is not a value to sleep a machine on.
+#
+#   hypr/custom/scripts/after-resume.sh .. arms the guard and starts the watcher
+#   /etc/systemd/sleep.conf.d/10-deep.conf ... S3 for the sleep itself
+#
+# CHECKING IT.
+#
+#   systemctl status lid-init-state
+#   cat /sys/module/button/parameters/lid_init_state
+#       -> ignore [open] method disabled
+#   journalctl -t lid-guard            # the watcher's own reasons
+#
+# REVERTING. `systemctl disable --now lid-init-state.service` and
+# `echo method > /sys/module/button/parameters/lid_init_state`. The machine then
+# goes back to believing _LID at resume, which is what made a wake re-sleep.
+[Unit]
+Description=Report the lid as open at resume (Razer Blade 16 firmware quirk)
+Documentation=https://bugzilla.kernel.org/show_bug.cgi?id=191211
+# Nothing to do on a kernel whose button driver is absent or has no such knob.
+ConditionPathExists=/sys/module/button/parameters/lid_init_state
+After=local-fs.target
+
+[Service]
+Type=oneshot
+# Holds nothing open: the point is the write, and the value is read on the
+# resume path, not from this process.
+RemainAfterExit=yes
+# /bin/sh, because ExecStart performs no redirection of its own. This is the
+# same write `echo open > .../lid_init_state` does by hand; it is authorized
+# because the unit runs as root.
+ExecStart=/bin/sh -c 'echo open > /sys/module/button/parameters/lid_init_state'
+# Deliberately NOT hiding a failure behind SuccessExitStatus: an unwritable
+# parameter means the firmware bug is back, and `systemctl --failed` naming this
+# unit is the honest way to say so. A failed oneshot does not hold up booting.
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,43 @@
+# Local override of /usr/share/applications/com.anthropic.Claude.desktop,
+# versioned here so install.sh (extras/applications -> ~/.local/share/
+# applications) restores it instead of the packaging default.
+#
+# Two jobs:
+#  1. Every Exec goes through ~/.local/bin/claude-desktop -- the launcher
+#     (extras/bin/claude-desktop) that tells the app the desk's scale (1.5) and
+#     routes it through XWayland/GPU. Without that flag Claude drew its whole
+#     UI at 1x and came up at two thirds the size of every other window on this
+#     display. The path is absolute on purpose: ~/.local/bin is ahead of
+#     /usr/bin on the session PATH today, but a desktop entry that depends on
+#     PATH order is exactly the kind of thing that silently breaks after a
+#     login-manager change.
+#  2. Keeps the dock/app-search metadata the package ships: icon, WM class
+#     and the claude:// MIME handler (so links open through the launcher too).
+#
+# The GPU switches that used to be duplicated here now live only in the
+# launcher -- one place owns this app's flags.
+[Desktop Entry]
+Name=Claude
+Comment=Desktop application for Claude.ai
+GenericName=AI Assistant
+Keywords=AI;Chat;Assistant;Claude;Code;LLM;
+Exec=/home/user/.local/bin/claude-desktop %U
+Icon=claude-desktop
+Type=Application
+StartupNotify=true
+# Matches the Wayland app_id / X11 WM_CLASS Chromium derives from
+# package.json desktopName, so docks group windows under this entry.
+StartupWMClass=com.anthropic.Claude
+# second-instance just focuses mainWindow; suppress GNOME's default "New Window" item
+SingleMainWindow=true
+Categories=Utility;Development;
+MimeType=x-scheme-handler/claude;application/vnd.anthropic.mcpb;application/vnd.anthropic.skill;
+Actions=NewChat;NewCode;
+
+[Desktop Action NewChat]
+Name=New Chat
+Exec=/home/user/.local/bin/claude-desktop "claude://claude.ai/new?surface=chat&source=desktop_action"
+
+[Desktop Action NewCode]
+Name=New Claude Code Session
+Exec=/home/user/.local/bin/claude-desktop "claude://code/new?source=desktop_action"

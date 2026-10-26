@@ -64,6 +64,13 @@ Singleton {
         // this fires only when there is no previous sample to measure against.
         if (!wasActive && root.active && root.lastDiskCounters === null)
             root.sample();
+        // The RC6 counter keeps counting while nobody is watching. Dropping the
+        // baseline on the way IN means the first sample after a closed panel is
+        // a new measurement rather than an average over the minutes it was
+        // shut, which would draw one bogus spike at the left edge of the graph.
+        // (No baseline reset here: the gap test in applyGpuLoad already drops a
+        // stale delta, and resetting would guarantee an empty reading for the
+        // first second of every open.)
     }
     // Bumped on every sample so bindings reading the arrays below re-evaluate.
     property int revision: 0
@@ -89,6 +96,37 @@ Singleton {
     property real gpuClockMhz: -1
     property real gpuClockMaxMhz: -1
     property var gpuHistory: []
+    // WHICH CARD that clock belongs to. On a machine with two graphics chips
+    // the clock file is ONE card's (`card2/gt_cur_freq_mhz` is the Intel iGPU
+    // here) while the set of GPU names is both, so a view that prints the
+    // clock beside "the GPU" has to know whether it is describing the card it
+    // named -- the mismatch this exists to end (a 4070 reading "1517 MHz"
+    // while it sat at 0% with no processes).
+    property string gpuClockCard: ""     // /sys/class/drm/cardN/
+    property string gpuClockPci: ""      // 0000:00:02.0
+    property string gpuClockDriver: ""   // i915 / xe / amdgpu / nvidia
+
+    // ── A graphics chip's busy fraction, when its driver publishes one ────
+    //
+    // amdgpu's `device/gpu_busy_percent` is a real percentage and the only
+    // source trusted here. It is read for the card that owns the clock above,
+    // so a row about a chip can lead with that chip's own load instead of a
+    // clock that says nothing about how hard it is working.
+    //
+    // i915's RC6 residency was tried for this and REMOVED (2026-10-23): the
+    // counter on this laptop is frozen -- read a second apart,
+    // `gt/gt0/rc6_residency_ms` does not advance a single millisecond -- so
+    // 1 - idle/wall evaluated to a permanent 100%. That is how the GPU tile
+    // came to read "Intel Graphics 100%" on an idle machine: not a busy chip,
+    // a dead counter. A number that is always 100% is worse than no number,
+    // because nothing downstream can tell it from a real reading, so the
+    // source is gone rather than clamped or special-cased.
+    // -1 means "not readable on this machine", the same contract as every
+    // other unknown here -- never 0.
+    property string gpuLoadKind: ""      // "busy"
+    property string gpuLoadPath: ""
+    property real gpuLoad: -1
+    property var gpuLoadHistory: []
 
     property var lastDiskCounters: null
     property var lastNetCounters: null
@@ -112,7 +150,20 @@ lspci 2>/dev/null | grep -iE 'vga|3d|display' | while IFS= read -r line; do
 done
 for card in /sys/class/drm/card[0-9]*/; do
     if [ -r "$card/gt_cur_freq_mhz" ]; then
-        printf 'gpuclock|%s|%s\n' "$card/gt_cur_freq_mhz" "$card/gt_max_freq_mhz"
+        printf 'gpuclock|%s|%s|%s|%s|%s\n' \
+            "$card/gt_cur_freq_mhz" "$card/gt_max_freq_mhz" "$card" \
+            "$(basename "$(readlink -f "$card/device" 2>/dev/null)" 2>/dev/null)" \
+            "$(grep -o 'DRIVER=[a-zA-Z0-9_]*' "$card/device/uevent" 2>/dev/null | head -1 | cut -d= -f2)"
+        break
+    fi
+done
+# A graphics chip's busy fraction, when its driver publishes one honestly:
+# amdgpu's gpu_busy_percent, already a percentage. Nothing else is sampled --
+# see the gpuLoad block above for why i915's RC6 counter was removed instead
+# of being worked around.
+for card in /sys/class/drm/card[0-9]*/; do
+    if [ -r "$card/device/gpu_busy_percent" ]; then
+        printf 'gpuload|busy|%s\n' "$card/device/gpu_busy_percent"
         break
     fi
 done
@@ -184,6 +235,13 @@ done
             case "gpuclock":
                 root.gpuClockPath = parts[1] ?? "";
                 root.gpuClockMaxPath = parts[2] ?? "";
+                root.gpuClockCard = parts[3] ?? "";
+                root.gpuClockPci = parts[4] ?? "";
+                root.gpuClockDriver = parts[5] ?? "";
+                break;
+            case "gpuload":
+                root.gpuLoadKind = parts[1] ?? "";
+                root.gpuLoadPath = parts[2] ?? "";
                 break;
             case "disk": {
                 const name = root.field(parts[1] ?? "", "NAME");
@@ -252,13 +310,20 @@ done
         }
     }
 
+    // Counted so the probe can tell "the sampler never ran" from "the sampler
+    // ran and had nothing to say", which look identical from the outside.
+    property int sampleCount: 0
+
     function sample() {
         if (!root.inventoryReady)
             return;
+        root.sampleCount++
         diskstatsFile.reload();
         netdevFile.reload();
         if (root.gpuClockPath !== "")
             gpuClockFile.reload();
+        if (root.gpuLoadPath !== "")
+            gpuLoadFile.reload();
     }
 
     // One handler each, not two. Both `onLoaded` and `onTextChanged` fire for the
@@ -289,6 +354,16 @@ done
         path: root.gpuClockMaxPath === "" ? "/dev/null" : root.gpuClockMaxPath
         onLoaded: root.applyGpuClockMax(text())
         onTextChanged: root.applyGpuClockMax(text())
+    }
+
+    FileView {
+        id: gpuLoadFile
+        path: root.gpuLoadPath === "" ? "/dev/null" : root.gpuLoadPath
+        // A machine whose driver publishes no load has no file to read, and
+        // "Read of /dev/null failed" once per reload is noise about a state
+        // that is correct. A path that EXISTS and then fails still prints.
+        printErrors: root.gpuLoadPath !== ""
+        onLoaded: root.applyGpuLoad(text())
     }
     // Sectors are 512 bytes here by definition, whatever the device's own sector
     // size is, so the counter converts to bytes with a fixed number.
@@ -376,6 +451,39 @@ done
     function applyGpuClockMax(text) {
         const value = parseInt(String(text ?? "").trim(), 10);
         root.gpuClockMaxMhz = isNaN(value) ? -1 : value;
+    }
+
+    function applyGpuLoad(text) {
+        const raw = parseFloat(String(text ?? "").replace(/[^0-9.]/g, ""));
+        if (isNaN(raw)) {
+            root.gpuLoad = -1;
+            return;
+        }
+        // Only an already-a-percentage source reaches this point.
+        if (root.gpuLoadKind !== "busy")
+            return;
+        const load = raw / 100;
+        root.gpuLoad = Math.max(0, Math.min(1, load));
+        root.gpuLoadHistory = root.gpuLoadHistory.concat([root.gpuLoad]).slice(-root.historyLength);
+        root.revision++;
+    }
+
+    // Read-only probe, in the same spirit as the other services' `state()`:
+    // what the GPU numbers ARE, so a wrong one can be diagnosed from a
+    // terminal instead of by looking at a graph and guessing.
+    //
+    //   qs -c ii ipc call hardwareStats gpu
+    IpcHandler {
+        target: "hardwareStats"
+
+        function gpu(): string {
+            const pct = root.gpuLoad >= 0 ? `${(root.gpuLoad * 100).toFixed(0)}%` : "--";
+            return `active=${root.active} samples=${root.sampleCount} `
+                 + `card=${root.gpuClockCard} pci=${root.gpuClockPci} driver=${root.gpuClockDriver} `
+                 + `clock=${root.gpuClockMhz}/${root.gpuClockMaxMhz} `
+                 + `loadKind=${root.gpuLoadKind} loadPath=${root.gpuLoadPath} load=${pct} `
+                 + `n=${root.gpuLoadHistory.length} historyTail=${root.gpuLoadHistory.length > 0 ? (root.gpuLoadHistory[root.gpuLoadHistory.length - 1] * 100).toFixed(0) : "--"}`;
+        }
     }
 
     // ── Printing ─────────────────────────────────────────────────────────────

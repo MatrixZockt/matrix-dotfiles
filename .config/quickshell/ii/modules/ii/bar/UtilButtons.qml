@@ -100,11 +100,16 @@ Item {
     }
 
     // Screen record
+    //
+    // Through QuickRecord, i.e. the same recorder SUPER+R and the snip's record
+    // mode use. It used to exec `record.sh`, which is built on wf-recorder -- not
+    // installed on this machine, so the button was a no-op that left nothing
+    // behind: no file, no toast, no way to tell it had done anything at all.
     Component {
         id: screenRecordButton
         CircleUtilButton {
             Layout.alignment: Qt.AlignVCenter
-            onClicked: Quickshell.execDetached([Directories.recordScriptPath])
+            onClicked: QuickRecord.toggle()
             MaterialSymbol {
                 horizontalAlignment: Qt.AlignHCenter
                 fill: 1
@@ -120,7 +125,7 @@ Item {
         id: colorPickerButton
         CircleUtilButton {
             Layout.alignment: Qt.AlignVCenter
-            onClicked: Quickshell.execDetached(["hyprpicker", "-a"])
+            onClicked: GlobalStates.colorPickerOpen = true
             MaterialSymbol {
                 horizontalAlignment: Qt.AlignHCenter
                 fill: 1

@@ -58,9 +58,11 @@ EVENT = struct.Struct("llHHi")
 EVENT_SIZE = EVENT.size
 
 # Tap thresholds, shared by the shell (TouchpadSwipe.qml documents the same
-# numbers): a rest shorter than 350ms that moved under 4% of the pad's
-# travel -- in BOTH axes -- is a TAP, not a swipe. The shell reads HOW MANY
-# fingers made the tap and acts accordingly:
+# numbers). A TAP has three parts, all of them required: a rest shorter than
+# 350ms, movement under 4% of the pad's travel (in BOTH axes), and contacts
+# that LANDED TOGETHER (TAP_COINCIDENCE_MS below -- a finger that was already
+# resting on the pad is not part of the tap made beside it). The shell reads
+# HOW MANY fingers made the tap and acts accordingly:
 #
 #   3 fingers -> play/pause of the active MPRIS player, falling back to
 #                the wallpaper carousel when no player exists
@@ -73,12 +75,59 @@ EVENT_SIZE = EVENT.size
 # workspace swipe and making the horizontal desktop switch feel possessed.
 TAP_MAX_MS = 350.0
 TAP_MAX_TRAVEL = 0.04
+# How far apart the contacts of a tap may have LANDED and still be one tap.
+#
+# A tap is a hand gesture, so its fingers arrive together -- within a few
+# dozen milliseconds of each other on a real pad. A finger that is ALREADY ON
+# THE PAD is a different animal: it has been there for however long the user
+# has been resting it, and it is not part of any tap they then make with the
+# others.
+#
+# Without this gate the resting finger was counted anyway, because it is a
+# contact like any other and the tracker reads COUNTS. Reproduced on this
+# machine: rest one finger down (count 1 -- below the tracked set, so nothing
+# is tracked), then tap twice with two more fingers. The count goes 1 -> 3 -> 1,
+# `begin()` fires on the 3, `end()` sees a gesture that was short and still, and
+# `peak` routes it as a THREE-finger tap: the music paused, and tapping again
+# resumed it. Same with three tapping fingers and one resting: a four-finger
+# tap opened the desktops overview. Neither was a tap anybody made.
+#
+# The window is deliberately generous, and it has to be: rejecting a real tap
+# is a worse bug than counting an accidental one, because the user's only
+# evidence would be a gesture that does nothing. Measured on this machine with
+# scripts/input/touchpad-tap-test.py: a deliberate 3- or 4-finger tap lands its
+# fingers within 10-40ms of each other, and a slow, sloppy one can roll them out
+# to ~180ms -- and that sloppy one still has to fire, so the window cannot sit
+# near the fast end. The other side of the comparison is not close: a finger
+# being RESTED on the pad has been there for hundreds of milliseconds to
+# seconds before the others tap. 200ms is comfortably above a deliberate
+# roll and far below "it was already there".
+#
+# The gesture's own duration gate still bounds everything: a tap must finish
+# within TAP_MAX_MS of it starting, so a long landing spread leaves less time
+# for the tap itself rather than opening the door to slow gestures.
+TAP_COINCIDENCE_MS = 200.0
 # How long after an `end` a returning contact count continues the same
 # gesture (accumulators kept, no total reset). A count DIP is not a release:
 # the dip-and-return was resetting the travel accumulator mid-swipe, which
 # the shell's absolute-control swipe read as a violent jump. 150ms covers a
 # micro-lift with a wide margin; a real release-then-swipe is slower.
 REJOIN_GRACE_S = 0.15
+
+# The keepalive, in seconds, ON A CLOCK. It used to be written only when the
+# poll timed out -- "two seconds with no events" -- and that is wrong on a real
+# pad: a hand resting on it (or a finger left beside the keyboard) keeps
+# SYN_REPORT frames arriving forever, so the poll never times out and a
+# perfectly healthy reader writes NOTHING for as long as the hand rests there.
+#
+# The shell judges liveness by this heartbeat, so silence was read as death and
+# the reader was killed and restarted roughly every 30 seconds (25 times in one
+# session's log, each exit code 15 = the shell's own SIGTERM). Every restart
+# zeroes the gesture accumulator mid-gesture, which the shell's absolute
+# brightness/volume swipe reads as one enormous swipe: the "random jump to
+# 100%" it was reported as. The beat is therefore due on the CLOCK, whatever
+# the pad is doing.
+HEARTBEAT_S = 2.0
 
 # ABS_X/ABS_Y capabilities, used to tell a touchpad from a plain mouse.
 CAP_MT_SLOT = 1 << ABS_MT_SLOT
@@ -223,6 +272,18 @@ class Trackpad:
         # How long the gesture that just ended lasted, and its travel. Read
         # by emit() so a rejected tap says which gate rejected it.
         self.last_duration_ms = 0.0
+        # When each LIVE contact landed, and the ones already counted into the
+        # gesture being tracked. Keyed by the TRACKING ID rather than the slot:
+        # a slot is reused the moment a finger lifts, so two different contacts
+        # can share one -- and a tap that lifts and re-lands on the same slot
+        # would otherwise be dated with the wrong finger's time.
+        self.landed_at = {}       # slot -> (tracking id, monotonic landing)
+        self.tap_log = []         # landing times of the contacts in this gesture
+        self.logged_tids = set()  # tracking ids already in tap_log
+        # The gap between the first and last of those landings, in ms. Emitted
+        # with the verdict for the same reason as dur_ms and moved: a rejected
+        # tap has to say which gate rejected it.
+        self.last_spread_ms = 0.0
         self.dead = False         # stdout pipe lost its reader (shell gone)
 
     # -- helpers ---------------------------------------------------------
@@ -271,6 +332,9 @@ class Trackpad:
             # can be read straight off the log instead of guessed at.
             "dur_ms": round(self.last_duration_ms, 1),
             "moved": round(self.moved, 4),
+            # How far apart the contacts landed: the tap gate that is not about
+            # time or travel, and the one a resting finger fails.
+            "spread_ms": round(self.last_spread_ms, 1),
             "peak": self.peak_count,
         }) + "\n")
 
@@ -292,6 +356,37 @@ class Trackpad:
         if my is None:
             return -1.0
         return round(max(0.0, min(1.0, (my - self.y_min) / self.y_span)), 4)
+
+    def log_tap_contacts(self):
+        """Add every contact of the tracked gesture to the tap log, once.
+
+        Called from begin() and from every frame of a tracked gesture, so a
+        finger that arrives LATE is in the log too -- three fingers do not
+        land in the same millisecond, and the count enters the tracked set as
+        soon as the first two are down.
+
+        A contact whose landing was never seen (the tracker started while it
+        was already down) is dated from the gesture's own start, which makes
+        it coincident by definition: the gate should only fire on evidence
+        this process actually has.
+        """
+        for slot, tid in self.slots.items():
+            if tid is None or tid in self.logged_tids:
+                continue
+            entry = self.landed_at.get(slot)
+            landed = entry[1] if (entry and entry[0] == tid) else self.begin_mono
+            self.logged_tids.add(tid)
+            self.tap_log.append(landed)
+
+    def tap_spread_ms(self):
+        """How far apart this gesture's contacts landed, in milliseconds.
+
+        0.0 when there is nothing to compare (fewer than two contacts, which
+        cannot be a multi-finger tap anyway).
+        """
+        if len(self.tap_log) < 2:
+            return 0.0
+        return (max(self.tap_log) - min(self.tap_log)) * 1000.0
 
     def begin(self):
         self.tracking = True
@@ -331,6 +426,10 @@ class Trackpad:
             # gesture actually used, so the peak only ever goes UP.
             self.peak_count = max(self.peak_count, self.start_count)
             self.rejoin_deadline = 0.0
+            # The log survives a re-join like the other accumulators: it is
+            # the same gesture, and a contact that arrived during the dip
+            # belongs to it.
+            self.log_tap_contacts()
             cur = self.mean_y()
             mx2 = self.mean_x()
             if cur is not None: self.last_y = cur
@@ -344,6 +443,13 @@ class Trackpad:
         self.begin_mono = time.monotonic()
         self.start_count = len(self.active_slots())
         self.peak_count = self.start_count
+        # A fresh gesture starts a fresh tap log, SEEDED with every contact
+        # already down -- including the ones that were resting here before
+        # this gesture began, which is the whole point: their landing time is
+        # what tells a real tap from tapping beside a resting finger.
+        self.tap_log = []
+        self.logged_tids = set()
+        self.log_tap_contacts()
         current = self.mean_y()
         self.last_y = current if current is not None else 0.0
         mx = self.mean_x()
@@ -360,9 +466,16 @@ class Trackpad:
         self.rejoin_deadline = time.monotonic() + REJOIN_GRACE_S
         duration_ms = (time.monotonic() - self.begin_mono) * 1000.0
         self.last_duration_ms = duration_ms
-        # A tap is short and still: under TAP_MAX_MS, having moved less than
-        # TAP_MAX_TRAVEL of the pad's travel.
-        is_tap = duration_ms <= TAP_MAX_MS and self.moved <= TAP_MAX_TRAVEL
+        spread_ms = self.tap_spread_ms()
+        self.last_spread_ms = spread_ms
+        # A tap is short, still, AND made of contacts that landed together:
+        # under TAP_MAX_MS, having moved less than TAP_MAX_TRAVEL of the pad's
+        # travel, by fingers that all arrived within TAP_COINCIDENCE_MS of one
+        # another. The third gate is what keeps a finger RESTING on the pad out
+        # of the count -- see TAP_COINCIDENCE_MS for the reproduction.
+        is_tap = (duration_ms <= TAP_MAX_MS
+                  and self.moved <= TAP_MAX_TRAVEL
+                  and spread_ms <= TAP_COINCIDENCE_MS)
         # A tap is routed by how many fingers the user actually used, which
         # is the peak -- not the count that happened to land first.
         if is_tap:
@@ -376,6 +489,10 @@ class Trackpad:
         self.tracking = False
         self.total = 0.0
         self.htotal = 0.0
+        # No gesture to judge: the tap log goes with it, so a cancel cannot
+        # leave landings behind for the next gesture to be measured against.
+        self.tap_log = []
+        self.logged_tids = set()
         self.emit("cancel")
 
     # -- the event loop --------------------------------------------------
@@ -386,6 +503,10 @@ class Trackpad:
             elif code == ABS_MT_TRACKING_ID:
                 if value >= 0:
                     self.slots[self.slot] = value
+                    # When this contact arrived, so a tap can tell a hand
+                    # landing together from a finger that was already resting
+                    # there. See TAP_COINCIDENCE_MS.
+                    self.landed_at[self.slot] = (value, time.monotonic())
                 else:
                     self.slots[self.slot] = None
                     self.positions.pop(self.slot, None)
@@ -417,6 +538,10 @@ class Trackpad:
                 return
             self.begin()
             return
+
+        # Every frame of a tracked gesture, so a late arrival lands in the log
+        # too (three fingers do not arrive in the same millisecond).
+        self.log_tap_contacts()
 
         current = self.mean_y()
         mx = self.mean_x()
@@ -481,9 +606,22 @@ class Trackpad:
             "y": self.norm_y(),
         }) + "\n")
 
+    def beat(self):
+        """Write the keepalive once. False means the pipe is gone."""
+        try:
+            sys.stdout.write('{"hb":1}\n')
+            sys.stdout.flush()
+            return True
+        except BrokenPipeError:
+            # Shell is gone. Flag + exit on the next loop pass; the flag also
+            # short-circuits every other write.
+            self.dead = True
+            return False
+
     def run(self):
         poller = select.poll()
         poller.register(self.fd, select.POLLIN)
+        last_beat = time.monotonic()
         while True:
             if self.dead:
                 return
@@ -491,30 +629,33 @@ class Trackpad:
             # to the shell, and a broken pipe is only detected ON WRITE. With
             # events as the only writes, a tracker whose shell died lingers
             # silently until the NEXT gesture -- observed as an orphaned
-            # reader outliving its shell across a restart. Polling with a
-            # timeout turns idle time into a periodic write: if the shell is
-            # gone, the heartbeat fails within seconds and the tracker (and
-            # its bash supervisor) exits; the shell ignores the lines.
-            if not poller.poll(2000):
+            # reader outliving its shell across a restart. A periodic write
+            # turns idle time into a liveness proof: if the shell is gone, the
+            # heartbeat fails within seconds and the tracker (and its bash
+            # supervisor) exits; the shell ignores the lines.
+            #
+            # The beat is due on the CLOCK, not on the poll timing out. See
+            # HEARTBEAT_S: a resting hand keeps frames arriving, so an
+            # idle-only beat starved exactly when the pad was in use but still,
+            # and the shell killed the reader it was meant to protect.
+            if poller.poll(HEARTBEAT_S):
                 try:
-                    sys.stdout.write('{"hb":1}\n')
-                    sys.stdout.flush()
-                except BrokenPipeError:
-                    # Shell is gone. Flag + exit on the next loop pass; the
-                    # flag also short-circuits every other write.
-                    self.dead = True
+                    data = os.read(self.fd, EVENT_SIZE * 64)
+                except BlockingIOError:
+                    data = b""
+                except OSError:
+                    self.cancel()
                     return
-                continue
-            try:
-                data = os.read(self.fd, EVENT_SIZE * 64)
-            except BlockingIOError:
-                continue
-            except OSError:
-                self.cancel()
-                return
-            for offset in range(0, len(data) - EVENT_SIZE + 1, EVENT_SIZE):
-                _sec, _usec, etype, code, value = EVENT.unpack_from(data, offset)
-                self.handle(etype, code, value)
+                for offset in range(0, len(data) - EVENT_SIZE + 1, EVENT_SIZE):
+                    _sec, _usec, etype, code, value = EVENT.unpack_from(data, offset)
+                    self.handle(etype, code, value)
+                if self.dead:
+                    return
+            now = time.monotonic()
+            if now - last_beat >= HEARTBEAT_S:
+                last_beat = now
+                if not self.beat():
+                    return
 
 
 def main():

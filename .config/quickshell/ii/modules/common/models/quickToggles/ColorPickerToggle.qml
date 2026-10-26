@@ -13,6 +13,9 @@ QuickToggleModel {
     icon: "colorize"
 
     mainAction: () => {
+        // Close the sidebar first, then open the picker: the freeze must not
+        // capture the panel that launched it. (Same 300ms as before, when
+        // this invoked hyprpicker -- which was never installed.)
         GlobalStates.sidebarRightOpen = false;
         delayedActionTimer.start();
     }
@@ -21,7 +24,7 @@ QuickToggleModel {
         interval: 300
         repeat: false
         onTriggered: {
-            Quickshell.execDetached(["hyprpicker", "-a"]);
+            GlobalStates.colorPickerOpen = true;
         }
     }
 

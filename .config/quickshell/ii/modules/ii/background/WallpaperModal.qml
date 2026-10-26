@@ -79,9 +79,16 @@ ShellRoot {
     property string addToken: ""
 
     function openAddPicker() {
+        console.log("openAddPicker called");
         const token = `wp${Date.now()}`;
         root.addToken = token;
-        const startDir = FileUtils.parentDirectory(String(WallpaperHistory.currentWallpaper)) || Directories.pictures;
+        // CF-qualified: this file imports qs.modules.common.functions AS CF, so
+        // a bare `FileUtils` does not resolve here -- it threw
+        // "ReferenceError: FileUtils is not defined" on the line below and took
+        // the whole function with it, which is exactly what "the add button does
+        // nothing" looked like (the click logged, then the picker never
+        // launched).
+        const startDir = CF.FileUtils.parentDirectory(String(WallpaperHistory.currentWallpaper)) || Directories.pictures;
         const payload = JSON.stringify({
             op: "open",
             title: "Add wallpaper",
@@ -153,7 +160,11 @@ ShellRoot {
         if (result.cancelled) return;
         const uris = Array.isArray(result.uris) ? result.uris : (result.uris ? [result.uris] : []);
         if (uris.length === 0) return;
-        Wallpapers.apply(FileUtils.trimFileProtocol(String(uris[0])));
+        // Same trap as openAddPicker above: qs.modules.common.functions is
+        // imported AS CF in this file, so a bare FileUtils throws here too --
+        // the picker would launch, the file would be chosen, and the wallpaper
+        // would never change.
+        Wallpapers.apply(CF.FileUtils.trimFileProtocol(String(uris[0])));
     }
 
     Process {
@@ -694,7 +705,12 @@ Item {
                 // yanking the picker shut on a background cycle would be
                 // indistinguishable from the picker crashing.
                 onAutoSwitched: path => Wallpapers.apply(String(path))
-                onAddRequested: GlobalStates.requestWallpaperAdd()
+                // NOTE: NOT left to drown in the shared signal (the retired pill
+                // widget used to answer GlobalStates.requestWallpaperAdd). The
+                // add row's TapHandler is inside the stage component; the signal
+                // needs a direct local handler here or it silently goes nowhere,
+                // which looks exactly like "the button does nothing".
+                onAddRequested: { console.log("CAROUSEL ADD REQUESTED"); root.openAddPicker(); }
                 onRemoveRequested: path => {
                     removeTimer.mp = String(path);
                     removeTimer.restart();

@@ -70,21 +70,30 @@ function M.setPerformance(on)
 end
 """
 
-# Every leaf this configuration animates. They are disabled ONE BY ONE on
+# Every leaf this configuration animates, EXCEPT workspace switching: the
+# four workspace leaves are deliberately not in this list. Switching desktops
+# is navigation, and killing it made Super+digit and the 4-finger swipe
+# teleport (reported 2026-10-18). Power Mode already made this exact call for
+# the same reason (see PowerMode.qml: "the desktop switch is the one that
+# hurt, because it is navigation") -- boost keeps the same carve-out, so the
+# mode still cuts windows, fades, layers, zoom and borders and only lets
+# navigation slide.
+#
+# They are disabled ONE BY ONE on
 # purpose: in this build `hl.config` is first-wins for nested tables while the
 # config is being read (the base config sets animations.enabled = true first, so
 # setting it again in a later file is silently ignored), whereas an
 # `hl.animation` call for the same leaf is last-wins -- which is exactly how the
-# custom files already re-tune windowsIn/Out. The master switch is flipped at
-# runtime by the last lines of this script instead.
+# custom files already re-tune windowsIn/Out. The master switch is pushed at
+# runtime by the last lines of this script, as `true` in every state (a master
+# `false` would override the carve-out above).
 # Every leaf the configs actually name, taken from the configs themselves
 # (`grep -rho 'leaf = "[a-zA-Z]*"' ~/.config/hypr`) so nothing is guessed, plus
 # the generic `global`/`borderangle` leaves.
 LEAVES = [
     "global", "border", "borderangle", "windows", "windowsIn", "windowsOut",
     "windowsMove", "fade", "fadeIn", "fadeOut", "layers", "layersIn",
-    "layersOut", "fadeLayersIn", "fadeLayersOut", "workspaces",
-    "specialWorkspace", "specialWorkspaceIn", "specialWorkspaceOut",
+    "layersOut", "fadeLayersIn", "fadeLayersOut",
     "zoomFactor",
 ]
 
@@ -115,16 +124,32 @@ if [ "$RELOAD" -eq 1 ]; then
     hyprctl reload >/dev/null 2>&1 || true
 fi
 
-# The master switch, applied at RUNTIME.
+# The master switch, pushed in BOTH directions as `enabled = true`.
 #
-# In this build `hl.config` cannot override a nested table that the base config
-# already set while the config is being read (first-wins), but it can change it
-# at runtime -- so the instant the toggle is used, animations are off for real
-# rather than leaf by leaf. The per-leaf disables in the generated file are what
-# survives a reload, and between them the interface never animates while the
-# mode is on. Both directions are pushed, so turning the mode back off restores
-# the master switch immediately instead of waiting for the reload to do it.
+# It used to push `false` while the mode was on, and that master kill is
+# absolute: it overrides every per-leaf setting, so the workspace carve-out
+# above could not survive it -- desktop switches teleported again no matter
+# what the LEAVES list said (reported 2026-10-18). The leaves themselves are
+# what boost means now (they are last-wins and reload-surviving; see LEAVES),
+# so the master stays ON in every state and simply re-asserts it on a flip.
 if [ "$VALUE" != "" ]; then
-    if [ "$VALUE" = "1" ]; then STATE=false; else STATE=true; fi
-    hyprctl eval "hl.config({ animations = { enabled = $STATE } })" >/dev/null 2>&1 || true
+    hyprctl eval "hl.config({ animations = { enabled = true } })" >/dev/null 2>&1 || true
+fi
+
+# The CPU clock policy (EPP) is power policy, not presentation: the decision
+# goes to the one policy table (power-autoswitch's converge, which reads this
+# same config key) instead of sysfs here, so the boost toggle and the Power
+# Mode feed one rule and only one writer ever holds the root path. The value
+# is passed as --boost= rather than left to be read from the config: the
+# config write is debounced (the reason this script takes on|off explicitly),
+# so a backgrounded converge reading the file would race it. Backgrounded so
+# the UI's flip never waits on pkexec; converge is a no-op for anything
+# already in force. Without this the toggle only moved animations and the
+# machine's EPP kept whatever the profile last set (measured 2026-10-18).
+if [ -x "$HOME/.local/bin/power-autoswitch" ]; then
+    if [ -n "$VALUE" ]; then
+        "$HOME/.local/bin/power-autoswitch" --converge "--boost=$VALUE" &
+    else
+        "$HOME/.local/bin/power-autoswitch" --converge &
+    fi
 fi

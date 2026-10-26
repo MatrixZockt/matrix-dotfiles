@@ -17,14 +17,20 @@
 # read it. But it is the ONLY thing the shell was setting, and the desktop
 # has three more opinions:
 #
-#   1. GTK3 apps ignore `color-scheme` entirely. They read `gtk-theme`, which
-#      was pointing at `adw-gtk3` -- a theme that is not installed here (there
-#      are exactly two themes on this machine: Default and Emacs). GTK fell
-#      back silently to its built-in light Adwaita, so GTK3 windows stayed
-#      white on a dark desktop no matter what the shell said.
-#   2. GTK3 and GTK4 both need `gtk-application-prefer-dark-theme` to darken
-#      WITHOUT a dark theme installed. That is the whole point of the flag,
-#      and with no themes present it is the only lever that exists.
+#   1. GTK3 apps ignore `color-scheme` entirely. They read `gtk-theme`, and
+#      what decides there is the NAME: it used to hold `Default`, which on
+#      this machine is a stub (one gtk-keys.css, no gtk.css at all), so GTK3
+#      fell back to its built-in LIGHT Adwaita and every GTK3 window stayed
+#      white on a dark desktop whatever the shell said. `Default` was chosen
+#      because it was "a theme that exists" -- it is, and it is exactly the
+#      wrong one. See the block above step 2 for the measurements that say
+#      which names do work.
+#   2. `gtk-application-prefer-dark-theme` is a startup hint, not a lever. It
+#      cannot darken a theme that has no dark stylesheet, and a RUNNING app
+#      never notices it change. It is still written, to both settings.ini
+#      files, because it is what an app launched later reads -- but the
+#      light/dark decision that a person actually watches happen travels in
+#      `gtk-theme`, which GTK re-reads live.
 #   3. Qt has no equivalent key and no qt5ct/qt6ct here. The installed lever is
 #      a Qt platform theme plugin (`libqgtk3.so` and `libqxdgdesktopportal.so`
 #      are both present for Qt5 and Qt6). Which one you point at matters, and
@@ -44,7 +50,7 @@
 #      live theme switch too. That is the value used here and in
 #      hyprland/env.lua.
 #
-# So the desktop theme is not one key, it is four, and only writing one of
+# So the desktop theme is not one key, it is five, and only writing one of
 # them is what makes a dark desktop look like it is still half light.
 #
 # WHY IT IS ALSO CALLED AT LOGIN (custom/execs.lua), before the shell:
@@ -91,7 +97,11 @@ qt_theme="xdgdesktopportal"
 # from Hyprland, so a key set only in hyprland/env.lua would reach the shell but
 # not a user unit. Qt drops every cursorShape request when it has no theme
 # loaded, which is why this is not cosmetic.
-cursor_theme="capitaine-cursors"
+# ONE name, never swapped. It used to be a dark/light pair, which meant the
+# pointer could be white in one place and black in another -- and the desktop's
+# own compositor, its Qt clients and its X11 clients each read it at a different
+# moment, so the artwork changed under the hand. Stability is the feature here.
+cursor_theme="Bibata-Modern-Ice"
 
 # The cursor theme itself, and it is the ONLY thing that decides what the
 # pointer looks like on this machine.
@@ -112,14 +122,147 @@ cursor_theme="capitaine-cursors"
 # environment.d for systemd-launched units, and the compositor env for
 # everything Hyprland starts itself.
 #
-# Bibata in the borderless variants, so the pointer has no keyline unless it
-# needs one -- cursor-adapt.py adds the rim back only when the pointer is over
-# something close to its own colour. White on dark, black on light.
+# Stock Bibata-Modern-Ice -- white body, black rim -- which is the one name that
+# is actually installed here. It does not follow the mode any more (see the note
+# on cursor_theme above) -- the pointer that was there when the session started
+# is the pointer for the whole session.
+#
+# The `-NoLine` variants this used to name are not installed (checked
+# 2026-10-23: ~/.local/share/icons holds only Modern/Original Classic and Ice),
+# so every toolkit that read that name silently fell back to the default X
+# cursor -- a DARK arrow -- while the ones that read env.lua's `Bibata-Modern-Ice`
+# drew the white one. That is why the pointer changed colour at a window edge.
+
+# ── The GTK theme, and the two names it has to have ────────────────────────
+#
+# WHY THE MODE TRAVELS IN THE THEME NAME. Measured on this machine
+# (2026-10-15) with a GTK3 window that reports its own resolved background
+# colour, over every combination of the two levers:
+#
+#   prefer-dark  gtk-theme     GTK3 window        GTK4 text
+#   1            Default       #f6f5f4  light  <- the bug, in dark mode
+#   1            Adwaita       #353535  dark       #eeeeec  dark
+#   0            Adwaita       #f6f5f4  light      #2e3436  light
+#   0            Adwaita-dark  #353535  dark       #2e3436  light
+#
+#   * `Adwaita` is the name GTK3's own stylesheets are built in under -- both
+#     the light one and a 171 KB dark one that lives inside libgtk-3. The
+#     dark variant is only reachable through a theme NAME: with the flag set
+#     and the name `Default` the window stayed #f6f5f4, because there was no
+#     gtk-dark.css to load. That is the whole of the "apps do not switch"
+#     report: the flag was right, the name it applied to was not.
+#   * a RUNNING application only follows the NAME. GTK3 reads settings.ini
+#     once, at startup: the probe still reported prefer-dark=True minutes
+#     after the file was rewritten to 0, with the window unchanged. Changing
+#     `gtk-theme` in dconf repainted that same running window within a second,
+#     in both directions. So the switch a person watches happen comes from
+#     this key, and the flag is written beside it to agree.
+#
+# AND WHY THE NAME HAS TO SETTLE THE MODE ON ITS OWN. `Adwaita` does not: it
+# has both variants built in and picks between them BY THE FLAG, and the flag a
+# running app holds is the one it read at startup. So dark -> light left every
+# open GTK3 window dark -- the name went back to `Adwaita`, the app's stale
+# flag said dark, and `Adwaita` obliged. That is a switch that only works in
+# one direction, which is not a switch. Both names below therefore have to be
+# unambiguous:
+#
+#   name           prefer-dark  GTK3 window
+#   Adwaita-light  1            #f6f5f4  light
+#   Adwaita-light  0            #f6f5f4  light
+#   Adwaita-dark   1            #353535  dark
+#   Adwaita-dark   0            #353535  dark
+#
+# Four real readings, taken after writing the flag in the other direction
+# first: the MODE is a property of the name, and no stale flag can override it.
+# `Adwaita-light` and `Adwaita-dark` are not themes GTK ships -- they are built
+# below out of GTK3's own two stylesheets (gtk-contained.css and its dark
+# twin), one import each, in BOTH files GTK might load. A `gtk-dark.css` that
+# is light looks perverse, and it is the point: whichever of the two files a
+# stale flag causes GTK to load, it gets the stylesheet this name promises.
+#
+# The same has to be done for GTK4, and for the same reason -- measured the
+# same way, with a running GTK4 window shifted under a stale flag:
+#
+#   gtk-theme     the running GTK4 window went
+#   Adwaita-dark  light  ->  dark        it follows this NAME live
+#   Adwaita-light dark   ->  dark        it does NOT: a plain `-light` name
+#                                        carries no dark/light demand, so the
+#                                        stale flag decided -- the same
+#                                        one-way switch, one toolkit over
+#
+# GTK4 has no dark/light stylesheets BUILT IN under a name of its own either:
+# its three theme stubs (gtk.css, gtk-light.css, gtk-dark.css in
+# /org/gtk/libgtk/theme/Default) are the same file, each a
+# prefers-color-scheme media query over Default-light.css and Default-dark.css.
+# So GTK4 is given its own two directories below, importing those two
+# stylesheets directly, media query and all omitted: the name says the mode and
+# the CSS agrees with the name. Measured after that change: dark -> light moved
+# a running GTK4 window to #2e3436 with its stale flag still at True, and back
+# to #eeeeec with its stale flag still at False.
+#
+# libadwaita apps need none of this -- they follow `color-scheme` (step 1).
+gtk_theme_light="Adwaita-light"
+gtk_theme_dark="Adwaita-dark"
+# The stylesheets those two names publish: GTK3's, out of libgtk-3, and GTK4's,
+# out of libgtk-4 -- both under the Adwaita/Default resource names those
+# libraries themselves use.
+gtk3_stylesheet_light="Adwaita/gtk-contained.css"
+gtk3_stylesheet_dark="Adwaita/gtk-contained-dark.css"
+gtk4_stylesheet_light="Default/Default-light.css"
+gtk4_stylesheet_dark="Default/Default-dark.css"
 if [[ "$mode" == "light" ]]; then
-    cursor_theme="Bibata-Modern-Classic-NoLine"
+    gtk_theme="$gtk_theme_light"
 else
-    cursor_theme="Bibata-Modern-Ice-NoLine"
+    gtk_theme="$gtk_theme_dark"
 fi
+
+# Publish GTK's own stylesheets -- GTK3's out of libgtk-3, GTK4's out of
+# libgtk-4 -- as two unambiguous theme names, by IMPORTING them by resource
+# path. An import rather than a copy, deliberately:
+# the stylesheet's own `url("assets/...")` references then resolve inside the
+# resource where those assets actually live, instead of pointing at a theme
+# directory that contains no assets (and copying 171 KB of GTK's CSS into the
+# user's home is a worse thing to own besides).
+themes_dir="$HOME/.local/share/themes"
+ensure_gtk_theme() {
+    local name="$1" gtk3_stylesheet="$2" gtk4_stylesheet="$3"
+    local dir="$themes_dir/$name"
+    local toolkit css_dir import_line file
+    for toolkit in 3 4; do
+        local stylesheet
+        if [[ "$toolkit" == 3 ]]; then stylesheet="$gtk3_stylesheet"; else stylesheet="$gtk4_stylesheet"; fi
+        css_dir="$dir/gtk-$toolkit.0"
+        import_line="@import url(\"resource:///org/gtk/libgtk/theme/$stylesheet\");"
+        mkdir -p "$css_dir"
+        # BOTH files, because which one GTK loads depends on the flag: gtk.css
+        # is the theme, gtk-dark.css is its dark variant. The SAME stylesheet
+        # in both is what makes this NAME mean one thing, whatever the flag
+        # happens to say when it is read -- including a settings.ini written by
+        # an older version of this script, which is exactly the stale flag a
+        # running app is holding when the mode changes under it.
+        for file in gtk.css gtk-dark.css; do
+            if [[ ! -f "$css_dir/$file" || "$(cat "$css_dir/$file")" != "$import_line" ]]; then
+                printf '%s\n' "$import_line" > "$css_dir/$file"
+            fi
+        done
+    done
+    # A well-formed theme directory, for the consumers that read index.theme
+    # rather than the CSS (GTK2-era tools, anything enumerating themes).
+    if [[ ! -f "$dir/index.theme" || "$(sed -n 's/^Name=//p' "$dir/index.theme")" != "$name" ]]; then
+        cat > "$dir/index.theme" <<THEME
+[Desktop Entry]
+Type=X-GNOME-Metatheme
+Name=$name
+Comment=GTK's own light or dark stylesheet published as a theme, so a theme NAME can select the mode
+Encoding=UTF-8
+
+[X-GNOME-Metatheme]
+GtkTheme=$name
+THEME
+    fi
+}
+ensure_gtk_theme "$gtk_theme_light" "$gtk3_stylesheet_light" "$gtk4_stylesheet_light"
+ensure_gtk_theme "$gtk_theme_dark" "$gtk3_stylesheet_dark" "$gtk4_stylesheet_dark"
 
 # Already in this mode? Then there is nothing to do, and saying so lets this
 # run unattended on every login and every compositor config reload without
@@ -133,7 +276,9 @@ fi
 # older version of this script. That is exactly what happened to the
 # environment.d file when the value moved from gtk3 to xdgdesktopportal.
 if [[ "$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null | tr -d "'")" == "$prefer" ]] \
-   && [[ "$(gsettings get org.gnome.desktop.interface gtk-theme 2>/dev/null | tr -d "'")" == "Default" ]] \
+   && [[ "$(gsettings get org.gnome.desktop.interface gtk-theme 2>/dev/null | tr -d "'")" == "$gtk_theme" ]] \
+   && [[ -f "$themes_dir/$gtk_theme_light/gtk-3.0/gtk.css" && -f "$themes_dir/$gtk_theme_light/gtk-4.0/gtk.css" ]] \
+   && [[ -f "$themes_dir/$gtk_theme_dark/gtk-3.0/gtk.css" && -f "$themes_dir/$gtk_theme_dark/gtk-4.0/gtk.css" ]] \
    && grep -qsE "^gtk-application-prefer-dark-theme=$dark_flag\$" "$HOME/.config/gtk-3.0/settings.ini" \
    && grep -qsE "^gtk-application-prefer-dark-theme=$dark_flag\$" "$HOME/.config/gtk-4.0/settings.ini" \
    && grep -qsE "^QT_QPA_PLATFORMTHEME=$qt_theme\$" "$HOME/.config/environment.d/90-desktop-theme.conf" \
@@ -145,14 +290,19 @@ fi
 # 1. The modern key: libadwaita / GTK4 / anything that asks the system.
 gsettings set org.gnome.desktop.interface color-scheme "$prefer" 2>/dev/null || true
 
-# 2. Point gtk-theme at a theme that EXISTS. `adw-gtk3` is not installed, and
-#    a missing theme is not an error GTK reports -- it just falls back, which
-#    is why this went unnoticed. `Default` is present on this machine.
-gsettings set org.gnome.desktop.interface gtk-theme "Default" 2>/dev/null || true
+# 2. Point gtk-theme at the name for THIS mode. Not "a theme that exists" --
+#    a name that IS the mode, because that is the only lever that reaches a
+#    running GTK3 window. Both names are directories created above, and each
+#    one holds a single stylesheet so that neither the flag nor the direction
+#    of travel can change what it means. A name GTK cannot find is not an
+#    error it reports -- it falls back silently to light, which is how the old
+#    `Default` value went unnoticed for as long as it did.
+gsettings set org.gnome.desktop.interface gtk-theme "$gtk_theme" 2>/dev/null || true
 
-# 3. The flag that actually darkens GTK3, and that GTK4 honours as well.
-#    Written to BOTH settings.ini files, managed: only the one key is
-#    rewritten, so any other GTK setting in those files survives.
+# 3. The flag the apps launched from now on will read. It agrees with the
+#    theme name above rather than replacing it: written to BOTH settings.ini
+#    files, managed, so only the one key is rewritten and any other GTK
+#    setting in those files survives.
 write_gtk_preference() {
     local ini="$1"
     local dir; dir="$(dirname "$ini")"
@@ -196,4 +346,4 @@ QT_QPA_PLATFORMTHEME=$qt_theme
 XCURSOR_THEME=$cursor_theme
 EOF
 
-echo "desktop theme -> $mode (color-scheme=$prefer, gtk prefer-dark=$dark_flag, QT_QPA_PLATFORMTHEME=$qt_theme, XCURSOR_THEME=$cursor_theme)"
+echo "desktop theme -> $mode (color-scheme=$prefer, gtk-theme=$gtk_theme, gtk prefer-dark=$dark_flag, QT_QPA_PLATFORMTHEME=$qt_theme, XCURSOR_THEME=$cursor_theme)"

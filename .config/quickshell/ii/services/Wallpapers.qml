@@ -48,8 +48,53 @@ Singleton {
     // the shell's own copy, never at the borrowed original.
     readonly property string collectionDir: `${FileUtils.trimFileProtocol(Directories.pictures)}/Wallpapers`
 
+    // ── The live clock wallpaper ────────────────────────────────────────
+    //
+    // A carousel entry like any other: a file in the collection, with a
+    // thumbnail, that the selector lists and the carousel holds in its
+    // history. It is not a picture to be DRAWN -- selecting it flips
+    // `background.clockWallpaper.enable` on, and ClockWallpaper.qml becomes the
+    // desktop -- and it deliberately leaves `background.wallpaperPath` alone,
+    // so the palette, the picture behind it and the lock screen are untouched
+    // and picking a normal wallpaper afterwards is one click, not a re-theme.
+    readonly property string clockWallpaperName: "Clock (live).png"
+    readonly property string clockWallpaperPath: `${root.collectionDir}/${root.clockWallpaperName}`
+    readonly property bool clockWallpaperActive: Config.options.background.clockWallpaper?.enable ?? false
+    readonly property string currentWallpaperPath: Config.options.background.wallpaperPath
+
+    function isClockWallpaper(path): bool {
+        if (!path) return false;
+        const p = FileUtils.trimFileProtocol(String(path));
+        return p === root.clockWallpaperPath || p.split("/").pop() === root.clockWallpaperName;
+    }
+
+    function applyClockWallpaper() {
+        if (!root.clockWallpaperActive)
+            Config.options.background.clockWallpaper.enable = true;
+        // Recorded so it takes its place in the carousel like every other pick
+        // (newest first), instead of being invisible next time the carousel is
+        // opened.
+        WallpaperHistory.record(root.clockWallpaperPath);
+        root.changed();
+    }
+
+    // ANY real picture becoming the wallpaper turns the clock wallpaper off.
+    // The shell's own applies do that below, but a wallpaper can also arrive
+    // from outside it -- switchwall.sh in a terminal, --random, the fallback
+    // picker -- and that pathway only ever shows up as a config change. Without
+    // this, picking a picture that way would leave the user on a black screen
+    // with a clock on it.
+    onCurrentWallpaperPathChanged: {
+        if (Config.options.background.clockWallpaper?.enable)
+            Config.options.background.clockWallpaper.enable = false;
+    }
+
     function apply(path, darkMode = Appearance.m3colors.darkmode) {
         if (!path || path.length === 0) return;
+        if (root.isClockWallpaper(path)) {
+            root.applyClockWallpaper();
+            return;
+        }
         const src = FileUtils.trimFileProtocol(path);
         // Already part of the collection (the selector's own folder, or an
         // imported copy being re-applied): nothing to import.
@@ -62,6 +107,16 @@ Singleton {
 
     function applyInternal(path, darkMode = Appearance.m3colors.darkmode) {
         if (!path || path.length === 0) return;
+        // The clock entry can reach here from a caller that skipped apply()
+        // (the importer, a re-apply of the collection path). It is never handed
+        // to switchwall.sh -- there is no image to switch to.
+        if (root.isClockWallpaper(path)) {
+            root.applyClockWallpaper();
+            return;
+        }
+        // A real picture: the clock wallpaper steps aside.
+        if (Config.options.background.clockWallpaper?.enable)
+            Config.options.background.clockWallpaper.enable = false;
         Quickshell.execDetached([Directories.wallpaperSwitchScriptPath, "--mode", darkMode ? "dark" : "light", "--image", path]);
         // Take the decision here as well, instead of only letting switchwall.sh
         // write it into the config from the outside. Two reasons:

@@ -1,0 +1,839 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Quote wallpaper — the cloud</title>
+<!--
+  A PREVIEW, not the implementation.
+
+  A WORD CLOUD, built the way the picture was built, with ONE RULE OVERRIDING
+  EVERYTHING: a quote is never cut. It sits on one line, in one direction, as
+  one piece of type. Cutting it into two-word chunks (what the earlier
+  versions did, to make sentences interlock like the picture's short words)
+  produced walls of phrases nobody chose -- "SAME DAY" as the hero, two-letter
+  crumbs jammed into gaps, sentences running off the frame. So the material is
+  whole lines instead: the biggest that fit take the middle, the rest pack
+  around them until the frame is full, and a line that will not fit at a
+  readable size is LEFT OFF the wall. Fewer whole lines, never a chopped one.
+
+  HOW A LINE GETS ITS SIZE. The rank decides how far down the ladder a quote
+  starts -- the nine the user gave as the model are the first nine in the pool,
+  so they own the top steps -- and the size is then the largest step at which
+  the WHOLE line still fits the frame. That cap is what pulls the ladder down:
+  a hundred-character sentence cannot be 126px however important it is.
+
+  THE SCALE IS MEASURED OFF THE PICTURE, not guessed: there the hero is 13 %
+  of the image height and the grain about 2 %, so on a 1600-tall frame that is
+  ~210 and ~20. The first attempt put them at 9 % and 0.9 %, which is the same
+  hierarchy four times too small -- right in structure, wrong in every way
+  that shows.
+
+  HOW THEY ARE PLACED, AND WHY THE SEED MATTERS MORE THAN THE ORDER. Every
+  line walks an Archimedean spiral out from its OWN seed and takes the first
+  spot where its padded box hits nothing already down. Seeds are scattered
+  over the frame on a golden-angle lattice at radius sqrt(rank), with the hero
+  and its step at the exact centre. Seeding from the centre instead (what the
+  previous version did for the bars) sends every line to the same emptiest
+  patch near the middle: bars stack into rows, columns are pushed into the
+  channels those rows leave at the edges -- two orientations in blocks, never
+  mixed. Order still runs the nine examples first, as one block, then the rest
+  as pairs of one turned and one across. Nothing is randomised into place and
+  nothing overlaps: the collision test is the layout.
+
+  WHY THAT ORDER. Rank and size are the same thing, so every turned line is a
+  small one -- and in a rank-ordered list every turned line therefore sat in the
+  TAIL, was handed to a packer that was already full, and inherited whatever
+  channel was left at the margins: a solid horizontal middle, a rail of
+  verticals at each edge, which is exactly the stacking the user called out.
+  Giving the columns their own queue, offered early, out of scattered anchors,
+  is what puts them inside the flow instead. Two hard rules keep it honest:
+  never more than three uprights in one 450 px strip of the frame (no rails),
+  and a line that misses is made SMALLER before it is ever turned over, because
+  a column that shrinks keeps its slot for the mix while a column flipped to a
+  bar gives it away.
+
+  A line is only turned if the column it would make fits the frame, so the long
+  sentences stay horizontal by arithmetic. `?bg=light` brings back the coloured
+  plate; G flips it in the preview.
+
+  Controls: B boxes · S squint · R new draw · G ground.
+-->
+<style>
+  :root {
+    --paper: #fbfaf8;
+    --hud-fg: #6c6a63;
+    --hud-bg: rgba(255, 255, 255, .7);
+    --hud-border: rgba(0, 0, 0, .1);
+  }
+  html.dark {
+    --paper: #000000;
+    --hud-fg: #8a8c92;
+    --hud-bg: rgba(14, 14, 15, .74);
+    --hud-border: rgba(255, 255, 255, .09);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: var(--paper); overflow: hidden; }
+  body {
+    font-family: "Google Sans Flex", "Google Sans", "Manrope", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  #stage {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    overflow: hidden; background: var(--paper);
+  }
+  #cloud { position: absolute; inset: 0; }
+  #cloud.squint { filter: blur(14px); }
+
+  .w {
+    position: absolute; left: 0; top: 0;
+    white-space: pre;
+    text-transform: uppercase;
+    transform-origin: 0 0;
+    line-height: 1;
+    font-weight: 700;
+    will-change: transform;
+  }
+
+  #boxes { position: absolute; inset: 0; pointer-events: none; opacity: 0; transition: opacity .2s ease; }
+  #boxes.on { opacity: 1; }
+
+  #hud {
+    position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 2px;
+    padding: 5px; border-radius: 999px;
+    background: var(--hud-bg);
+    border: 1px solid var(--hud-border);
+    backdrop-filter: blur(10px);
+    font-family: "JetBrains Mono NF", ui-monospace, monospace;
+    font-size: 10px; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--hud-fg); user-select: none; opacity: .3;
+    transition: opacity .3s ease; z-index: 10;
+  }
+  #hud:hover { opacity: 1; }
+  #hud .label { padding: 0 12px; white-space: nowrap; }
+  #hud .sep { width: 1px; height: 16px; background: currentColor; opacity: .25; margin: 0 4px; }
+  #hud button {
+    all: unset; cursor: pointer; padding: 7px 11px; border-radius: 999px;
+    transition: background .16s ease, color .16s ease;
+  }
+  #hud button:hover { background: rgba(128, 128, 128, .14); }
+  #hud button.on { color: #0b0b0b; background: #ffb510; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="cloud"></div>
+  <svg id="boxes" xmlns="http://www.w3.org/2000/svg"></svg>
+</div>
+<div id="hud">
+  <span class="label" id="label">—</span>
+  <span class="sep"></span>
+  <button data-act="boxes" title="B">boxes</button>
+  <button data-act="squint" title="S">squint</button>
+  <button data-act="ground" title="G">ground</button>
+  <button data-act="redraw" title="R">redraw</button>
+</div>
+<script src="../../modules/ii/background/clockQuotes.js"></script>
+<script src="../modules/ii/background/clockQuotes.js"></script>
+<script>
+"use strict";
+
+const qs = new URLSearchParams(location.search);
+
+// `?bare` -- THE EXPORT SWITCH. The HUD is chrome for the preview, not part of
+// the picture, so a screenshot of this page with `bare` IS the wallpaper file:
+// nothing but the wall, at the frame's native 2560x1600.
+if (qs.get("bare")) document.getElementById("hud").style.display = "none";
+
+// ── The frame, in design pixels ─────────────────────────────────────────────
+const DW = 2560, DH = 1600;
+const M = 44;                      // margin: tight, like the picture
+
+// ── The sizes ───────────────────────────────────────────────────────────────
+// ONE SIZE PER QUOTE, taken as the largest step at which THE WHOLE QUOTE still
+// fits one line. That cap is what pulls the ladder down: a full quote is
+// 14-110 characters, so 210px would run straight off the frame, and the top
+// step has to be where the shortest of them fits. The floor is MIN_SIZE --
+// below that a line stops being readable, and a quote that cannot fit at or
+// above the floor is LEFT OFF THE WALL rather than shrunk or cut, because a
+// wall of truncated sentences is worse than a shorter wall of whole ones.
+const TIERS = [126, 100, 78, 60, 47, 38, 31, 26];
+const MIN_SIZE = 26;              // readable floor -- nothing smaller is drawn
+const MAXH = 2380;                // longest a horizontal line may run
+const MAXV = 1500;                // longest a turned line may rise (a vertical
+                                  // column is as tall as the line was wide)
+const VERT_P = 0.55;              // chance an eligible line is turned upright
+// Brightness falls with size, so the small print sits back on both grounds.
+const TONE_L = [1, .95, .88, .8, .72, .64, .56, .46];
+// On black, value already belongs to the quote's ladder, so size must not
+// darken it again -- at .3 opacity a grey line disappears into the ground.
+// Nearly flat: size carries the hierarchy, the ladder carries identity.
+const TONE_D = [1, 1, 1, 1, .97, .94, .9, .86];
+const WGT = [700, 700, 700, 600, 600, 600, 500, 500];
+
+const EXAMPLES = 9;                 // the nine lines given as the model
+
+// ── The ground and the ink ──────────────────────────────────────────────────
+// Sampled off the picture itself (10-colour quantisation): indigo #3f4096,
+// olive, muted indigo #555091, lime, warm grey #534a4c, mauve #897591, pale
+// lilac #beb3c5 on #fff. Those are its colours, not invented ones.
+//
+// HUE FOLLOWS THE QUOTE -- all of one line's chunks share it, so a thought
+// still holds together -- and VALUE FOLLOWS SIZE: small chunks go to the pale
+// end. In the picture the biggest word is the darkest and the speckle is the
+// palest, which on the dark ground is the same job tone does.
+const LIGHT_DARK = ["#3f4096", "#6b7a2e", "#555091", "#98b93c", "#534a4c", "#897591"];
+const LIGHT_PALE = ["#beb3c5", "#cfc9bb"];
+// The ground the user actually wants: #000 with a neutral white-to-grey
+// ladder, one step per QUOTE. Size says how important a line is; this says
+// WHICH line it is -- every fragment of one quote takes the same step, so in
+// a monochrome wall the clusters separate by value the way they did by hue.
+const DARK_INK = ["#ffffff", "#ececec", "#d9d9d9", "#c4c4c4", "#b1b1b1", "#9e9e9e", "#8c8c8c", "#7a7a7a"];
+
+// ── Seeded randomness: tie-breaks and colour only, never placement ──────────
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+const ALL = (typeof list !== "undefined" ? list : []).slice();
+const stage = document.getElementById("stage");
+const cloud = document.getElementById("cloud");
+const boxes = document.getElementById("boxes");
+const label = document.getElementById("label");
+
+// Deep black is the default now; ?bg=light brings back the coloured plate.
+let dark = qs.get("bg") !== "light";
+const applyGround = () => document.documentElement.classList.toggle("dark", dark);
+applyGround();
+const inkSet = () => (dark ? DARK_INK : LIGHT_DARK);
+
+// ── Measuring ───────────────────────────────────────────────────────────────
+// font-weight, not font-variation-settings: this family resolves to named
+// instances here and only honours the axis through the weight property.
+const probe = document.createElement("div");
+probe.className = "w";
+probe.style.visibility = "hidden";
+document.body.appendChild(probe);
+function measure(text, size, weight) {
+  probe.style.fontSize = size + "px";
+  probe.style.fontWeight = weight;
+  probe.textContent = text;
+  const r = probe.getBoundingClientRect();
+  return { w: r.width, h: r.height };
+}
+
+// ── No cutting. Ever. ───────────────────────────────────────────────────────
+// A quote is one line, one direction, whole. The packing below has to work
+// around whole bars or it does not work -- that is the trade: fewer lines on
+// the wall, and none of them mangled.
+
+// ── Build the material ──────────────────────────────────────────────────────
+// A quote's score decides how high it climbs, and its level decides how many
+// quotes are allowed there. QUOTA COUNTS QUOTES, not fragments: one at the top,
+// two at the next step, and so on, so the wall is a pyramid of complete lines.
+// Rank alone would hand the whole pool to the display steps and leave the
+// frame nothing for the small print; the quota is what makes it a ladder.
+const QUOTA = [1, 2, 3, 4, 6, 10, 16, Infinity];
+
+// The largest tier at which the WHOLE line still runs inside the frame, never
+// below the readable floor. Returns false -- leave it off the wall -- rather
+// than shrink past the floor or cut the line in two.
+function fitQuote(q, darkMode) {
+  for (let t = q.level; t < TIERS.length; t++) {
+    const size = TIERS[t];
+    const m = measure(q.text, size, WGT[t]);
+    if (m.w <= MAXH) {
+      q.level = t;
+      q.size = size;
+      q.weight = WGT[t];
+      q.tone = darkMode ? TONE_D[t] : TONE_L[t];
+      q.w = m.w; q.h = m.h;
+      q.len = m.w;                 // its own length, whichever way it turns
+      return true;
+    }
+  }
+  return false;
+}
+
+function build(rng, darkMode) {
+  const n = ALL.length;
+  const quotes = [];
+
+  ALL.forEach((text, qi) => {
+    const rank = qi / Math.max(1, n - 1);          // 0 = best, 1 = worst
+    // Shortness earns size: a short line can be enormous, a hundred-character
+    // one cannot, and no amount of ranking changes that arithmetic.
+    // RANK IS THE ONLY RANKING. The pool is already hand-ordered -- the nine
+    // examples sit at the top of it -- so neither shortness nor noise may ever
+    // push a line the user called best below one she did not. The size still
+    // follows the arithmetic (a short line fits a big step, a long one cannot;
+    // fit decides that), but the LADDER belongs to rank alone.
+    const score = (1 - rank) + (rng() * 0.0004 - 0.0002);
+    quotes.push({ text, score, hue: null, quote: qi, rank });
+  });
+
+  quotes.sort((a, b) => b.score - a.score);
+  quotes.forEach((q, i) => {
+    let level = 0, left = i;
+    while (level < QUOTA.length - 1 && left >= QUOTA[level]) {
+      left -= QUOTA[level]; level++;
+    }
+    q.level = level;
+    // VALUE BELONGS TO THE QUOTE, so in a monochrome wall one line still reads
+    // as one line and neighbours separate the way hue separated them before.
+    q.hue = darkMode ? DARK_INK[q.quote % DARK_INK.length]
+                     : LIGHT_DARK[q.quote % LIGHT_DARK.length];
+  });
+
+  const out = [];
+  for (const q of quotes) if (fitQuote(q, darkMode)) out.push(q);
+
+  // PLACEMENT ORDER IS IMPORTANCE, not the width the fit happened to leave:
+  // sorted by size alone, a long example that had to drop to the floor would go
+  // last and lose its space to strangers, and the ranking would mean nothing.
+  out.sort((a, b) => a.level - b.level || b.size - a.size || a.len - b.len);
+  return out;
+}
+
+// ── Placement: spiral + collision ───────────────────────────────────────────
+// ONE LINE, ONE DIRECTION, AND NEVER A RUN OF THE SAME TURN. Each quote walks
+// the spiral from the centre and takes the first padded box that hits nothing
+// already down. Its direction is decided just before, with a run cap of two:
+// a horizontal, then a vertical turned upright beside it, then horizontals
+// filling the channels the vertical left -- which is the "one horizontal, the
+// next vertical, then fill up again" the picture itself uses. A line is only
+// turned if the column it would make still fits the frame, so the long
+// sentences stay horizontal by arithmetic rather than by taste.
+// Diagnostics for the stack gate: how often the ladder test ran, how often it
+// refused. Exposed through stats so a render can be checked without eyeballing.
+let scTests = 0, scHits = 0;
+
+function place(items, rng) {
+  const cx = DW / 2, cy = DH / 2;
+  const CELL = 12;
+  const GW = Math.ceil(DW / CELL), GH = Math.ceil(DH / CELL);
+  const grid = new Uint8Array(GW * GH);
+  const placed = [];
+  const MAXR = 1620;              // reaches past the corners of the frame
+  const SPACING = 10;              // samples along the curve: finer than the
+                                  // smallest line is tall, and nothing smaller
+                                  // can hide between two samples
+
+  const stamp = (b) => {
+    const x0 = Math.max(0, (b.x / CELL) | 0), x1 = Math.min(GW - 1, ((b.x + b.w) / CELL) | 0);
+    const y0 = Math.max(0, (b.y / CELL) | 0), y1 = Math.min(GH - 1, ((b.y + b.h) / CELL) | 0);
+    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) grid[y * GW + x] = 1;
+  };
+  const blocked = (b) => {
+    const x0 = Math.max(0, (b.x / CELL) | 0), x1 = Math.min(GW - 1, ((b.x + b.w) / CELL) | 0);
+    const y0 = Math.max(0, (b.y / CELL) | 0), y1 = Math.min(GH - 1, ((b.y + b.h) / CELL) | 0);
+    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) if (grid[y * GW + x]) return true;
+    return false;
+  };
+
+  // ── The turn rule ──
+  // Decided per line, in rank order, with a bias to the opposite of whatever
+  // came before: mostly alternating, never three of one orientation in a row.
+  // A line too long to make a fitting column stays horizontal -- that is
+  // arithmetic, not taste.
+  let last = null, run = 0;
+  for (const it of items) {
+    const canTurn = it.len <= MAXV;
+    const flip = last === "v" ? "h" : "v";
+    let want;
+    if (last === null) want = rng() < VERT_P ? "v" : "h";
+    else if (run >= 2 && canTurn) want = flip;
+    else if (canTurn) want = rng() < 0.72 ? flip : last;
+    else want = "h";
+    if (want === "v" && !canTurn) want = "h";
+    it.rot = want === "v";
+    // A turned line reads BOTH WAYS: -90 climbs (bottom to top) and +90 falls
+    // (top to bottom), dealt here so the uprights are about half and half. All
+    // one way round, and every column leans the same direction and the wall
+    // looks combed; the user asked for up AND down.
+    it.dir = rng() < 0.5 ? -1 : 1;
+    if (want === last) run++; else { last = want; run = 1; }
+  }
+
+  // ── WHO IS OFFERED A SPOT, AND WHEN ──
+  // THIS IS WHERE THE WALL SEGREGATED. `items` arrives in rank order, rank and
+  // size are the same thing here, and every upright line is a small one -- so
+  // every upright sat in the TAIL of the sequence, was handed to a packer that
+  // was already full, and inherited whatever channel was left at the margins.
+  // Horizontals kept the middle, uprights got the edges, and no amount of
+  // per-line alternating could undo that, because order is not adjacency.
+  //
+  // So the two orientations get their own queues and are merged ACROSS/TURNED,
+  // but not before phase one -- because the packer's own geometry can cost a
+  // line its home, and no line the user gave may ever be one of them.
+  //
+  // PHASE ONE: THE NINE, AS A BLOCK, FIRST. They are the top of the ladder in
+  // any case; placing them as one group before any queue is built means the
+  // scattering below, a full frame, or a crowded strip can never drop one.
+  const isNine = (i) => i.quote < EXAMPLES;
+  const order = items.filter(isNine);
+
+  // PHASE TWO: THE REST, ONE TURNED AND ONE ACROSS. The whole reason the wall
+  // segregated is that the uprights sat in the TAIL of a rank-ordered list and
+  // were handed to a packer that was already full -- the middle stayed
+  // horizontal and the margins became rails of verticals. Alternating the two
+  // queues means every column is offered while the frame is still open, and
+  // the lines are packed around it.
+  //
+  // (This ordering changes ONLY who is offered a spot when. Sizes still come
+  // from rank and from the fit rule; a line steps down only in the retry pass,
+  // where the alternative to one size smaller is not being on the wall at all.)
+  const restH = items.filter(i => !isNine(i) && !i.rot);
+  // SHORTEST COLUMN FIRST. Interior gaps are short -- above and below the wide
+  // bars there is room for a 300 px column, not a 1200 px one -- so the columns
+  // that can actually use an interior gap are asked for first and the long ones
+  // (which can only ever live in the margins) come last.
+  const restV = items.filter(i => !isNine(i) && i.rot).sort((a, b) => a.len - b.len);
+  let hi = 0, vi = 0;
+  // A COLUMN IS OFFERED FIRST IN EACH PAIR. The nine have already taken the
+  // centre, so what is still open is the top, the bottom and the margins -- and
+  // those are exactly the regions a column needs. Leading with the upright
+  // gives it the pick of them; the bar takes what is left a step later.
+  while (hi < restH.length || vi < restV.length) {
+    if (vi < restV.length) order.push(restV[vi++]);
+    if (hi < restH.length) order.push(restH[hi++]);
+  }
+
+  // ── WHERE EACH LINE IS SEEDED ──
+  // NOT FROM THE CENTRE, and this is the whole fix. A centre-out search sends
+  // every line to the emptiest spot near the middle -- and "near the middle" is
+  // the same place for all of them. The bars therefore stack into rows through
+  // the middle and the columns are squeezed into whatever channels those rows
+  // leave at the edges: two orientations in BLOCKS, side by side, never mixed,
+  // which is exactly what the user called out.
+  //
+  // So every line gets its OWN seed instead: golden angle around the frame,
+  // radius sqrt(rank) so the areal density stays even while the best lines
+  // still sit closest to the centre (hero and its step keep the exact centre).
+  // Each line then searches outward from its own neighbourhood, so a bar looks
+  // at the same patch of frame as the column beside it and lands next to it.
+  // The orientations interleave by construction rather than by rule.
+  const GOLD = 0.6180339887498949;
+  const RX = (DW - 2 * M) / 2, RY = (DH - 2 * M) / 2;
+  items.forEach((it, i) => {
+    if (it.level <= 1) { it.ax = cx; it.ay = cy; return; }
+    const u = Math.sqrt(Math.min(1, Math.max(0, it.rank || 0)));
+    const a = ((i * GOLD) % 1) * Math.PI * 2;
+    it.ax = Math.min(DW - M, Math.max(M, cx + Math.cos(a) * RX * u));
+    it.ay = Math.min(DH - M, Math.max(M, cy + Math.sin(a) * RY * u));
+  });
+
+  // ── No rails, no picket fence ──
+  // THE VERTICALS WERE FORMING SOLID RAILS: a column is narrow, so every one
+  // of them found the same channel beside the wide bars, and because the check
+  // used to be local in BOTH axes a chain could grow down an edge one link at a
+  // time (each new link only saw its two neighbours). So the patch is now a
+  // full-height STRIP: at most four uprights in any 900 px window of the
+  // frame, measured over the whole column of the picture. The edges fill to
+  // four and then stop, and every later upright is pushed into the interior --
+  // which is the mixing, not decoration.
+  const STRIP = 450, STRIP_MAX = 6;
+  const crowded = (b) => {
+    const cxb = b.x + b.w / 2;
+    let n = 0;
+    for (const p of placed) {
+      if (!p.rot) continue;
+      if (Math.abs((p.x + p.bw / 2) - cxb) > STRIP) continue;
+      if (++n >= STRIP_MAX) return true;
+    }
+    return false;
+  };
+
+  // A bar is STACKED when it lines up directly under another bar: same x
+  // corridor (30% of the narrower span -- a partial stagger still reads as a
+  // row over a row) and no more than 110 px away (two tight lines with only a
+  // gutter between them still read as one paragraph of rows). Two in a row are
+  // a pair -- the hero block is exactly that and hierarchy needs it. A THIRD in
+  // the same corridor is a ladder, and ladders are what turned the whole middle
+  // of the frame into rows on rows. Small print (level >= 3) may never build
+  // one: it must stagger sideways -- which opens the channel a column can stand
+  // in -- or move to another region of the wall.
+  //
+  // The count is over the whole CONNECTED LADDER, not the neighbours within
+  // 70 px: counting only near neighbours let a stack grow one link at a time
+  // (each new bar saw just the one it touched, so the chain reached sixteen).
+  // Corridor bars are linked transitively by the same gap rule, and the
+  // candidate is refused if joining any chain it touches would make three.
+  const stackCrowded = (b) => {
+    scTests++;
+    const corr = [];
+    for (const p of placed) {
+      if (p.rot) continue;
+      const ov = Math.min(b.x + b.w, p.x + p.bw) - Math.max(b.x, p.x);
+      if (ov < 0.3 * Math.min(b.w, p.bw)) continue;
+      corr.push(p);
+    }
+    if (!corr.length) return false;
+    const n = corr.length;
+    // .bh on a PLACED line, .h on the CANDIDATE's raw box -- reading .bh off
+    // both made every candidate test NaN, NaN <= 70 is false, join never lit
+    // and the whole gate silently never fired (chains grew unchecked).
+    const hh = (o) => (o.bh !== undefined ? o.bh : o.h);
+    const near = (a, p) => Math.max(a.y - (p.y + hh(p)), p.y - (a.y + hh(a))) <= 110;
+    // Connected components of the corridor under `near`: each is one ladder.
+    const comp = new Int16Array(n);
+    let comps = 0;
+    for (let i = 0; i < n; i++) {
+      if (comp[i]) continue;
+      comps++;
+      const stack = [i];
+      comp[i] = comps;
+      while (stack.length) {
+        const a = corr[stack.pop()];
+        for (let j = 0; j < n; j++) {
+          if (comp[j]) continue;
+          if (near(a, corr[j])) { comp[j] = comps; stack.push(j); }
+        }
+      }
+    }
+    // Which ladders would the candidate join, and how long would EACH get?
+    // The sum matters, not the max: a bar placed between two unlinked chains
+    // touches each of them singly -- each looks harmless at size 1 -- while
+    // stitching them into one run of three. Counting per component let the
+    // ladder grow exactly that way, one bridge at a time.
+    const size = new Int16Array(comps + 1);
+    for (let i = 0; i < n; i++) size[comp[i]]++;
+    const join = new Int16Array(comps + 1);
+    for (let i = 0; i < n; i++) if (near(b, corr[i])) join[comp[i]] = 1;
+    let total = 1;
+    for (let c = 1; c <= comps; c++) if (join[c]) total += size[c];
+    if (location.search.includes("dump"))
+      console.log(`SC n=${n} comps=${comps} total=${total} y=${Math.round(b.y)} h=${Math.round(b.h)} txt=${(corr[0] && corr[0].text || "").slice(0, 14)}`);
+    const res = total > 2;
+    if (res) scHits++;
+    return res;
+  };
+
+  // One line, one attempt: walk the spiral out from the centre and take the
+  // first padded box that hits nothing already down. `phase` rotates the whole
+  // walk, so a retry searches somewhere else instead of finding the same hole.
+  const tryPlace = (it, phase = 0) => {
+    const bw = it.rot ? it.h : it.w;
+    const bh = it.rot ? it.w : it.h;
+    // A wider gutter than before: two lines with only 10 px between them read
+    // as one paragraph even when the ladder rule allows the pair. 8 px plus
+    // 5% of the size keeps the wall tight but lets a pair -- and a column
+    // slipping past it -- breathe.
+    const pad = 8 + Math.round(it.size * 0.05);
+    // Origin: every line searches from its own seed -- a column AND a bar
+    // alike. Centring only the bars is what kept them stacked in rows while
+    // the columns filed off to the margins.
+    const sx = it.ax !== undefined ? it.ax : cx;
+    const sy = it.ay !== undefined ? it.ay : cy;
+    // FLANK ANCHORS. The seed alone sends every bar to whichever empty band
+    // sits next to what is already down -- and empty bands are exactly where
+    // rows breed more rows. So a bar is also offered its own left and right
+    // berth (a column its top and bottom one): a line that would build a
+    // ladder can stagger sideways instead, and the strip it vacates beside
+    // itself is the channel a column then stands in. Which flank comes first
+    // alternates with the quote's own index, so the wall takes turns leaning
+    // left and right rather than combing one way.
+    const origins = [{ x: sx, y: sy }];
+    if (!it.rot) {
+      const leftB = { x: M + bw / 2, y: sy }, rightB = { x: DW - M - bw / 2, y: sy };
+      const flip = (it.quote & 1) === 1;
+      origins.push(flip ? rightB : leftB, flip ? leftB : rightB);
+    } else {
+      origins.push({ x: sx, y: M + bh / 2 }, { x: sx, y: DH - M - bh / 2 });
+    }
+    for (const o of origins) {
+      let th = 0, r = 0;
+      for (let k = 0; k < 60000; k++) {
+        th += SPACING / Math.max(r, SPACING);
+        r = 1.45 * th;
+        if (r > MAXR) break;
+        const a = phase + th;
+        const x = o.x + r * Math.cos(a) - bw / 2;
+        const y = o.y + r * Math.sin(a) * 0.66 - bh / 2;
+        if (x < M || y < M || x + bw > DW - M || y + bh > DH - M) continue;
+        const box = { x: x - pad, y: y - pad, w: bw + 2 * pad, h: bh + 2 * pad };
+        if (blocked(box)) continue;
+        if (it.rot && crowded(box)) continue;
+        if (!it.rot && it.level >= 3 && stackCrowded(box)) continue;
+        stamp(box);
+        it.x = x; it.y = y; it.bw = bw; it.bh = bh; it.pad = pad;
+        it.ord = placed.length;
+        placed.push(it);
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // ── THE FALLBACK SEARCH ──
+  // THE SPATIAL TRUTH ABOUT A LONG LINE: walked as an ellipse from the centre,
+  // a bar 1980 px wide can only ever land within about 250 px of the frame's
+  // centre line, because anywhere else its own width runs off the edge. Once
+  // the middle is full the spiral has no legal position at all and spends its
+  // whole walk proving it -- which is how a line the user asked for ended up
+  // off the wall. So the failures get a straight raster over the frame as
+  // well: same collision test, same margins, same gutters, only a different
+  // order, scanning top-to-bottom or bottom-to-top so the search never always
+  // favours one corner.
+  const tryRaster = (it) => {
+    const bw = it.rot ? it.h : it.w;
+    const bh = it.rot ? it.w : it.h;
+    const ys = [], xs = [];
+    const pad = 8 + Math.round(it.size * 0.05);   // same gutter as the spiral
+    for (let y = M; y + bh <= DH - M; y += CELL) ys.push(y);
+    for (let x = M; x + bw <= DW - M; x += CELL) xs.push(x);
+    if (!ys.length || !xs.length) return false;
+    if ((it.quote & 1) === 1) { ys.reverse(); xs.reverse(); }
+    for (const y of ys) {
+      for (const x of xs) {
+        const box = { x: x - pad, y: y - pad, w: bw + 2 * pad, h: bh + 2 * pad };
+        if (blocked(box)) continue;
+        if (it.rot && crowded(box)) continue;
+        if (!it.rot && it.level >= 3 && stackCrowded(box)) continue;
+        stamp(box);
+        it.x = x; it.y = y; it.bw = bw; it.bh = bh; it.pad = pad;
+        it.ord = placed.length;
+        placed.push(it);
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const attempt = (it, phase) => tryPlace(it, phase) || tryRaster(it);
+
+  let dropped = 0;
+  const failed = [];
+  for (const it of order) if (!attempt(it, 0)) failed.push(it);
+
+  // ── A LINE THAT MISSED GETS REAL ATTEMPTS, NOT A SHRUG ──
+  // WHAT IT TRIES, IN THIS ORDER, AND WHY THE ORDER IS THE POINT.
+  //
+  // A column that missed gets SHORTER first, keeping its direction: a column
+  // is short of exactly one dimension, so one step smaller can hand it the very
+  // gap it was standing in front of. Turning it over instead was what was
+  // eating the uprights -- the flip usually succeeds (a bar finds a home more
+  // easily than a column), and every success that way cost the wall one more
+  // turned line and pushed the mix back towards stacked.
+  //
+  // A bar that missed gets the opposite treatment: it tries the OTHER
+  // orientation at full size first, because a turned bar is worth more to the
+  // mix than a smaller bar, and only then shrinks.
+  //
+  // Shrinking stops at the readable floor and is never a cut. "Left off" means
+  // the line tried all of that and still has no empty home; the HUD counts them.
+  const shrink = (it) => {
+    if (it.level >= TIERS.length - 1) return false;
+    it.level++;
+    it.size = TIERS[it.level]; it.weight = WGT[it.level];
+    it.tone = dark ? TONE_D[it.level] : TONE_L[it.level];
+    const m = measure(it.text, it.size, it.weight);
+    if (m.w > MAXH) return false;
+    it.w = m.w; it.h = m.h; it.len = m.w;
+    return true;
+  };
+
+  for (const it of failed) {
+    let ok = false;
+    let guard = 0;
+    const shrinkRound = (limit) => {
+      while (!ok && guard < limit) {
+        guard++;
+        if (!shrink(it)) { guard = limit; return; }
+        ok = attempt(it, rng() * Math.PI * 2);
+      }
+    };
+    const turnOver = () => {
+      const was = it.rot;
+      it.rot = !was;
+      // Turning INTO a column is only legal while the line is short enough to
+      // stand up in the frame; turning into a bar always is.
+      if (it.rot && it.len > MAXV) { it.rot = was; return; }
+      ok = attempt(it, rng() * Math.PI * 2);
+      if (!ok) it.rot = was;
+    };
+
+    if (it.rot) {
+      shrinkRound(5);            // column: shorter first, same direction
+      if (!ok) turnOver();       // still homeless: become a bar
+      shrinkRound(9);
+    } else {
+      turnOver();                // bar: try a column at full size first
+      shrinkRound(5);            // then narrower, staying a bar
+      if (!ok) turnOver();       // last try: a column again, now shorter
+      shrinkRound(9);
+    }
+    if (!ok) dropped++;
+  }
+
+  place.dropped = dropped;
+  place.turns = placed.filter(p => p.rot).length;
+  return placed;
+}
+
+// ── Draw ────────────────────────────────────────────────────────────────────
+let stats = {};
+
+function draw(seed) {
+  const rng = mulberry32(seed);
+  const items = build(rng, dark);
+  const placed = place(items, rng);
+
+  // Centre the cloud in the frame.
+  let minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
+  for (const p of placed) {
+    minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x + p.bw); maxY = Math.max(maxY, p.y + p.bh);
+  }
+  const dx = (DW - (maxX - minX)) / 2 - minX;
+  const dy = (DH - (maxY - minY)) / 2 - minY;
+
+  cloud.replaceChildren();
+  boxes.replaceChildren();
+  let inked = 0;
+  const quad = [0, 0, 0, 0];
+  const hues = new Set();
+
+  for (const p of placed) {
+    const el = document.createElement("div");
+    el.className = "w";
+    el.textContent = p.text;
+    el.style.fontSize = p.size + "px";
+    el.style.fontWeight = p.weight;
+    el.style.letterSpacing = p.size >= 60 ? "-.024em" : p.size >= 30 ? "-.014em" : "-.004em";
+    // Colour first, tone over it: the hue is the picture's variety and the
+    // tone is the depth cue that lets the small print sit back.
+    el.style.color = p.hue;
+    el.style.opacity = p.tone;
+    el.style.transform = !p.rot
+      ? `translate(${p.x + dx}px, ${p.y + dy}px)`
+      // Box maths for a turned line: bw is the font size (the column's width),
+      // bh is the line's own length (the column's height). -90 puts the first
+      // word at the bottom and reads up; +90 puts it at the top and reads down,
+      // and its box is offset by the column width instead of its length.
+      : p.dir === 1
+        ? `translate(${p.x + dx + p.bw}px, ${p.y + dy}px) rotate(90deg)`
+        : `translate(${p.x + dx}px, ${p.y + dy + p.bh}px) rotate(-90deg)`;
+    cloud.appendChild(el);
+    hues.add(p.hue);
+    inked += p.bw * p.bh;
+    // Measured in DRAWN coordinates: the cloud is re-centred after it is
+    // packed, so a balance computed on the raw spiral would score a layout the
+    // viewer never sees.
+    quad[(p.x + dx + p.bw / 2 > DW / 2 ? 1 : 0) + (p.y + dy + p.bh / 2 > DH / 2 ? 2 : 0)] += p.bw * p.bh;
+
+    const r = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    r.setAttribute("x", p.x + dx - p.pad); r.setAttribute("y", p.y + dy - p.pad);
+    r.setAttribute("width", p.bw + 2 * p.pad); r.setAttribute("height", p.bh + 2 * p.pad);
+    r.setAttribute("fill", "none");
+    r.setAttribute("stroke", p.level === 0 ? "#ffb510" : "rgba(255,181,16,.3)");
+    boxes.appendChild(r);
+  }
+
+  // ── Verification from the result, not by eye ──────────────────────────────
+  let overlaps = 0;
+  for (let i = 0; i < placed.length; i++) {
+    for (let j = i + 1; j < placed.length; j++) {
+      const a = placed[i], b = placed[j];
+      if (a.x < b.x + b.bw && b.x < a.x + a.bw && a.y < b.y + b.bh && b.y < a.y + a.bh) overlaps++;
+    }
+  }
+  // ── How deep does the small print ever stack? ──
+  // Longest chain of level >= 3 bars that line up under each other (same
+  // corridor, gap <= 70 px). Runs upward from the topmost, in order of y, so
+  // the chain cannot fold back on itself. The HUD prints it: the user's
+  // complaint is a number, so it gets measured rather than eyeballed.
+  const smallBars = placed.filter(p => !p.rot && p.level >= 3).slice().sort((a, b) => a.y - b.y);
+  let maxStack = smallBars.length ? 1 : 0;
+  const chain = [];
+  for (let i = 0; i < smallBars.length; i++) {
+    const p = smallBars[i];
+    chain[i] = 1;
+    for (let j = 0; j < i; j++) {
+      const q = smallBars[j];
+      const ov = Math.min(p.x + p.bw, q.x + q.bw) - Math.max(p.x, q.x);
+      if (ov < 0.3 * Math.min(p.bw, q.bw)) continue;
+      // Linked only when it ENDS within 110 px above p -- the old test
+      // (`q ends below p.y + 70`) linked every bar that was merely ABOVE,
+      // however far away, and counted a scattered column of bars as one run.
+      if (q.y + q.bh < p.y - 110) continue;
+      chain[i] = Math.max(chain[i], chain[j] + 1);
+    }
+    maxStack = Math.max(maxStack, chain[i]);
+  }
+  stats = {
+    seed, chunks: placed.length, offered: items.length,
+    dropped: place.dropped, overlaps, maxStack, scTests, scHits,
+    fill: +(inked / (DW * DH) * 100).toFixed(1),
+    spanX: +((maxX - minX) / DW * 100).toFixed(1),
+    spanY: +((maxY - minY) / DH * 100).toFixed(1),
+    verticals: placed.filter(p => p.rot).length,
+    hues: hues.size,
+    sizeRange: [Math.min(...placed.map(p => p.size)), Math.max(...placed.map(p => p.size))],
+    quad: quad.map(v => +(v / (DW * DH / 4) * 100).toFixed(1)),
+  };
+  document.documentElement.dataset.stats = JSON.stringify(stats);
+  if (location.search.includes("dump"))
+    console.log("PLACED " + JSON.stringify(placed.map(p => ({
+      t: p.text.slice(0, 26), x: Math.round(p.x), y: Math.round(p.y),
+      w: Math.round(p.bw), h: Math.round(p.bh), l: p.level, r: p.rot ? 1 : 0,
+      o: p.ord | 0,
+    }))));
+  label.textContent = `${stats.chunks} lines · ${stats.verticals} turned · ${stats.dropped} left off · ${stats.overlaps} overlaps · ${stats.maxStack} deepest · ${stats.fill}% inked`;
+  if (location.search.includes("report")) console.log(stats);
+}
+
+// ── Frame scaling: drawn at 2560 x 1600, scaled to the window ──────────────
+function fit() {
+  const s = Math.min(innerWidth / DW, innerHeight / DH);
+  stage.style.width = DW * s + "px";
+  stage.style.height = DH * s + "px";
+  for (const el of [cloud, boxes]) {
+    el.style.transform = `scale(${s})`;
+    el.style.transformOrigin = "0 0";
+  }
+  boxes.setAttribute("viewBox", `0 0 ${DW} ${DH}`);
+  boxes.setAttribute("width", DW); boxes.setAttribute("height", DH);
+}
+
+// DEFAULT SEED = 3: the draw that was EXPORTED as the wallpaper. Opening the
+// preview shows the shipped picture, not an arbitrary sibling of it.
+let seed = +(qs.get("seed") || 3);
+draw(seed);
+fit();
+addEventListener("resize", fit);
+
+// ── Controls ────────────────────────────────────────────────────────────────
+function toggle(name) {
+  if (name === "boxes") { boxes.classList.toggle("on"); return boxes.classList.contains("on"); }
+  if (name === "squint") { cloud.classList.toggle("squint"); return cloud.classList.contains("squint"); }
+  if (name === "ground") { dark = !dark; applyGround(); draw(seed); return dark; }
+  return false;
+}
+document.querySelectorAll("#hud button").forEach(b => {
+  b.addEventListener("click", () => {
+    const act = b.dataset.act;
+    if (act === "redraw") { seed++; draw(seed); return; }
+    b.classList.toggle("on", toggle(act));
+  });
+});
+addEventListener("keydown", e => {
+  const k = e.key.toLowerCase();
+  const act = k === "b" ? "boxes" : k === "s" ? "squint" : k === "g" ? "ground" : null;
+  if (act) {
+    const btn = document.querySelector(`#hud button[data-act="${act}"]`);
+    btn.classList.toggle("on", toggle(act));
+  }
+  if (k === "r") draw(++seed);
+});
+</script>
+</body>
+</html>

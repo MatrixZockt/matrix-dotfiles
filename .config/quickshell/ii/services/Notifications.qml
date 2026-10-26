@@ -28,6 +28,29 @@ Singleton {
         })) ?? []
         property bool popup: false
         property bool isTransient: notification?.hints.transient ?? false
+        // ── A signal, not a notification ────────────────────────────────
+        //
+        // The clipboard's "Copied" card (services/Cliphist.qml) borrows the
+        // notification card for its material, width and corner -- and for
+        // nothing else. This hint is what lets the card stripe very
+        // affordance that makes a notification a notification: the "now"
+        // timestamp, the expand chevron, the delete button, click-to-open
+        // and drag-to-dismiss are all dropped when it is set (see
+        // NotificationGroup/NotificationItem). Read through the hints map
+        // rather than a dedicated field, because that is the only channel a
+        // DBus sender has for saying something the spec does not define.
+        // What kind of signal this is: "" for a real notification, otherwise
+        // the glyph the card should wear. The sender puts the kind IN the hint
+        // (`x-ii-signal: "copy"` / `"image"`), so the card does not have to
+        // guess from the summary -- "Image copied" and "Copied" are just
+        // strings, and a translated one would guess wrong. A bare `true` is
+        // still read as a text copy, which keeps an older sender working.
+        property string signalKind: {
+            const hint = notification?.hints?.["x-ii-signal"];
+            if (hint === true) return "copy";
+            return (typeof hint === "string" && hint.length > 0) ? hint : "";
+        }
+        property bool isSignal: signalKind !== ""
         property string appIcon: notification?.appIcon ?? ""
         property string appName: notification?.appName ?? ""
         property string body: notification?.body ?? ""
@@ -155,7 +178,11 @@ Singleton {
     }
 
     function stringifyList(list) {
-        return JSON.stringify(list.map((notif) => notifToJSON(notif)), null, 2);
+        // Transients are popups, never history: NotifTimer discards them at
+        // timeout, and they must not reach the file either -- a shell killed
+        // mid-popup would otherwise resurrect "Copied" as a permanent row.
+        return JSON.stringify(list.filter((notif) => !notif.isTransient)
+            .map((notif) => notifToJSON(notif)), null, 2);
     }
     
     onListChanged: {
@@ -236,7 +263,11 @@ Singleton {
             }));
     }
 
-    property var flatCards: flatCardsFor(root.list)
+    // History NEVER draws a transient (asked for as "a notification that
+    // don't stay in the notification sidebar"): the card lives in the corner
+    // popup and vanishes there -- the sidebar must not show it, not even for
+    // the moment it is popping.
+    property var flatCards: flatCardsFor(root.list.filter((n) => !n.isTransient))
     property var flatPopupCards: flatCardsFor(root.popupList)
 
     // Which window class sent this notification.
@@ -441,7 +472,123 @@ Singleton {
     // row, and that row works by handing a level to the player at spawn time.
     // Spawning here instead would mean this file had its own private, always
     // full-volume path that the row could not reach.
-    readonly property string defaultNotifSound: "/usr/share/sounds/freedesktop/stereo/message.oga"
+    // The shell's own copy, NOT the system message.oga. See the level note
+    // below: the system file peaks at -5.9 dBFS, which is why the chime could
+    // not be heard over music, and the only way to raise it is to raise the
+    // SAMPLE -- the player cannot go past 100 %.
+    readonly property string defaultNotifSound: Quickshell.shellPath("assets/sounds/notification.oga")
+
+    // ── How loud the chime is, and why the gain is 1.0 ──────────────────────
+    //
+    // REQUESTED (2026-10-23): "make the notification audio from apps louder
+    // than the general music audio". That was first answered with a playback
+    // factor of 1.8 on the system file -- and it never did anything: `pw-play
+    // --volume` takes 0-1.0 and CLAMPS above it (measured 2026-10-26: a
+    // --volume 1.8 stream comes up at 65536 / 100 %), so the chime played at
+    // exactly the mixer row while the code claimed +5.1 dB. That is the
+    // "music is too loud and the notifications are too quiet" report.
+    //
+    // Measured on the system file: message.oga peaks at -5.9 dBFS with an RMS
+    // of -26.7 dB -- a soft, short drop (311 ms), and music (a full-scale
+    // master, RMS around -10 dB) simply plays over it. A stream volume above
+    // 100 % is not available to this player, so the level has to live in the
+    // audio itself: assets/sounds/notification.oga is that same chime at
+    // +4.9 dB, peaking at -0.9 dBFS with an RMS of -21.7 dB. That is the most
+    // that can be given to it without clipping, and it is ~5 dB above where
+    // the chime used to play.
+    //
+    // So the gain is 1.0 here, and the file carries the level -- which is also
+    // why Volumes.qml's device click no longer asks for a factor above one.
+    // The System Sounds row still multiplies this in every direction: at 0 or
+    // muted nothing is spawned at all, and the sink applies its own volume to
+    // the stream exactly as it does to music. This is a level for THIS sound,
+    // not a way around the mixer.
+    readonly property real notificationGain: 1.0
+
+    // ── Apps that sound their own notifications ─────────────────────────────
+    //
+    // REQUESTED (2026-10-23): "have notification sound not play if the app
+    // making that notification has a sound of its own (like discord or
+    // whatsapp)". Those apps chime themselves the moment a message lands, so
+    // the shell's chime there is not an announcement in a silence -- it is a
+    // SECOND sound, a beat late, over the app's own, which reads as the
+    // desktop duplicating every message.
+    //
+    // The spec has a way to say "I make my own noise" (`sound-name: "silent"`
+    // and `suppress-sound`, both honoured above), but Discord and WhatsApp
+    // publish neither: they assume the notification daemon is quiet, which is
+    // what a desktop normally is. So this is a list of names, and it has to
+    // be: what an app does with its audio is invisible from outside, no sender
+    // publishes an "I already played something" field, and the decision has
+    // to be made before the chime starts rather than after. Everything not
+    // named here keeps the shell's chime.
+    //
+    // The consequence, stated so it is not a surprise: an app that is in this
+    // list AND whose own notification sound is switched off in that app will
+    // be silent here too. That is the trade the request asks for -- one sound
+    // per message -- and the app's own setting is the one place to change it.
+    readonly property var selfSoundingApps: [
+        // Discord and the clients built on it
+        "discord", "discordcanary", "discordptb", "vesktop", "equibop", "armcord", "legcord", "webcord",
+        // WhatsApp, however its Linux client spells itself
+        "whatsapp", "whatsie", "whatsdesk",
+        // messengers that chime for a message themselves
+        "telegram", "slack", "signal", "mattermost", "viber", "zulip",
+        // messenger aggregators, which bring their apps' sounds with them
+        "ferdium", "rambox", "franz",
+        // and the two non-chat ones with a notification sound on by default
+        "steam", "thunderbird"
+    ]
+
+    // One comparable spelling of an app: the basename (identities arrive as
+    // desktop-file ids and as icon paths), no file extension, lowercase, and
+    // every run of punctuation or space collapsed to a single space. So
+    // "WhatsApp Desktop", "whatsapp-linux-desktop" and "/usr/share/icons/.../
+    // whatsapp.png" all become words that can be compared -- which is the
+    // whole point, because none of those three spellings equals another and a
+    // sender picks whichever it likes.
+    function identityText(value) {
+        if (typeof value !== "string" || value.length === 0)
+            return "";
+        return value.split("/").pop()
+            .replace(/\.desktop$/i, "")
+            .replace(/\.(png|svg|xpm|ico|jpe?g|gif)$/i, "")
+            .toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    }
+
+    readonly property var selfSoundingTokens: root.selfSoundingApps.map((a) => root.identityText(a))
+
+    // Does this sender play its own notification sound? Checked against every
+    // spelling the notification carries, plus the window class the tray
+    // registry resolves -- the class is the one identity that survives a
+    // sender with a localised or truncated name (see senderClass).
+    function appSoundsItself(appName, desktopEntry, appIcon) {
+        const texts = [];
+        const add = (v) => {
+            const t = root.identityText(v);
+            if (t.length > 0 && texts.indexOf(t) < 0)
+                texts.push(t);
+        };
+        add(appName);
+        add(desktopEntry);
+        add(appIcon);
+        add(TrayApps.classForNotification({
+            appName: appName,
+            desktopEntry: desktopEntry,
+            appIcon: appIcon,
+        }));
+        for (const text of texts) {
+            for (const token of root.selfSoundingTokens) {
+                if (token.length === 0) continue;
+                // Whole word, not substring: "discord" must match "discord"
+                // and "discord canary", and must not match a longer app name
+                // that merely contains it.
+                if (new RegExp("(^| )" + token + "( |$)").test(text))
+                    return true;
+            }
+        }
+        return false;
+    }
 
     function playNotificationSound(notification) {
         if (!(Config?.options.notifications.sound ?? true)) return;
@@ -449,18 +596,33 @@ Singleton {
         if (hints["suppress-sound"] === true) return;
         const name = hints["sound-name"] ?? "";
         if (name === "silent") return;
+        // The app makes the announcement itself; a second chime over it is the
+        // duplication this exists to stop. See selfSoundingApps.
+        if (root.appSoundsItself(notification?.appName ?? "",
+                notification?.desktopEntry ?? "", notification?.appIcon ?? "")) {
+            console.log("[Notifications] " + (notification?.appName ?? "?")
+                + " sounds its own notifications -- no chime");
+            return;
+        }
         const file = hints["sound-file"];
         let target = "";
+        // A sound the SENDER chose is played at the row's own level: it picked
+        // that file for its own balance, and the gain below is about making
+        // this session's soft default chime survive a music bed.
+        let gain = 1.0;
         if (typeof file === "string" && file.length > 0) {
             target = file;
         } else if (typeof name === "string" && name.length > 0) {
             target = "/usr/share/sounds/freedesktop/stereo/" + name + ".oga";
         }
-        if (target.length === 0) target = root.defaultNotifSound;
+        if (target.length === 0) {
+            target = root.defaultNotifSound;
+            gain = root.notificationGain;
+        }
         // Detached, not a tracked Process: a tracked one cannot be restarted
         // while it is still running, so a second notification arriving while
         // the first was still playing was silently dropped.
-        Audio.playSystemSoundFile(target);
+        Audio.playSystemSoundFile(target, gain);
     }
 
     property int idOffset
@@ -504,7 +666,18 @@ Singleton {
                     "notificationId": newNotifObject.notificationId,
                     "interval": root.popupIntervalFor(notification.expireTimeout),
                 });
-                root.unread++;
+                // A transient is feedback, not something unread: it never
+                // lands in the history, so the bell must not count it.
+                if (!newNotifObject.isTransient) root.unread++;
+            }
+            // A transient that never popped is never anything at all: with no
+            // popup no timer was armed either, so it would sit in the list
+            // forever. Discard it now -- discard also dismisses the
+            // server-side notification and writes the file without it -- and
+            // skip the emit/write below, which it would otherwise duplicate.
+            if (newNotifObject.isTransient && !newNotifObject.popup) {
+                root.discardNotification(newNotifObject.notificationId);
+                return;
             }
             root.notify(newNotifObject);
             // console.log(notifToString(newNotifObject));
@@ -717,6 +890,19 @@ Singleton {
                 + ` entry=${entry ? (entry.id || entry.name) : "(none)"} -> ${result}`;
         }
 
+        // `notifications clear` -- the same call the sidebar's "Clear all"
+        // makes, available from a script.
+        //
+        // Added with the popup layout check: producing a stack of test cards
+        // is the only way to see whether they collide, and a run of them is
+        // also 30-odd rows in the user's own history afterwards. Tests have
+        // to be able to leave the shell as they found it.
+        function clear(): string {
+            const had = root.list.length;
+            root.discardAllNotifications();
+            return `cleared ${had} notification(s)`;
+        }
+
         // Resolves a notifier's identity without a real notification,
         // against whatever strings a sender is likely to publish.
         function resolve(appName: string, desktopEntry: string, appIcon: string): string {
@@ -726,6 +912,21 @@ Singleton {
                 appIcon: appIcon
             });
             return `${appName} / ${desktopEntry} / ${appIcon} -> ${cls === "" ? "(no match)" : cls}`;
+        }
+
+        // `notifications sound <appName> [desktopEntry] [appIcon]` -- what a
+        // notification from this sender would sound like, without sending one.
+        //
+        // Whether a chime is silenced by an app's own sound is invisible from
+        // the outside: both answers look like "a card appeared". This answers
+        // it in words, and it goes through the very function the daemon calls,
+        // so a green answer here is the behaviour rather than a copy of it.
+        function sound(appName: string, desktopEntry: string, appIcon: string): string {
+            const own = root.appSoundsItself(appName, desktopEntry, appIcon);
+            const id = `${appName} / ${desktopEntry || "-"} / ${appIcon || "-"}`;
+            if (own)
+                return `${id} -> app sounds its own notification, no shell chime`;
+            return `${id} -> shell chime at ${root.notificationGain}x row ${Audio.systemSoundVolume().toFixed(3)}`;
         }
     }
 }

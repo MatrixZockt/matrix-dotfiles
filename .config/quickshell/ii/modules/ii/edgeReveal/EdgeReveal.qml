@@ -17,6 +17,13 @@ import Quickshell.Hyprland
  * pixels wide and grab nothing else, so they stay out of the way of normal
  * window edges.
  *
+ * Over a FULLSCREEN window the hover half of that gesture is given up on
+ * purpose, and the edge takes the top bar's model instead: hover arms the hint,
+ * a CLICK opens. The panel is still drawn above the fullscreen client (see
+ * sidebar.showInFullscreen), so what was wanted was never a dead edge but a
+ * quiet one -- no panel dragged across a video because the pointer drifted, and
+ * no sidebar with no door either.
+ *
  * The bottom edge gets the same treatment for the dock, so the bottom bar comes up
  * exactly like the side bars do -- same click, same pointer-leave close, same
  * compositor slide -- and only from the edge itself.
@@ -72,12 +79,29 @@ Scope {
         // something to OPEN them, and these strips are the only thing that can.
         // Keeping them dead would leave the setting decorative.
         property bool suppressed: false
+        // ── Over a fullscreen window the edge is CLICK-ONLY, not dead ────
+        //
+        // Hover arms the hint, a click opens. This is the top bar's rule
+        // applied here (Bar.qml: "the top edge opens on HOVER AND PRESS" --
+        // hover arms the affordance, the press is the ask), and it is what
+        // `suppressed` CANNOT express: suppressed means the edge is inert
+        // altogether, which is what the setting-off case needs, and reusing it
+        // here would have taken the click with the hover.
+        //
+        // Why hover alone must not open over a fullscreen window: the pointer
+        // drifts near an edge constantly while watching something, and every
+        // drift yanked a panel across the picture. Why it must not be dead
+        // either: these strips are the only way to open a sidebar while a
+        // fullscreen client is up, so a dead edge is a sidebar with no door.
+        property bool clickOnly: false
         // Said out loud when it flips, in the same `[edge]` vocabulary the rest
         // of the shell logs in: "the edge strips do nothing" is otherwise
         // indistinguishable from "the strips are suppressed" without a pointer
         // in hand to try them with.
         onSuppressedChanged: console.log(
             `[edge] ${edgeWindow.isLeft ? "left" : "right"} strip suppressed=${edgeWindow.suppressed}`)
+        onClickOnlyChanged: console.log(
+            `[edge] ${edgeWindow.isLeft ? "left" : "right"} strip clickOnly=${edgeWindow.clickOnly}`)
         // True between "the edge opened this sidebar" and "the edge closed it".
         property bool revealed: false
 
@@ -256,7 +280,12 @@ Scope {
                 // usual. Cleared on the way out, before anything reads it.
                 if (!containsMouse)
                     edgeWindow.setLatch(false);
-                if (edgeWindow.suppressed) {
+                // Hover opens ONLY where hover is allowed to open. Over a
+                // fullscreen window (`clickOnly`) the strip is not dead -- the
+                // click below still works -- but the dwell is never armed, so
+                // resting the pointer on the border while a video or a
+                // dashboard is up opens nothing.
+                if (edgeWindow.suppressed || edgeWindow.clickOnly) {
                     if (!containsMouse)
                         openDelay.stop();
                     return;
@@ -273,7 +302,8 @@ Scope {
             // wanted at all: not suppressed, and not latched by a panel that
             // was just closed from this very spot.
             Component.onCompleted: Qt.callLater(() => {
-                if (!edgeWindow.suppressed && !edgeWindow.hoverLatched
+                if (!edgeWindow.suppressed && !edgeWindow.clickOnly
+                    && !edgeWindow.hoverLatched
                     && edgeMouseArea.containsMouse)
                     openDelay.restart();
             });
@@ -310,6 +340,11 @@ Scope {
                     // video -- and neither arming site lets a fire get this far
                     // in that state anyway.
                     if (edgeWindow.suppressed)
+                        return;
+                    // Over a fullscreen window hover never opens -- the ask is
+                    // the click. Re-checked at fire time like everything else
+                    // here, because fullscreen can start during the wait.
+                    if (edgeWindow.clickOnly)
                         return;
                     // A close from this strip, while the pointer stayed on it,
                     // is a decision -- see hoverLatched. The pointer has to
@@ -438,6 +473,10 @@ Scope {
             readonly property bool armed: edgeMouseArea.containsMouse
                 && !edgeWindow.suppressed
                 && !GlobalStates.screenLocked && !edgeWindow.sidebarAlreadyOpen
+            // `clickOnly` deliberately does NOT clear `armed`: over a fullscreen
+            // window this line is the only signal that the edge is live at all,
+            // since hover will not open the panel there and a click will. Quiet
+            // edge + no hint is how "the sidebars are broken" gets read.
 
             // Plain positioning rather than anchors: conditional anchors (setting
             // this one to `undefined` for the opposite edge) silently produced no
@@ -752,19 +791,22 @@ Scope {
 
             // Suppression only means something when the sidebars are NOT
             // allowed over fullscreen: see sidebarsOverFullscreen above. With
-            // the setting on, a fullscreen window changes nothing about the
-            // edges -- which is what "the sidebars are available over
-            // fullscreen" has to mean in practice, because these strips are the
-            // only way to open them while one is up.
+            // the setting on, a fullscreen window does not make the edge
+            // INERT -- but it does make it click-only, which is the other
+            // half of this file's fullscreen story and the half the owner
+            // asked for: hover must not drag a panel across a video, and a
+            // click still has to be able to open one.
             EdgePanelWindow {
                 targetScreen: monitorScope.modelData
                 isLeft: true
                 suppressed: monitorScope.fullscreenHere && !root.sidebarsOverFullscreen
+                clickOnly: monitorScope.fullscreenHere
             }
             EdgePanelWindow {
                 targetScreen: monitorScope.modelData
                 isLeft: false
                 suppressed: monitorScope.fullscreenHere && !root.sidebarsOverFullscreen
+                clickOnly: monitorScope.fullscreenHere
             }
             BottomEdgePanelWindow {
                 targetScreen: monitorScope.modelData

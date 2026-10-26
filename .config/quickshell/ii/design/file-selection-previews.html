@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>File manager — selection styles</title>
+<style>
+  :root{
+    --bg:#101012;
+    --card:#17171a;
+    --pane:#1d1d21;
+    --pane-2:#202024;
+    --ink:#e8e8ec;
+    --ink-2:#a7a7b0;
+    --ink-3:#6f6f79;
+    --line:rgba(255,255,255,.075);
+    --accent:#a8c7fa;
+    --accent-wash:rgba(168,199,250,.14);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--ink);
+    font:14px/1.45 ui-sans-serif,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;}
+  .wrap{max-width:1180px;margin:0 auto;padding:44px 28px 80px}
+  header h1{font-size:26px;font-weight:600;letter-spacing:-.02em;margin:0 0 6px}
+  header p{margin:0;color:var(--ink-2);max-width:70ch}
+  header{margin-bottom:34px}
+  .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px}
+  @media (max-width:900px){.grid{grid-template-columns:1fr}}
+  .study{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 18px 16px}
+  .study h2{display:flex;align-items:baseline;gap:10px;font-size:13px;font-weight:600;
+    letter-spacing:.14em;text-transform:uppercase;margin:0 0 4px;color:var(--ink)}
+  .study h2 .n{color:var(--ink-3);font-weight:500;letter-spacing:.05em}
+  .study .why{margin:0 0 14px;color:var(--ink-2);font-size:12.5px;min-height:34px}
+  .study .tag{float:right;font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--ink-3);border:1px solid var(--line);border-radius:999px;padding:2px 8px}
+  .tag.now{color:#f0b9b9;border-color:rgba(240,120,120,.25)}
+
+  /* ── the mock window ─────────────────────────────────────────── */
+  .app{display:grid;grid-template-columns:132px minmax(0,1fr);gap:8px;
+    background:#141417;border:1px solid var(--line);border-radius:10px;padding:8px;height:236px;overflow:hidden}
+  .side{background:var(--pane);border-radius:7px;padding:6px 0;position:relative}
+  .side-scroll{position:relative;height:100%;overflow:hidden}
+  .heading{font-size:9px;letter-spacing:.13em;text-transform:uppercase;color:var(--ink-3);
+    padding:6px 10px 4px;font-weight:600}
+  .srow{display:flex;align-items:center;gap:8px;height:26px;margin:1px 6px;padding:0 8px;
+    border-radius:6px;color:var(--ink-2);font-size:12px}
+  .srow svg{width:15px;height:15px;flex:none;color:var(--ink-2)}
+  .list{background:var(--pane-2);border-radius:7px;position:relative;overflow:hidden;padding-top:2px}
+  .lhead{display:grid;grid-template-columns:minmax(0,1fr) 62px 52px;gap:0;
+    padding:6px 10px 6px 14px;color:var(--ink-3);font-size:9.5px;letter-spacing:.1em;text-transform:uppercase}
+  .lhead span:last-child{text-align:right}
+  .lbody{position:relative}
+  .row{display:grid;grid-template-columns:minmax(0,1fr) 62px 52px;align-items:center;
+    height:29px;padding:0 10px 0 14px;color:var(--ink);font-size:12.5px;position:relative}
+  .row .name{display:flex;align-items:center;gap:8px;min-width:0}
+  .row .name span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .row svg{width:15px;height:15px;flex:none}
+  .row .meta{color:var(--ink-3);font-size:11px}
+  .row .size{color:var(--ink-2);font-size:11px;text-align:right}
+
+  /* scrollbar lane, exactly as the app draws it: 8px lane, 2px ink, left side */
+  .lane{position:absolute;left:0;top:6px;bottom:6px;width:8px;border-radius:4px;
+    background:rgba(255,255,255,.035)}
+  .lane::before{content:"";position:absolute;left:3px;top:22%;width:2px;height:46%;
+    border-radius:2px;background:rgba(255,255,255,.28)}
+
+  /* ── variant markers (painted on the mock) ───────────────────── */
+  /* 1 current: edge-to-edge hairline outline */
+  .v1 .row.sel{outline:1px solid rgba(232,232,236,.42);outline-offset:-0.5px;border-radius:3px}
+
+  /* 2 accent rail: washed fill + 2px bar, inset past the scroll lane */
+  .v2 .row.sel::before{content:"";position:absolute;left:8px;right:4px;top:2px;bottom:2px;
+    border-radius:6px;background:var(--accent-wash)}
+  .v2 .row.sel::after{content:"";position:absolute;left:8px;top:5px;bottom:5px;width:2px;
+    border-radius:2px;background:var(--accent)}
+  .v2 .row.sel{color:var(--ink)}
+  .v2 .row.sel svg{color:var(--accent)}
+
+  /* 3 capsule wash: soft rounded full fill, accent type */
+  .v3 .row.sel::before{content:"";position:absolute;left:8px;right:4px;top:2px;bottom:2px;
+    border-radius:999px;background:rgba(168,199,250,.16)}
+  .v3 .row.sel{color:var(--accent)}
+  .v3 .row.sel svg{color:var(--accent)}
+  .v3 .row.sel .meta,.v3 .row.sel .size{color:rgba(168,199,250,.62)}
+
+  /* 4 wash + underline: quiet fill and a hairline under the row */
+  .v4 .row.sel::before{content:"";position:absolute;left:8px;right:4px;top:2px;bottom:2px;
+    border-radius:5px;background:rgba(255,255,255,.055)}
+  .v4 .row.sel::after{content:"";position:absolute;left:8px;right:4px;bottom:1px;height:1px;
+    background:linear-gradient(90deg,var(--accent),rgba(168,199,250,.05))}
+
+  /* 5 tone shift only: the row drops into a darker well, accent icon */
+  .v5 .row.sel::before{content:"";position:absolute;left:8px;right:4px;top:2px;bottom:2px;
+    border-radius:6px;background:rgba(0,0,0,.42);
+    box-shadow:inset 0 1px 0 rgba(0,0,0,.5), 0 1px 0 rgba(255,255,255,.03)}
+  .v5 .row.sel svg{color:var(--accent)}
+  .v5 .row.sel .size{color:var(--ink)}
+
+  /* sidebar active row inside each study follows the same language */
+  .v2 .srow.sel{background:var(--accent-wash);color:var(--ink);position:relative}
+  .v2 .srow.sel::before{content:"";position:absolute;left:0;top:5px;bottom:5px;width:2px;
+    border-radius:2px;background:var(--accent)}
+  .v3 .srow.sel{background:rgba(168,199,250,.16);color:var(--accent);border-radius:999px}
+  .v3 .srow.sel svg{color:var(--accent)}
+  .v4 .srow.sel{background:rgba(255,255,255,.055);color:var(--ink);position:relative}
+  .v4 .srow.sel::after{content:"";position:absolute;left:6px;right:6px;bottom:2px;height:1px;
+    background:linear-gradient(90deg,var(--accent),rgba(168,199,250,.05))}
+  .v5 .srow.sel{background:rgba(0,0,0,.42);color:var(--ink)}
+  .v5 .srow.sel svg{color:var(--accent)}
+  .v1 .srow.sel{outline:1px solid rgba(232,232,236,.42);outline-offset:-1px;color:var(--ink)}
+
+  .foot{margin-top:26px;color:var(--ink-3);font-size:12px;max-width:80ch}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Selection, without a box</h1>
+    <p>Same rows, same list, five ways to say “this is the one”. The scroll lane stays on the
+    left in every study, so each marker is drawn inside the row — never across the pane edge.</p>
+    <p style="margin-top:10px;padding:10px 12px;border-left:2px solid #9a9aa2;background:rgba(255,255,255,.03);color:#c9c9cf">
+      <strong>Chosen:</strong> 02’s shape, with the blue accent replaced by neutral grey — a wash at
+      7.5% white and a 2&nbsp;px rail at 70% white. The live app draws that in the file list, the
+      tiles, the Quick access rows and the drive rows, all inset past the 8&nbsp;px scroll lane.</p>
+  </header>
+
+  <div class="grid">
+
+    <!-- 1 -->
+    <section class="study v1">
+      <span class="tag now">today</span>
+      <h2><span class="n">01</span> Hairline outline</h2>
+      <p class="why">A 1&nbsp;px stroke round the whole row. Finds the row, but reads as a border
+      sitting over the list — and its left edge lands in the scroll lane.</p>
+      <div class="app">
+        <div class="side">
+          <div class="side-scroll">
+            <div class="heading">Quick access</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 11 12 4l8 7v8a1 1 0 0 1-1 1h-5v-6h-4v6H5a1 1 0 0 1-1-1z"/></svg>Home</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="5" width="18" height="12" rx="1.5"/><path d="M8 21h8"/></svg>Desktop</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3h8l4 4v14H6z"/><path d="M9 12h6M9 16h6"/></svg>Documents</div>
+            <div class="srow sel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m4 18 5-5 4 4 3-3 4 4"/></svg>Pictures</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 18V6l10-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/></svg>Music</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>Videos</div>
+          </div>
+        </div>
+        <div class="list">
+          <div class="lane"></div>
+          <div class="lhead"><span>Name</span><span>Modified</span><span>Size</span></div>
+          <div class="lbody">
+            <div class="row"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>venv</span></div><div class="meta">Oct 11</div><div class="size">—</div></div>
+            <div class="row"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>Videos</span></div><div class="meta">Oct 09</div><div class="size">2.9 GB</div></div>
+            <div class="row sel"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>animations</span></div><div class="meta">Oct 01</div><div class="size">412 MB</div></div>
+            <div class="row"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m3 8 9-5 9 5-9 5z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></svg><span>bar-charts</span></div><div class="meta">Sep 28</div><div class="size">86 MB</div></div>
+            <div class="row"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3h8l4 4v14H6z"/></svg><span>notes.md</span></div><div class="meta">Sep 27</div><div class="size">4 KB</div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 2 -->
+    <section class="study v2">
+      <span class="tag">recommended</span>
+      <h2><span class="n">02</span> Accent rail</h2>
+      <p class="why">A quiet accent wash with a 2&nbsp;px rail, inset 8&nbsp;px from the pane edge so it
+      clears the scroll lane. Reads as “you are here”, not “a box was drawn here”.</p>
+      <div class="app">
+        <div class="side">
+          <div class="side-scroll">
+            <div class="heading">Quick access</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 11 12 4l8 7v8a1 1 0 0 1-1 1h-5v-6h-4v6H5a1 1 0 0 1-1-1z"/></svg>Home</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="5" width="18" height="12" rx="1.5"/><path d="M8 21h8"/></svg>Desktop</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3h8l4 4v14H6z"/><path d="M9 12h6M9 16h6"/></svg>Documents</div>
+            <div class="srow sel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m4 18 5-5 4 4 3-3 4 4"/></svg>Pictures</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 18V6l10-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/></svg>Music</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>Videos</div>
+          </div>
+        </div>
+        <div class="list">
+          <div class="lane"></div>
+          <div class="lhead"><span>Name</span><span>Modified</span><span>Size</span></div>
+          <div class="lbody">
+            <div class="row"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>venv</span></div><div class="meta">Oct 11</div><div class="size">—</div></div>
+            <div class="row"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>Videos</span></div><div class="meta">Oct 09</div><div class="size">2.9 GB</div></div>
+            <div class="row sel"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>animations</span></div><div class="meta">Oct 01</div><div class="size">412 MB</div></div>
+            <div class="row"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m3 8 9-5 9 5-9 5z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></svg><span>bar-charts</span></div><div class="meta">Sep 28</div><div class="size">86 MB</div></div>
+            <div class="row"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3h8l4 4v14H6z"/></svg><span>notes.md</span></div><div class="meta">Sep 27</div><div class="size">4 KB</div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3 -->
+    <section class="study v3">
+      <h2><span class="n">03</span> Capsule wash</h2>
+      <p class="why">A soft rounded fill with the icon and name in the accent. The loudest of the
+      quiet options; reads well over a photograph, less so next to folder icons already in accent.</p>
+      <div class="app">
+        <div class="side">
+          <div class="side-scroll">
+            <div class="heading">Quick access</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 11 12 4l8 7v8a1 1 0 0 1-1 1h-5v-6h-4v6H5a1 1 0 0 1-1-1z"/></svg>Home</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="5" width="18" height="12" rx="1.5"/><path d="M8 21h8"/></svg>Desktop</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3h8l4 4v14H6z"/><path d="M9 12h6M9 16h6"/></svg>Documents</div>
+            <div class="srow sel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m4 18 5-5 4 4 3-3 4 4"/></svg>Pictures</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 18V6l10-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/></svg>Music</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>Videos</div>
+          </div>
+        </div>
+        <div class="list">
+          <div class="lane"></div>
+          <div class="lhead"><span>Name</span><span>Modified</span><span>Size</span></div>
+          <div class="lbody">
+            <div class="row"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>venv</span></div><div class="meta">Oct 11</div><div class="size">—</div></div>
+            <div class="row"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>Videos</span></div><div class="meta">Oct 09</div><div class="size">2.9 GB</div></div>
+            <div class="row sel"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>animations</span></div><div class="meta">Oct 01</div><div class="size">412 MB</div></div>
+            <div class="row"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m3 8 9-5 9 5-9 5z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></svg><span>bar-charts</span></div><div class="meta">Sep 28</div><div class="size">86 MB</div></div>
+            <div class="row"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3h8l4 4v14H6z"/></svg><span>notes.md</span></div><div class="meta">Sep 27</div><div class="size">4 KB</div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4 -->
+    <section class="study v4">
+      <h2><span class="n">04</span> Wash + underline</h2>
+      <p class="why">A barely-there fill closed by a hairline that fades to the right. Quietest of
+      the four; the accent only exists at the row's left end, where the eye lands first.</p>
+      <div class="app">
+        <div class="side">
+          <div class="side-scroll">
+            <div class="heading">Quick access</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 11 12 4l8 7v8a1 1 0 0 1-1 1h-5v-6h-4v6H5a1 1 0 0 1-1-1z"/></svg>Home</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="5" width="18" height="12" rx="1.5"/><path d="M8 21h8"/></svg>Desktop</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3h8l4 4v14H6z"/><path d="M9 12h6M9 16h6"/></svg>Documents</div>
+            <div class="srow sel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m4 18 5-5 4 4 3-3 4 4"/></svg>Pictures</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 18V6l10-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/></svg>Music</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>Videos</div>
+          </div>
+        </div>
+        <div class="list">
+          <div class="lane"></div>
+          <div class="lhead"><span>Name</span><span>Modified</span><span>Size</span></div>
+          <div class="lbody">
+            <div class="row"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>venv</span></div><div class="meta">Oct 11</div><div class="size">—</div></div>
+            <div class="row"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>Videos</span></div><div class="meta">Oct 09</div><div class="size">2.9 GB</div></div>
+            <div class="row sel"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>animations</span></div><div class="meta">Oct 01</div><div class="size">412 MB</div></div>
+            <div class="row"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m3 8 9-5 9 5-9 5z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></svg><span>bar-charts</span></div><div class="meta">Sep 28</div><div class="size">86 MB</div></div>
+            <div class="row"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3h8l4 4v14H6z"/></svg><span>notes.md</span></div><div class="meta">Sep 27</div><div class="size">4 KB</div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 5 -->
+    <section class="study v5">
+      <h2><span class="n">05</span> Sunken row</h2>
+      <p class="why">The row drops into a well — no colour, just depth — and the icon takes the
+      accent. Survives theme changes (there is nothing to recolour) but is the easiest to miss.</p>
+      <div class="app">
+        <div class="side">
+          <div class="side-scroll">
+            <div class="heading">Quick access</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 11 12 4l8 7v8a1 1 0 0 1-1 1h-5v-6h-4v6H5a1 1 0 0 1-1-1z"/></svg>Home</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="5" width="18" height="12" rx="1.5"/><path d="M8 21h8"/></svg>Desktop</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3h8l4 4v14H6z"/><path d="M9 12h6M9 16h6"/></svg>Documents</div>
+            <div class="srow sel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m4 18 5-5 4 4 3-3 4 4"/></svg>Pictures</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 18V6l10-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/></svg>Music</div>
+            <div class="srow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m10 9 5 3-5 3z"/></svg>Videos</div>
+          </div>
+        </div>
+        <div class="list">
+          <div class="lane"></div>
+          <div class="lhead"><span>Name</span><span>Modified</span><span>Size</span></div>
+          <div class="lbody">
+            <div class="row"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>venv</span></div><div class="meta">Oct 11</div><div class="size">—</div></div>
+            <div class="row"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>Videos</span></div><div class="meta">Oct 09</div><div class="size">2.9 GB</div></div>
+            <div class="row sel"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>animations</span></div><div class="meta">Oct 01</div><div class="size">412 MB</div></div>
+            <div class="row"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m3 8 9-5 9 5-9 5z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></svg><span>bar-charts</span></div><div class="meta">Sep 28</div><div class="size">86 MB</div></div>
+            <div class="row"><div class="name"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3h8l4 4v14H6z"/></svg><span>notes.md</span></div><div class="meta">Sep 27</div><div class="size">4 KB</div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+  <p class="foot">Each study draws the 8&nbsp;px scroll lane on the left of the list, so you can see
+  the marker clears it. Multi-select would use the same wash on every picked row, with the rail only
+  on the row the cursor is on.</p>
+</div>
+</body>
+</html>

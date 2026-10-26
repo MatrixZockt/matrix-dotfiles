@@ -31,6 +31,7 @@ AbstractQuickPanel {
             }
         }
         NightLight {}
+        AntiFlashbang {}
         GameMode {}
         PerformanceModeToggle {}
         IdleInhibitor {}

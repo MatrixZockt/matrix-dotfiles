@@ -137,8 +137,38 @@ Scope { // Scope
             // animates, and attaching one to a readonly property is a hard
             // load error ("Invalid property assignment"). SidebarRight.qml's
             // `t` is writable for the same reason.
+            // The position value. NOT a plain `open ? 1 : 0` binding, and that
+            // is the whole of the transition bug: `t` used to rest at EXACTLY 1
+            // the instant the open flag flipped, so the card was told its final
+            // position before the entrance ran -- the surface mapped at its
+            // resting geometry, the stretch ran against a target that never
+            // moved, and what was left on screen was a small scale pop in place.
+            // The exit, which starts from 1 and runs to 0, was the only half
+            // that actually travelled.
+            //
+            // So `t` rests at a value of its own: 0 when closed, `restT` when
+            // open, and it is driven from `onOpenChanged` BELOW rather than by a
+            // binding. A binding would put `t` at its destination in the same
+            // binding evaluation as the flag, which is precisely the instant
+            // snap being fixed; writing it in the change handler leaves the
+            // flag true first and the position a moment behind it, so the
+            // Behavior has a real distance to travel. The handler (not a
+            // function callers must remember to call) means every existing
+            // `GlobalStates.sidebarLeftOpen = ...` -- the edge strip, the bar
+            // button, the corner, the shortcuts, the IPC -- drives the entrance
+            // and the exit correctly with no change to those files.
+            //
+            // `t` is moved in the ONE `onOpenChanged` further down rather than
+            // in a second handler here: two handlers for one signal is a
+            // duplicate-signal load failure in QML, and that one already runs
+            // on every change.
             property bool open: GlobalStates.sidebarLeftOpen
-            property real t: open ? 1 : 0
+            readonly property real restT: 1
+            property real t: 0
+            // The card's live position, exposed for `state()` (which cannot
+            // name the card's id from outside this component) so the entrance
+            // is measurable rather than guessed at: -465 closed, 5 at rest.
+            readonly property real cardX: sidebarLeftBackground.x
             Behavior on t {
                 // Asymmetric, and chosen by DIRECTION rather than by which
                 // element happens to be on top: a panel arriving should
@@ -174,6 +204,9 @@ Scope { // Scope
             // Esc, the IPC close, the shortcut. The spring does the rest --
             // there is nothing left to unmap, so there is nothing to wait for
             // and no timer whose beat has to be guessed.
+            //
+            // Just the flag: `onOpenChanged` above moves `t` back to 0, so the
+            // retraction is the mirror of the entrance.
             function hide() {
                 GlobalStates.sidebarLeftOpen = false;
             }
@@ -393,6 +426,14 @@ Scope { // Scope
             // Both are now one-shot, on the same boolean the right sidebar
             // uses, and the two sidebars cannot drift apart again.
             onOpenChanged: {
+                // The position, first: `t` rests at its own value (0 closed,
+                // restT open) and moves here rather than being bound to `open`,
+                // because a binding puts it at its destination in the same
+                // evaluation as the flag -- the instant snap being fixed.
+                // Written in the change handler the flag is true first and the
+                // card a moment behind it, so the Behavior has real distance
+                // to travel.
+                t = open ? restT : 0;
                 if (open) {
                     GlobalFocusGrab.addDismissable(panelWindow);
                     // Armed from the live hover state rather than forced to
@@ -437,7 +478,39 @@ Scope { // Scope
                 anchors.top: parent.top
                 anchors.left: parent.left
                 anchors.topMargin: Appearance.sizes.hyprlandGapsOut
+                // The DISTANCE travelled by the entrance/exit, driven by the one
+                // stretch value `t` (see the driver above). At rest (t = 1) this
+                // is exactly the old constant hyprlandGapsOut, so the resting
+                // geometry -- and with it every position the content, the mask
+                // and the hover arithmetic are measured against -- is unchanged.
+                //
+                // Closed (t = 0) it is the card's full width plus the elevation
+                // margin: the card's right edge lands just past x = 0, i.e. fully
+                // off-screen, so the entrance has real distance to cover and the
+                // card ARRIVES at its position instead of scaling up in place.
+                // That was the whole of "it shifts slightly then teleports": the
+                // old value was constant, so the card never moved at all -- only
+                // the scale (0.82 -> 1.0, anchored at the card's own left edge,
+                // which is off-screen) and the opacity changed. A scale whose
+                // origin sits outside the window is invisible for most of its
+                // travel, then arrives all at once: a teleport.
+                //
+                // Anchored (`anchors.leftMargin`), not `x`, and there is
+                // deliberately no second Behavior on `width` any more: the card's
+                // width is constant through open/close, and the extra 400ms
+                // elementMove curve that used to sit beside the 200ms stretch
+                // curve was the half that finished late and snapped.
+                // NEGATIVE at t = 0: the card starts fully off-screen to the
+                // LEFT and slides right into place. A positive margin would put
+                // it inside the screen and have it drift leftwards instead,
+                // which reads as the panel retreating rather than arriving.
+                // At t = 1 the term vanishes and this is the old constant.
+                // Travel = gapsOut -> -465, i.e. 470px = sidebarWidth minus the
+                // elevation margin, which puts the card's RIGHT edge exactly at
+                // x = 0 when closed: fully off-surface, nothing peeking.
                 anchors.leftMargin: Appearance.sizes.hyprlandGapsOut
+                    - (1 - panelWindow.t) * (panelWindow.sidebarWidth
+                        - Appearance.sizes.elevationMargin)
                 width: panelWindow.sidebarWidth - Appearance.sizes.hyprlandGapsOut - Appearance.sizes.elevationMargin
                 height: parent.height - Appearance.sizes.hyprlandGapsOut * 2
                 color: Appearance.colors.colLayer0
@@ -481,10 +554,6 @@ Scope { // Scope
                         origin.y: sidebarLeftBackground.height / 2
                     }
                 ]
-
-                Behavior on width {
-                    animation: Appearance.animation.elementMove.numberAnimation.createObject(this)
-                }
 
                 Keys.onPressed: (event) => {
                     if (event.key === Qt.Key_Escape) {
@@ -572,6 +641,7 @@ Scope { // Scope
             // when I leave it" class of report is decided by these two, so they
             // are readable rather than guessed at.
             return `open=${GlobalStates.sidebarLeftOpen} t=${w.t.toFixed(2)}`
+                + ` cardX=${w.cardX.toFixed(0)}`
                 + ` mask=${w.mask.width.toFixed(0)}x${w.mask.height.toFixed(0)}@${w.mask.x.toFixed(0)}`
                 + ` window=${w.width.toFixed(0)}x${w.height.toFixed(0)}`
                 // The two numbers the pointer-out close is made of, read from

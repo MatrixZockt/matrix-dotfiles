@@ -44,15 +44,15 @@ MouseArea {
     //
     //   "desktop" ... the usual: switch the wallpaper and regenerate the
     //                 shell's colours from it
-    //   "lock"    ... only the lock screen's background, via the override file
-    //                 hyprlock sources after matugen's colors.conf. The desktop
+    //   "lock"    ... only the lock screen's background, via
+    //                 background.wallpaperPathLock (read by
+    //                 modules/common/panels/lock/LockScreen.qml). The desktop
     //                 wallpaper and the colour scheme are left completely alone,
     //                 which is the point: a dark lock picture and a light
     //                 desktop can coexist.
     // Remembered between sessions, because picking a lock picture is usually
     // two or three in a row.
     property string target: Persistent.states.wallpaperTarget ?? "desktop"
-    readonly property string lockWallpaperScript: `${FileUtils.trimFileProtocol(Directories.scriptPath)}/colors/set-lock-wallpaper.sh`
 
     function selectWallpaperPath(filePath) {
         if (filePath && filePath.length > 0) {
@@ -72,22 +72,21 @@ MouseArea {
         }
     }
 
+    // One config value, written straight through: the lock screen binds to it
+    // (LockScreen.qml -> configuredLockWallpaper), so the choice is live the
+    // moment it is made -- no file to rewrite, no hyprlock regeneration, and
+    // nothing to fall out of step.
     function applyLockWallpaper(filePath) {
-        // `$1` rather than string interpolation: a path with a space or a quote
-        // in it is not worth breaking over.
-        Quickshell.execDetached([
-            "bash", "-c",
-            `"${root.lockWallpaperScript}" "$1" && notify-send -a "${Translation.tr("Wallpaper")}" -i "$1" "${Translation.tr("Lock screen picture set")}" "$(basename "$1")"`,
-            "set-lock-wallpaper",
-            filePath,
-        ]);
+        Config.options.background.wallpaperPathLock = filePath;
+        Quickshell.execDetached(["notify-send", "-a", Translation.tr("Wallpaper"),
+            "-i", filePath, Translation.tr("Lock screen picture set"),
+            FileUtils.fileNameForPath(filePath)]);
     }
 
     function clearLockWallpaper() {
-        Quickshell.execDetached([
-            "bash", "-c",
-            `"${root.lockWallpaperScript}" --clear && notify-send -a "${Translation.tr("Wallpaper")}" "${Translation.tr("Lock screen follows the desktop again")}"`,
-        ]);
+        Config.options.background.wallpaperPathLock = "";
+        Quickshell.execDetached(["notify-send", "-a", Translation.tr("Wallpaper"),
+            Translation.tr("Lock screen follows the login picture again")]);
     }
 
     acceptedButtons: Qt.BackButton | Qt.ForwardButton
@@ -369,8 +368,13 @@ MouseArea {
                             fileModelData: modelData
                             width: grid.cellWidth
                             height: grid.cellHeight
-                            colBackground: (index === grid?.currentIndex || containsMouse) ? Appearance.colors.colPrimary : (fileModelData.filePath === Config.options.background.wallpaperPath) ? Appearance.colors.colSecondaryContainer : ColorUtils.transparentize(Appearance.colors.colPrimaryContainer)
-                            colText: (index === grid.currentIndex || containsMouse) ? Appearance.colors.colOnPrimary : (fileModelData.filePath === Config.options.background.wallpaperPath) ? Appearance.colors.colOnSecondaryContainer : Appearance.colors.colOnLayer0
+                            // "Current" is either the picture the config points at OR
+                            // the live clock wallpaper, which is a carousel entry of
+                            // its own and is what is on screen when its mode is on.
+                            readonly property bool isCurrentWallpaper: (fileModelData.filePath === Config.options.background.wallpaperPath)
+                                || (Wallpapers.clockWallpaperActive && fileModelData.fileName === Wallpapers.clockWallpaperName)
+                            colBackground: (index === grid?.currentIndex || containsMouse) ? Appearance.colors.colPrimary : isCurrentWallpaper ? Appearance.colors.colSecondaryContainer : ColorUtils.transparentize(Appearance.colors.colPrimaryContainer)
+                            colText: (index === grid.currentIndex || containsMouse) ? Appearance.colors.colOnPrimary : isCurrentWallpaper ? Appearance.colors.colOnSecondaryContainer : Appearance.colors.colOnLayer0
 
                             onEntered: {
                                 grid.currentIndex = index;

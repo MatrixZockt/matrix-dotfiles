@@ -114,12 +114,20 @@ Singleton {
 
         { page: "keyboard", section: "", name: "Keyboard", keywords: "keyboard layout keys repeat", icon: "keyboard" },
         { page: "keyboard", section: "", name: "Repeat rate", keywords: "repeat rate delay key hold", icon: "repeat" },
-        { page: "keyboard", section: "", name: "Shortcuts", keywords: "shortcut hotkey keybind bindings", icon: "keyboard_command_key", short: "keybinds shortcuts hotkeys" },
+        // Keybinds is its own page now (it was the Accounts placeholder), so this
+        // stops pointing at the keyboard-layout page, which is where searching
+        // "shortcuts" used to land.
+        { page: "keybinds", section: "", name: "Shortcuts", keywords: "shortcut hotkey keybind bindings", icon: "keyboard_command_key", short: "keybinds shortcuts hotkeys" },
         { page: "keyboard", section: "", name: "Input method", keywords: "input method ime keyboard layout language", icon: "translate" },
         { page: "keyboard", section: "", name: "Modifier keys", keywords: "modifier caps alt ctrl swap", icon: "keyboard_capslock" },
 
-        { page: "keybinds", section: "", name: "Accounts", keywords: "account user login password profile", icon: "person" },
-        { page: "keybinds", section: "", name: "Sign in", keywords: "sign in login account user", icon: "login" },
+        // The account page. Both of these used to name the keybinds placeholder,
+        // so the words people type to find a password control ("password",
+        // "login") sent them to a list of shortcuts.
+        { page: "account", section: "", name: "Account", keywords: "account user login password profile username", icon: "person", short: "account login user profile" },
+        { page: "account", section: "", name: "Change password", keywords: "change password passwd current new credential login reset", icon: "lock_reset", short: "password passwd credential" },
+        { page: "account", section: "", name: "Recovery code", keywords: "recovery code forgot password locked out lockout rescue emergency back in", icon: "key", short: "recovery lockout rescue forgot" },
+        { page: "keybinds", section: "", name: "Keybinds", keywords: "keybinds keybindings hotkeys shortcuts list all", icon: "keyboard_command_key", short: "keybinds list all" },
 
         // ── Appearance ────────────────────────────────────────────────────
         { page: "appearance", section: "", name: "Colour mode", keywords: "dark light theme colour mode night day appearance", icon: "dark_mode", short: "theme dark light mode" },

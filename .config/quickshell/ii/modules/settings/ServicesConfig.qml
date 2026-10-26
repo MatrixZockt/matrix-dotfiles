@@ -89,9 +89,15 @@ ContentPage {
         icon: "file_open"
         title: Translation.tr("Save paths")
 
+        // Both fields read the same way on purpose: empty means "just copy",
+        // and that is the difference between a snip and a recording that sits
+        // in a folder nobody opens. A tooltip would be nicer than a parenthetical
+        // -- but MaterialTextArea is a TextArea, which has no `hovered`, and
+        // StyledToolTip keys off exactly that (see its internalVisibleCondition,
+        // and the note there about tooltips that paint themselves forever).
         MaterialTextArea {
             Layout.fillWidth: true
-            placeholderText: Translation.tr("Video Recording Path")
+            placeholderText: Translation.tr("Video Recording Path (leave empty to just copy)")
             text: Config.options.screenRecord.savePath
             wrapMode: TextEdit.Wrap
             onTextChanged: {

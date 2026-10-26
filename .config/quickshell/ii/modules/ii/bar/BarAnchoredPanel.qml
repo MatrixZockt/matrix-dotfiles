@@ -83,6 +83,13 @@ Scope {
         }
         root.cardScreen = screen ?? root.fallbackScreen;
         root.opened();
+        // (The FILES app used to be stood down from here -- `filemanager.sh
+        // close` -- because it was a popup like this panel and only one of the
+        // two could hold the session's focus grab: a card raised under one would
+        // have been on screen and dead to the pointer. Files is an ordinary
+        // desktop WINDOW now (filemanager.qml): it sits behind this panel's
+        // scrim the way any other window does and is there when the menu closes,
+        // so there is nothing to stand down and nothing to tell.)
     }
 
     PanelWindow {

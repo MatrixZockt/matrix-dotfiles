@@ -33,8 +33,17 @@ Singleton {
     id: root
 
     readonly property var registry: [
+        // `bins` is what allowLaunch() matches a launch command against: every
+        // name this app can legitimately be started by. It is NOT redundant
+        // with `launch` -- the desktop entry the Super menu uses runs the GPU
+        // wrapper (~/.local/bin/whatsapp-desktop), not the binary in `launch`,
+        // and basename equality on `launch` alone therefore matched nothing:
+        // the launcher's permission was never granted, so the watcher parked
+        // the freshly opened window the instant it appeared ("WhatsApp opens
+        // and disappears into the tray").
         { cls: "WhatsApp Desktop", name: "WhatsApp", iconName: "whatsapp-linux-desktop",
-          launch: "/opt/whatsapp-linux-desktop/bin/whatsapp-linux-desktop" },
+          launch: "/opt/whatsapp-linux-desktop/bin/whatsapp-linux-desktop",
+          bins: ["whatsapp-linux-desktop", "whatsapp-desktop"] },
         // Thunderbird. The class is the Wayland one hyprctl clients reports
         // (org.mozilla.Thunderbird) -- NOT the desktop file's X11 StartupWMClass
         // (thunderbird): windowsOf() matches w.class EXACTLY, and the live
@@ -42,7 +51,8 @@ Singleton {
         // config.json; the launcher's already-open redirect matches this class
         // through apps.singleInstance's "thunderbird" by segment (isSingleInstance).
         { cls: "org.mozilla.Thunderbird", name: "Thunderbird", iconName: "org.mozilla.Thunderbird",
-          launch: "/usr/bin/thunderbird" }
+          launch: "/usr/bin/thunderbird",
+          bins: ["thunderbird"] }
     ]
 
     // ── Window state ────────────────────────────────────────────────────────
@@ -190,8 +200,21 @@ Singleton {
             console.log(`[TrayApps] ${new Date().toISOString().slice(11, 23)} park(${cls}) reason=${reason} intent=${root.trayIntent[cls] === true}`);
         const wins = root.windowsOf(cls)
             .filter(w => !w.workspace || w.workspace.name !== "special:tray");
-        for (const w of wins)
+        for (const w of wins) {
+            // A window must not enter the vault FULLSCREEN. The close gesture
+            // parks a fullscreen tray app as it is (it keeps it fullscreen on
+            // purpose, so the drag does not flash), and a fullscreen window
+            // inside `special:tray` is a fullscreen window the moment the
+            // vault is shown -- a borderless app covering everything that
+            // closing cannot get rid of, because closing only parks it again.
+            // One toggle, then the move: this shell's dispatches are applied
+            // in order, and `show()` un-fullscreens on the way out as well.
+            if (w.fullscreen && w.fullscreen !== 0) {
+                Hyprland.dispatch(`hl.dsp.focus({ window = hl.get_window("address:${w.address}") })`);
+                Hyprland.dispatch(`hl.dsp.window.fullscreen({ mode = "fullscreen", action = "toggle" })`);
+            }
             Hyprland.dispatch(`hl.dsp.window.move({ workspace = "special:tray", follow = false, window = "address:${w.address}" })`);
+        }
         // Parking is what WITHWRITES the permission to be on screen, so it
         // clears it here rather than at each caller -- including the watcher
         // below, which parks apps that raised themselves.
@@ -237,6 +260,18 @@ Singleton {
             const tiny = sw > 0 && sh > 0 && (sw < 300 || sh < 200);
             if (w.floating === true && !tiny)
                 Hyprland.dispatch(`hl.dsp.window.float({ action = "unset" })`);
+            // ── And attach the FULLSCREEN the same way ─────────────────────
+            // A park that happened while the app was fullscreen left a
+            // fullscreen window in the vault, and this loop used to move it
+            // back onto the desktop exactly as it was: an app covering the
+            // whole screen, no titlebar, and closing it just parks it again --
+            // the "opens as a front view I cannot remove at all" report. A
+            // window coming out of the tray comes out AS A WINDOW, so the
+            // fullscreen state does not survive the round trip. (The move
+            // above focused it via follow=true, and the fullscreen dispatcher
+            // is focus-scoped like the float one, so this lands on it.)
+            if (w.fullscreen && w.fullscreen !== 0)
+                Hyprland.dispatch(`hl.dsp.window.fullscreen({ mode = "fullscreen", action = "toggle" })`);
         }
     }
 
@@ -337,6 +372,88 @@ Singleton {
         // open.sh wants a label + command as two separate args; use the entry's
         // human name as the label (the same string the tray tooltip shows).
         Quickshell.execDetached(["bash", Quickshell.shellPath("scripts/launch/open.sh"), entry.name, entry.launch]);
+    }
+
+    // ── The launcher's half of the tray permission, as a ROOT function ─────
+    //
+    // It lives here and not in the IPC handler below because the SHELL calls
+    // it directly now: open.sh used to reach this same code by starting a
+    // whole Qt client (`qs -c ii ipc call trayapps allow <cmd>`), measured at
+    // 34-43ms on every launch and serialized before the app was exec'd. The
+    // handler below is the thin forward, the same shape as toggle/show/park.
+    //
+    // Called BEFORE the window exists (that is what the tray guard reads),
+    // from GlobalStates.allowTrayLaunch -- one place, for every launch the
+    // shell makes: the search bar, the start menu, the dock, the taskbar.
+    function allowLaunch(cmd) {
+        // The launcher quotes each argv word before joining it into the
+        // shell line it hands open.sh (GlobalStates.entryCommand ->
+        // shellQuote), so a desktop entry whose Exec is `thunderbird %u`
+        // arrives here as LITERAL `'thunderbird'` -- quotes and all. The
+        // strip below turns that back into the bare word; measured: the
+        // unstripped form matched NOTHING, which is how a cold menu
+        // launch of Thunderbird never got its permission and the watcher
+        // parked the window the moment it appeared. The basename pass
+        // additionally lets `thunderbird` match `/usr/bin/thunderbird`.
+        const raw = String(cmd).trim();
+        const clean = raw
+            .replace(/^'+\s*/, "")
+            .replace(/\s*'+$/, "")
+            .replace(/\\'/g, "'")
+            .trim();
+        // Words = split on whitespace and QUOTES only (not `/`): a path
+        // token stays whole, so its basename is its part after the last
+        // slash. `cd '/home/user' && 'thunderbird' '-compose'` then
+        // yields cd, /home/user, &&, thunderbird, -compose -- and the
+        // bare-word test below fires on `thunderbird`.
+        const words = (s) => String(s).split(/[\s'"]+/).filter(Boolean);
+        const baseOf = (w) => { const parts = w.split("/"); return parts[parts.length - 1]; };
+        const hit = root.registry.find(e => {
+            if (!e.launch)
+                return false;
+            const ln = String(e.launch);
+            if (clean.indexOf(ln) !== -1 || ln.indexOf(clean) !== -1)
+                return true;
+            // WHOLE-WORD basename match, equality only -- never substring:
+            // equality is what kept "bird" and "mail" from answering to
+            // "thunderbird", and keeps one app whose path merely contains
+            // another app's name from matching it. The check runs over
+            // EVERY word of the command (head, and any quoted argument),
+            // against every word of the launch path.
+            const cw = words(clean);
+            const lw = words(ln);
+            // The declared names first: an app can be started by more than
+            // one command (WhatsApp: the wrapper AND the binary), and only
+            // the app knows the full list. Case-insensitive, basename only,
+            // equality -- never a substring, which is what kept `bird` from
+            // answering to `thunderbird`.
+            const bins = Array.isArray(e.bins)
+                ? e.bins.map(b => String(b).toLowerCase()) : [];
+            for (const c of cw) {
+                const cb = baseOf(c).toLowerCase();
+                if (cb.length > 0 && bins.indexOf(cb) >= 0)
+                    return true;
+                if (cb.length <= 2)
+                    continue;
+                for (const l of lw) {
+                    if (baseOf(l).toLowerCase() === cb)
+                        return true;
+                }
+            }
+            return false;
+        });
+        if (!hit)
+            return `allow: no tray app matches`;
+        root.setIntent(hit.cls, true, "allow (launcher)");
+        // "Open it from the menu" has to OPEN it when the app is already
+        // sitting in the vault: starting the binary again is a no-op for
+        // a single-instance app, so the second copy forwards to the first
+        // and the window that is already parked stays parked. Bring it
+        // out here, where the request came from the user.
+        const out = root.isHidden(hit.cls) ? " shown" : "";
+        if (out)
+            root.show(hit.cls);
+        return `allow(${hit.cls})${out}`;
     }
 
     // Really quits: TERM every window's pid (unique -- one process can own
@@ -936,66 +1053,12 @@ Singleton {
         // so a launch from the start menu reads as a launch and not as the
         // app raising itself out of the tray. Matched against the registry's
         // own launch string, so only a real match counts.
+        // Thin IPC forward, like toggle/show/park above: the body is a ROOT
+        // function (allowLaunch) so the shell can take this permission
+        // in-process instead of starting a Qt client to reach this handler.
+        // open.sh still calls this for every caller outside the shell.
         function allow(cmd: string): string {
-            // The launcher quotes each argv word before joining it into the
-            // shell line it hands open.sh (GlobalStates.entryCommand ->
-            // shellQuote), so a desktop entry whose Exec is `thunderbird %u`
-            // arrives here as LITERAL `'thunderbird'` -- quotes and all. The
-            // strip below turns that back into the bare word; measured: the
-            // unstripped form matched NOTHING, which is how a cold menu
-            // launch of Thunderbird never got its permission and the watcher
-            // parked the window the moment it appeared. The basename pass
-            // additionally lets `thunderbird` match `/usr/bin/thunderbird`.
-            const raw = String(cmd).trim();
-            const clean = raw
-                .replace(/^'+\s*/, "")
-                .replace(/\s*'+$/, "")
-                .replace(/\\'/g, "'")
-                .trim();
-            // Words = split on whitespace and QUOTES only (not `/`): a path
-            // token stays whole, so its basename is its part after the last
-            // slash. `cd '/home/user' && 'thunderbird' '-compose'` then
-            // yields cd, /home/user, &&, thunderbird, -compose -- and the
-            // bare-word test below fires on `thunderbird`.
-            const words = (s) => String(s).split(/[\s'"]+/).filter(Boolean);
-            const baseOf = (w) => { const parts = w.split("/"); return parts[parts.length - 1]; };
-            const hit = root.registry.find(e => {
-                if (!e.launch)
-                    return false;
-                const ln = String(e.launch);
-                if (clean.indexOf(ln) !== -1 || ln.indexOf(clean) !== -1)
-                    return true;
-                // WHOLE-WORD basename match, equality only -- never substring:
-                // equality is what kept "bird" and "mail" from answering to
-                // "thunderbird", and keeps one app whose path merely contains
-                // another app's name from matching it. The check runs over
-                // EVERY word of the command (head, and any quoted argument),
-                // against every word of the launch path.
-                const cw = words(clean);
-                const lw = words(ln);
-                for (const c of cw) {
-                    const cb = baseOf(c);
-                    if (cb.length <= 2)
-                        continue;
-                    for (const l of lw) {
-                        if (baseOf(l) === cb)
-                            return true;
-                    }
-                }
-                return false;
-            });
-            if (!hit)
-                return `allow: no tray app matches`;
-            root.setIntent(hit.cls, true, "allow (launcher)");
-            // "Open it from the menu" has to OPEN it when the app is already
-            // sitting in the vault: starting the binary again is a no-op for
-            // a single-instance app, so the second copy forwards to the first
-            // and the window that is already parked stays parked. Bring it
-            // out here, where the request came from the user.
-            const out = root.isHidden(hit.cls) ? " shown" : "";
-            if (out)
-                root.show(hit.cls);
-            return `allow(${hit.cls})${out}`;
+            return root.allowLaunch(cmd);
         }
     }
 }

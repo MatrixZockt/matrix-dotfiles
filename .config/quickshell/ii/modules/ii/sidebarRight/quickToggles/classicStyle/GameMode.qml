@@ -9,6 +9,7 @@ QuickToggleButton {
     buttonIcon: "gamepad"
     toggled: toggled
 
+    // Left click: toggle game mode on/off
     onClicked: {
         root.toggled = !root.toggled
         if (root.toggled) {
@@ -17,6 +18,7 @@ QuickToggleButton {
             Quickshell.execDetached(["hyprctl", "reload"])
         }
     }
+    // Right click: open detailed view
     Process {
         id: fetchActiveState
         running: true
@@ -26,6 +28,6 @@ QuickToggleButton {
         }
     }
     StyledToolTip {
-        text: Translation.tr("Game mode")
+        text: Translation.tr("Game mode | Left-click to toggle\nRight-click for details")
     }
 }

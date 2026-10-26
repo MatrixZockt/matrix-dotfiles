@@ -79,6 +79,34 @@ Singleton {
                 property real temperature: 0.5
             }
 
+            // The anti-flashbang shader's level: "off", "weak" or "strong".
+            //
+            // A choice, not a transient: the shader is meant to be turned off
+            // for a film or a game, and it would be wrong for a shell restart
+            // to switch it back on into the middle of one. Kept here as well as
+            // in services/HyprlandAntiFlashbangShader.qml because the compositor
+            // forgets a runtime option when it restarts, and because an adapter
+            // only serialises properties it knows about -- an undeclared key is
+            // silently dropped on the next write.
+            property string antiFlashbang: "weak"
+
+            // Where the FILE DIALOG (filemanager-picker.qml) opens next time,
+            // when the application asking for a file names no folder of its
+            // own.
+            //
+            // Most callers of the portal -- a browser's "Add file", an app's
+            // "Choose…" -- send no `current_folder` at all, so the dialog used
+            // to start at the file manager's default, home, however far away
+            // the project was. Filling the same form twice therefore meant
+            // walking to the same folder twice.
+            //
+            // The dialog writes this the moment it ANSWERS, so the folder that
+            // answered last time is the folder the next one opens in: upload
+            // from grafizum once and the second upload starts in grafizum.
+            // Only an answer counts -- browsing somewhere and cancelling says
+            // nothing about where the files you want live.
+            property string pickerDir: ""
+
             property JsonObject cheatsheet: JsonObject {
                 property int tabIndex: 0
             }
@@ -114,7 +142,16 @@ Singleton {
                 // where the duration is known.
                 property real crossfade: 0
                 // Volume to restore at login, as a percentage of volume-max.
-                property int startVolume: 80
+                //
+                // 55, not 80 (2026-10-26, requested: "the music is too loud
+                // and the notification sounds are too silent"). 80 % of a
+                // full-scale master plays over every short system sound there
+                // is -- a chime cannot go past 100 % of its stream and its
+                // sample peaks at -0.9 dBFS -- so part of the fix for that
+                // imbalance is here: 55 % is about -3.2 dB under the old
+                // default, and the notifications got +4.9 dB in their sample,
+                // which together move the chime ~8 dB up against the music.
+                property int startVolume: 55
                 // Whether the volume-max itself is raised above 100, for people
                 // who want headroom on a laptop speaker.
                 property int volumeMax: 100
@@ -183,6 +220,19 @@ Singleton {
             property var fileManagerHiddenPlaces: []
             property var fileManagerPinnedPlaces: []
 
+            // Each folder's own details/tiles choice, as [path, view] pairs.
+            //
+            // Explorer's habit: changing the view in Downloads must not change
+            // what ~/Music looks like, and walking into a subfolder shows that
+            // subfolder's own default rather than carrying the parent's shape
+            // down with you. Paths, not names -- two folders can share a name,
+            // and a name means nothing once you have navigated away.
+            //
+            // Most folders never get an entry: "details" is the answer for
+            // anything missing from this list, which is also what the manager
+            // showed before this existed.
+            property var fileManagerFolderViews: []
+
             property JsonObject sidebar: JsonObject {
                 property JsonObject bottomGroup: JsonObject {
                     property bool collapsed: false
@@ -193,6 +243,26 @@ Singleton {
             property JsonObject booru: JsonObject {
                 property bool allowNsfw: false
                 property string provider: "yandere"
+            }
+
+            // Which of the economic calendar's four folders the Trading tab
+            // lists: red/High, orange/Medium, yellow/Low and grey.
+            //
+            // Here, and not only in TradingService where the filter is read,
+            // because the filter is a CHOICE -- the same kind of thing as the
+            // sidebar's tab or the music app's download folder -- and a choice
+            // that lasts until the next reload is not one the user made. The
+            // service seeds itself from these on load and writes them back on
+            // every toggle, so closing the card, reloading the shell or
+            // rebooting all come back to the same filter.
+            //
+            // The defaults are the service's own (red and orange on) so a
+            // first run -- no file, no keys -- reads exactly as it always did.
+            property JsonObject trading: JsonObject {
+                property bool folderHigh: true
+                property bool folderMedium: true
+                property bool folderLow: false
+                property bool folderGrey: false
             }
 
             property JsonObject idle: JsonObject {

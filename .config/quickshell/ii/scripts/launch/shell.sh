@@ -280,10 +280,33 @@ fi
 # a SHAPE and needs a loaded theme to turn that shape into a name. With no
 # theme loaded, Qt silently drops every cursorShape request and the default
 # arrow is all that ever appears.
-case ":${XCURSOR_THEME:-}:" in
-    *:capitaine-cursors:*) ;;                       # already correct
-    *) export XCURSOR_THEME=capitaine-cursors ;;
-esac
+#
+# WHICH theme, though: the pin used to name `capitaine-cursors`, which is not a
+# theme this desktop otherwise uses (env.lua and environment.d both name
+# Bibata-Modern-Ice) and which cannot draw every shape the shell asks
+# for: it ships `sb_h_double_arrow` and `sb_v_double_arrow` but not
+# `bd_double_arrow` or `fd_double_arrow`, the names Qt looks up for the two
+# diagonal resizes (`ls /usr/share/icons/capitaine-cursors/cursors`). A shape a
+# theme cannot name is a cursorShape that silently does not happen, which is
+# exactly the class of bug this pin exists to prevent.
+#
+# FORCED, not merely "set if nothing named one" (2026-10-23). The shell used to
+# inherit whatever its launcher had -- and an inherited name can be one that is
+# no longer installed. That is exactly what happened: this session still carried
+# `XCURSOR_THEME=Bibata-Modern-Ice-NoLine` from before those borderless themes
+# were removed, so the shell exported a theme that does not exist, and EVERY app
+# it launched inherited it. A toolkit cannot report that: libXcursor finds no
+# images, and the app draws its built-in fallback instead -- the plain white
+# pointer with no rim that was showing up inside TradingView, the browser and
+# the rest of the shell-launched apps while the compositor (which has the real
+# name) drew the Bibata one. That is the "cursor is full white in some apps"
+# report, and it is not a theme choice: it is a name that resolves to nothing.
+# The installed name is the only thing this desktop ever wants, so it is stated
+# here unconditionally -- the same thing the app launchers do for the same
+# reason (see the XCURSOR_THEME block in ~/.local/bin/freebuff-desktop).
+export XCURSOR_THEME=Bibata-Modern-Ice
+# Nothing ever swaps it per mode or per app: the pointer is one artwork for the
+# whole session, so hovering a light or a dark window cannot change it.
 
 case ":$PATH:" in
     *":$HOME/.local/bin:"*) ;;                      # already present

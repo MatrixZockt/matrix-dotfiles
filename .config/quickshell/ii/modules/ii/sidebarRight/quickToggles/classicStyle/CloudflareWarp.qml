@@ -25,8 +25,9 @@ QuickToggleButton {
         }
     }
 
+    // Left click: toggle WARP on/off
     onClicked: {
-        if (toggled) {
+        if (root.toggled) {
             root.toggled = false
             Quickshell.execDetached(["warp-cli", "disconnect"])
         } else {
@@ -34,7 +35,9 @@ QuickToggleButton {
             Quickshell.execDetached(["warp-cli", "connect"])
         }
     }
-
+    // Right click: open detailed view
+    // (altAction falls through to base handling)
+    
     Process {
         id: connectProc
         command: ["warp-cli", "connect"]
@@ -87,6 +90,6 @@ QuickToggleButton {
         }
     }
     StyledToolTip {
-        text: Translation.tr("Cloudflare WARP (1.1.1.1)")
+        text: Translation.tr("Cloudflare WARP (1.1.1.1) | Left-click to toggle\nRight-click for details")
     }
 }

@@ -24,6 +24,12 @@ StyledImage {
     id: root
 
     property bool generateThumbnail: true
+    // A video is not decoded, it is SAMPLED: one still pulled out of the clip
+    // one second in, which is what a film-strip icon was standing in for. A
+    // flag rather than an extension list in here -- the caller already has the
+    // model row and knows what it is looking at, and a second copy of the list
+    // is a second place to forget a format.
+    property bool videoFrame: false
     required property string sourcePath
     property string thumbnailSizeName: Images.thumbnailSizeNameForDimensions(sourceSize.width, sourceSize.height)
     property string thumbnailPath: {
@@ -226,23 +232,59 @@ StyledImage {
         root._failed = false;
     }
 
+    // Single-quote a path for bash. The old interpolation used none, so a file
+    // called "mom's clip.mp4" closed the quote and the fork died on bash's
+    // syntax error -- and an apostrophe is exactly the kind of name a video
+    // gets. `'\''` is the standard way to put a quote inside quotes.
+    function _shq(p) {
+        return "'" + String(p).replace(/'/g, "'\\''") + "'";
+    }
+
     Process {
         id: thumbnailGeneration
         command: {
             const maxSize = Images.thumbnailSizes[root.thumbnailSizeName];
-            return ["bash", "-c",
-                `mkdir -p '${FileUtils.trimFileProtocol(root.thumbnailPath).split("/").slice(0, -1).join("/")}'`
-                + ` && [ -f '${FileUtils.trimFileProtocol(root.thumbnailPath)}' ] && exit 0`
-                + ` || { magick '${root.sourcePath}' -resize ${maxSize}x${maxSize} '${FileUtils.trimFileProtocol(root.thumbnailPath)}'; }`
-            ]
+            const outFile = FileUtils.trimFileProtocol(root.thumbnailPath);
+            const out = root._shq(outFile);
+            const dir = root._shq(outFile.split("/").slice(0, -1).join("/"));
+            const src = root._shq(FileUtils.trimFileProtocol(root.sourcePath));
+            // Already there and NOT EMPTY: nothing to do. `-s` rather than
+            // `-f` because a failed run can leave a 0-byte file behind, and
+            // that would read as "a thumbnail exists" for ever.
+            const have = `mkdir -p ${dir} && [ -s ${out} ] && exit 0; `;
+            if (root.videoFrame) {
+                // One frame, one second in: far enough to be past a fade-in or
+                // a black leader, short enough to exist in a clip of any real
+                // length. A clip SHORTER than a second has no frame there --
+                // and ffmpeg exits 0 having written an empty file, which is why
+                // each attempt is followed by a size test rather than chained
+                // on the exit code alone. The second attempt starts at the very
+                // beginning, so a one-second clip still gets its picture.
+                const grab = at => `ffmpeg -nostdin -y -loglevel error -ss ${at} -i ${src}`
+                    + ` -frames:v 1 -vf "scale=${maxSize}:${maxSize}:force_original_aspect_ratio=decrease" `
+                    + out
+                    + ` && [ -s ${out} ]`;
+                return ["bash", "-c", have
+                    + "command -v ffmpeg >/dev/null 2>&1 || exit 1; "
+                    + `( ${grab(1)} ) || ( ${grab(0)} )`
+                ];
+            }
+            // Same ending as the video branch: the ANSWER is whether a
+            // non-empty file is there, not whether magick felt good about it.
+            return ["bash", "-c", have
+                + `magick ${src} -resize ${maxSize}x${maxSize} ${out}; [ -s ${out} ]`];
         }
         onExited: (exitCode, exitStatus) => {
             root._generating = false;
-            // Did it actually produce anything? A non-zero exit, or a zero
-            // exit that left no file, both mean "no thumbnail" -- and that is
-            // the moment to stop asking rather than start the cycle again.
-            const produced = thumbWatch.loaded && thumbWatch.text().length > 0;
-            if (exitCode !== 0 || !produced)
+            // Did it actually produce anything? The command's own last step is
+            // `[ -s out ]`, so its EXIT CODE is the answer -- and the watcher's
+            // text is deliberately not consulted here. It is a separate event
+            // source that may still hold the old answer at this instant, and
+            // deciding from it is how a successful grab of a large clip got
+            // recorded as a failure: the latch set, the widget fallen back to
+            // pointing Qt at a .mp4, and "Unsupported image format" in the log
+            // about a frame that had just been written.
+            if (exitCode !== 0)
                 root._failed = true;
             // Whatever happened, re-point the image at the (now hopefully
             // existing) thumbnail. Through the bounce, NOT a direct source

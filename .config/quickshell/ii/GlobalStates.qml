@@ -109,11 +109,18 @@ Singleton {
     // -- the rubber feel. See Bar.qml's Pocket and BarContent's wiring.
     property string barPocketId: ""
     property real barPocketT: 0.0
-    // The compositor has asked the bar to give up its exclusive zone, so a
-    // window that is only MAXIMIZED (not truly fullscreen -- it keeps its own
-    // chrome, so a browser keeps its tabs) can expand into the bar's strip and
-    // actually reach the top of the screen. Set over the `barCover` IPC target
-    // in Bar.qml, which the Hyprland config calls from custom/cover.lua.
+    // DORMANT since 2026-10-14, deliberately left callable: "the compositor
+    // says a window is covering this screen". The Hyprland config used to send
+    // it on every cover toggle (custom/cover.lua) and it no longer does -- the
+    // request spawned a `qs` process per toggle (measured 89ms, 78% of a core,
+    // twice per cycle) and had stopped changing anything, because the bar
+    // derives the same answer from its own window list. See Bar.qml's
+    // `wsLiveHidden`: the flag is one of three ways in, and the other two
+    // (fullscreenOnMonitor, coverByGeometry) are what actually decide now.
+    //
+    // Kept rather than deleted because it is the only way to reach this state
+    // from outside the shell (a script, a test, a future compositor), and the
+    // handler is proven: `qs -c ii ipc call barCover onCover true <addr>`.
     //
     // It lives here, not on the bar's own Scope, because of
     // `pragma ComponentBehavior: Bound`: a property on the bar's Scope is not
@@ -123,7 +130,9 @@ Singleton {
     // (barOpen, barPocketId) already lives here.
     property bool barCoverRequested: false
     // The window that request was made for, so the bar can notice it vanishing
-    // while the bar is still yielded.
+    // while the bar is still yielded. Empty whenever the flag above is false,
+    // which since the request's retirement is always -- a manual caller sets
+    // the two in the same breath (Bar.qml's onCover).
     property string barCoverAddress: ""
     // Whether the top bar is currently hidden (a real fullscreen window, or a
     // covering maximize it gave its strip to). Written by the bar itself, so
@@ -306,6 +315,34 @@ Singleton {
     // and jumps, and a casual bar tap must never be able to rearrange the
     // desktop.
     property bool desktopOverviewOpen: false
+    // ── "Open the grid with a desktop already IN HAND" (NO WAY IN, 2026-10-16) ──
+    //
+    // Two entry points are POINTER actions, so the desktop under the cursor at
+    // that moment is a fact and not a guess at intent:
+    //
+    //   SUPER + four-finger swipe down   REMOVED (2026-10-16, requested)
+    //   SUPER + Space                    REMOVED -- the chord no longer asks
+    //
+    // Both went through this one request, and both are gone: the gesture is
+    // deleted from custom/general.lua and the chord raises nothing (see
+    // `superPressEdge` below). NOTHING EMITS THIS SIGNAL ANY MORE, and that is
+    // the finished state rather than a half-deletion -- the signal, the flag
+    // and the global are the capability, and the IPC `desktopOverview lift`
+    // still drives them, so a new entry point can bind to them unchanged.
+    //
+    // HOW IT HAS TO BE EMITTED, kept because that constraint is what a future
+    // entry point has to satisfy: it goes IMMEDIATELY BEFORE
+    // `desktopOverviewOpen` is raised, never after: the grid's open handler
+    // runs synchronously inside that write and reads the flag it sets, so a
+    // request announced afterwards is read a beat too late and the lift is
+    // lost with no error anywhere. That ordering is the whole mechanism.
+    //
+    // A SIGNAL, not a bool, for the same reason `desktopPillFlash` is: it is an
+    // event with a moment, and a sticky flag would be read by an unrelated open
+    // (SUPER+Tab, the bar's empty stretches) and lift a card nobody asked for.
+    // DesktopOverview.qml holds the request itself and spends it on the first
+    // cursor read, whatever that read answers.
+    signal desktopOverviewLiftRequest()
     // Which of the two SUPER panels is up. They are deliberately separate things:
     //
     //   "search"   the search field with the recently-used row -- what a plain
@@ -341,6 +378,12 @@ Singleton {
     // strip for as long as you held it.
     property int overviewDesktopCount: 0
     property bool regionSelectorOpen: false
+    // The colour picker (SUPER + C): a frozen grab of each screen with a
+    // crosshair and a live hex/rgba pill. Alt+X (or click) copies the hex,
+    // Esc closes. Every entry point -- the GlobalShortcut, the bar utility
+    // button, the sidebar quick toggle, the waffle snip panel -- just sets
+    // this flag; ColorPicker.qml drives the surfaces from it.
+    property bool colorPickerOpen: false
     property bool searchOpen: false
     property bool screenLocked: false
     // A popup menu opened FROM the right sidebar is currently open.
@@ -363,6 +406,20 @@ Singleton {
     property bool screenTranslatorOpen: false
     property bool sessionOpen: false
     property bool superDown: false
+    // Which key armed the hold. The bare SUPER key arms it to call off its own
+    // tap (a slow look at the numbers is not a tap); the SUPER+Space chord does
+    // not use the hold at all any more -- it toggles the grid on the press
+    // edge (see superPressEdge), so this stays false for it.
+    property bool superHoldFromChord: false
+    // A press edge just DISMISSED something (the desktop grid, or the app
+    // search card). One physical chord fires TWO shortcuts -- the bare SUPER
+    // press and the chord's own -- and both arrive at superPressEdge: the bare
+    // one closes the grid, and without this the chord's press would open it
+    // straight back up, so a tap on an open grid did nothing at all (measured
+    // 2026-10-15, the same tap that was supposed to toggle). The flag is set by
+    // whichever branch closed something, read and cleared by the chord, and
+    // cleared again on the release edge: one press sequence, one action.
+    property bool superDismissedOnPress: false
     property bool superReleaseMightTrigger: true
     property bool wallpaperSelectorOpen: false
     property bool workspaceShowNumbers: false
@@ -590,6 +647,22 @@ Singleton {
     // and until then the card is telling the truth.
     property string loadingText: ""
     property bool loadingVisible: false
+    // ── A failed launch is carried by the BAR, not the corner card ───────
+    //
+    // Asked for 2026-10-19: "I want the couldn't open message in the top right
+    // bar where it also shows opening... label only red and the simple thin
+    // border". So a launch failure now lives in the bar's status row (red,
+    // steady) for the same 12s the card used to sit there, and the screen's
+    // hairline is HELD flat red with it instead of double-blinking. The card
+    // keeps the messages that are genuinely cards -- the "already open"
+    // notice and the power failsafe's alert -- which is why this is a flag of
+    // its own and not a change to `loadingFailed`.
+    property bool loadingFailureInBar: false
+    // The screen hairline's second mode: held lit (see ScreenFlash) while a
+    // launch failure is on the bar. Separate from screenFlashTick on purpose:
+    // the tick is a one-shot pulse and this one has a duration that belongs
+    // to the failure's own clock.
+    property bool screenFailureHold: false
     // Download progress on the bar's status line: when >= 0, the line's
     // fill shows the REAL fraction instead of the launch-charge crawl, and
     // the tell label reads "Downloading <name>". Set by the `loading`
@@ -665,6 +738,32 @@ Singleton {
     readonly property int launchFailsafeTicksMax: Math.max(1,
         Math.round(root.launchFailsafeMs / root.launchFailsafeTickMs))
 
+    // ── The wait's ABSOLUTE ceiling ───────────────────────────────────────
+    //
+    // Everything above is a decision about whether the launch succeeded. This
+    // is not: it is the guarantee that the bar cannot get STUCK saying a launch
+    // is in flight. The failsafe alone was not enough, and the hole was exactly
+    // the case that reads as a bug rather than as a wait --
+    //
+    //   * `display` disarms the failsafe on purpose (the caller owns the
+    //     wait), so a caller that forgets `dismiss` left "Opening <name>" and
+    //     the full-width line under the bar up for the rest of the session.
+    //     That is the reported "permanent bar": a file opened from Files whose
+    //     guarded dismiss never fired left the row and the line on screen
+    //     indefinitely (2026-10-19).
+    //   * `renew` deliberately keeps a live process's clock fresh, so a process
+    //     that stays alive without ever mapping a window kept the wait alive
+    //     with it, however long that was.
+    //
+    // Neither can be trusted to end, so this one cannot be renewed at all. When
+    // it fires the wait is retired QUIETLY -- no failure claim, because nothing
+    // here knows the app failed, only that the desktop has been saying
+    // "Opening" for far longer than any real launch needs. `finishLoading`
+    // clears the row and the line with it, which is the whole point: the most a
+    // stale wait may cost is half a minute of optimism, never a permanent strip
+    // across the bar.
+    readonly property int loadingMaxMs: 30000
+
     // ── The island's loading line ───────────────────────────────────────────
     // The same "something is starting" fact, drawn where the user is actually
     // looking: a small sweeping line under the middle island in the bar. The
@@ -700,7 +799,8 @@ property bool loadingFailFlash: false
     // hint. A plain wait no longer does -- the island's line is the wait -- so
     // this deliberately does NOT include the `loadingVisible` grace state,
     // which was the "Opening X" card the line replaces.
-    readonly property bool loadingCardVisible: root.loadingInfo || root.loadingFailed
+    readonly property bool loadingCardVisible: root.loadingInfo
+        || (root.loadingFailed && !root.loadingFailureInBar)
         || root.loadingText === root.closeDragHintText
 
     // ── The duplicate-launch guard ────────────────────────────────────────
@@ -730,6 +830,9 @@ property bool loadingFailFlash: false
     function showLoading(text) {
         root.loadingText = text ?? "";
         root.loadingFailed = false;
+        // A fresh wait is never a failure that is still on the bar.
+        root.loadingFailureInBar = false;
+        root.screenFailureHold = false;
         root.loadingInfo = false;
         root.loadingFailFlash = false;   // a fresh wait is never a failure
         loadingFailFlashTimer.stop();
@@ -749,12 +852,113 @@ property bool loadingFailFlash: false
         loadingErrorTimer.stop();
         loadingGraceTimer.restart();
         loadingLineTimer.restart();
+        // And the ceiling that no `renew` can push out (see loadingMaxMs).
+        loadingWatchdogTimer.restart();
         // Mark the launch as pending (see openApp's duplicate-guard).
         if (root.launchPendingCommandDraft.length > 0
             && root.launchPendingCommands.indexOf(root.launchPendingCommandDraft) === -1)
             root.launchPendingCommands.push(root.launchPendingCommandDraft);
         root.launchPendingCommandDraft = "";
         launchPendingReset.restart();
+    }
+
+    // ── The tray permission, taken here instead of by a process ──────────
+    //
+    // open.sh asks for this through `qs -c ii ipc call trayapps allow`, which
+    // starts a whole Qt client to run the same code this shell can call
+    // directly. Measured: 34-43ms of wall time, on EVERY launch, serialized
+    // before the app is exec'd (spawn -> window 186ms through open.sh against
+    // 126ms for the same binary started directly). The shell is holding the
+    // command at click time, so it takes the permission itself (microseconds,
+    // same registry, same thread) and hands open.sh the third argument that
+    // says so.
+    //
+    // Returns the stamp to pass, or "" when the permission could not be taken
+    // here -- in which case open.sh's own call still runs and nothing is lost.
+    function allowTrayLaunch(command) {
+        try {
+            TrayApps.allowLaunch(String(command ?? ""));
+            return "tray-allowed";
+        } catch (e) {
+            // Named, not swallowed: a failure here must not leave the launch with
+            // no permission at all without saying why.
+            console.warn("allowTrayLaunch failed, falling back to open.sh's own"
+                + " call:", e);
+            return "";
+        }
+    }
+
+    // ── Tray apps: "open it from the tray, not again" ────────────────────
+    //
+    // A tray app parked in the vault HAS a window -- it is just not on any
+    // workspace -- so findRunningApp (which only considers mapped windows) does
+    // not see it and the launcher fell through to a fresh launch. For WhatsApp
+    // that is worse than a duplicate window: a second whatsapp-linux-desktop
+    // binary is a new browser context and loses the login. The tray icon's own
+    // path is the right one (TrayApps.show moves the parked window back to the
+    // active workspace, focused and attached), so the launcher asks the tray
+    // first, and only falls through to launching when there is nothing to
+    // bring back.
+    //
+    // Which registry app a click is aimed at. Three signals, because the three
+    // call sites do not hand over the same thing: the start menu has the
+    // DesktopEntry (startupClass is exact -- "WhatsApp Desktop"), the recent
+    // tiles hand over the exec line and the display name (the exec names the
+    // WRAPPER, ~/.local/bin/whatsapp-desktop, not the registry's binary), and
+    // the search bar can pass either. Matching is deliberately narrow: no
+    // substring test on the whole command, which would let a URL argument pick
+    // an app.
+    function trayClassForApp(command, label, entry) {
+        const norm = s => String(s ?? "").trim().toLowerCase();
+        const stem = s => norm(s).replace(/[^a-z0-9]/g, "");
+        const startup = norm(entry?.startupClass);
+        const names = [norm(label), norm(entry?.name)].filter(s => s.length > 0);
+        const head = norm(command).split(/\s+/)[0];
+        const headName = head.split("/").pop();
+        for (const e of TrayApps.registry) {
+            const cls = String(e.cls ?? "").trim();
+            const clsNorm = norm(cls);
+            const regName = norm(e.name);
+            const regBin = norm(e.launch).split("/").pop();
+            if (startup.length > 0 && startup === clsNorm)
+                return cls;
+            if (headName.length > 0 && regBin.length > 0 && stem(headName) === stem(regBin))
+                return cls;
+            for (const n of names) {
+                if (n === clsNorm || (regName.length > 0 && n === regName))
+                    return cls;
+                // The desktop entry says "WhatsApp Desktop", the registry
+                // says "WhatsApp": the entry carries the product suffix, the
+                // registry the brand. Only a whole-word prefix counts.
+                if (regName.length > 0 && (n.startsWith(regName + " ") || regName.startsWith(n + " ")))
+                    return cls;
+            }
+        }
+        return "";
+    }
+
+    // True when this click was answered by the tray instead of by starting the
+    // program again. The three outcomes mirror the tray icon's own toggle(),
+    // which is the behaviour the user is asking for:
+    //   window on a workspace   -> declined here; the ordinary already-open
+    //                              redirect above has already focused it
+    //   parked in the vault     -> TrayApps.show() moves it back, focused
+    //   process alive, no window-> show() (a no-op) and NOT a second binary:
+    //                              a fresh WhatsApp is a new browser context and
+    //                              loses the login, which is exactly what the
+    //                              tray icon refuses to do as well
+    function showFromTray(command, label, entry) {
+        const cls = root.trayClassForApp(command, label, entry);
+        if (cls.length === 0)
+            return false;
+        if (TrayApps.isRunning(cls) && !TrayApps.isHidden(cls))
+            return false; // visible: not the tray's business
+        if (!TrayApps.isRunning(cls) && !TrayApps.processAlive(cls))
+            return false; // not running at all: a real launch, with the
+                          // entry's own wrapper and flags
+        console.log(`[launcher] ${cls} is answered by the tray (parked=${TrayApps.isHidden(cls)})`);
+        TrayApps.show(cls);
+        return true;
     }
 
     // Launch `command`, and be able to say whether it made it.
@@ -792,6 +996,13 @@ property bool loadingFailFlash: false
             return;
         }
 
+        // ── Running, but only in the tray? Open it FROM the tray. ──────────
+        // Parked windows are not on a workspace, so the check above cannot see
+        // them; without this the launcher started a second binary (WhatsApp:
+        // a new session, login lost). Handles the tray icon's own show().
+        if (root.showFromTray(command, label ?? "", null))
+            return;
+
         // ── The same launch already in flight? Fold into it, don't stack. ──
         // A slow app (an AppImage that first mounts itself, then unpacks, then
         // draws) leaves a multi-second gap in which the window is not yet in
@@ -811,7 +1022,10 @@ property bool loadingFailFlash: false
 
         root.launchPendingCommandDraft = wanted;
         root.showLoading(label);
-        Quickshell.execDetached(["bash", `${Directories.scriptPath}/launch/open.sh`, label ?? "", command]);
+        // Taken BEFORE the window exists, which is what the tray guard reads --
+        // and taken here so the Qt spawn stays off the launch path.
+        const allowed = root.allowTrayLaunch(command);
+        Quickshell.execDetached(["bash", `${Directories.scriptPath}/launch/open.sh`, label ?? "", command, allowed]);
     }
 
     // ── Launch choke point for DesktopEntry objects ──────────────────────
@@ -834,6 +1048,11 @@ property bool loadingFailFlash: false
             root.focusRunningApp(running, label);
             return;
         }
+        // Same tray rule as openApp (see showFromTray): a start-menu entry for
+        // an app parked in the vault is answered by the tray, not by starting
+        // the program again.
+        if (root.showFromTray("", label, entry))
+            return;
         // Launch and wait like openApp does: the card hides when the new
         // window arrives (showLoading snapshots the current window list as
         // the baseline), and times out quietly if the app never shows one.
@@ -853,7 +1072,8 @@ property bool loadingFailFlash: false
         if (cmd.length > 0) {
             root.launchPendingCommandDraft = cmd;
             root.showLoading(label);
-            Quickshell.execDetached(["bash", `${Directories.scriptPath}/launch/open.sh`, label, cmd]);
+            const allowed = root.allowTrayLaunch(cmd);
+            Quickshell.execDetached(["bash", `${Directories.scriptPath}/launch/open.sh`, label, cmd, allowed]);
             return;
         }
         root.showLoading(label);
@@ -1226,6 +1446,18 @@ property bool loadingFailFlash: false
         root.loadingVisible = false;
         root.loadingLine = false;
         root.loadingFailFlash = false;
+        // The ceiling has nothing left to end.
+        loadingWatchdogTimer.stop();
+        // The bar's failure row and the held screen hairline end with it.
+        root.loadingFailureInBar = false;
+        root.screenFailureHold = false;
+        // The sentence goes with the card. `loadingText` used to survive every
+        // resolution, so the last app opened stayed in it for the rest of the
+        // session -- and the bar's status row, whose value falls back to this
+        // string, kept showing it ("Opening Discord" forever, reported
+        // 2026-10-19). A finished wait has no sentence; the next launch puts
+        // its own name back.
+        root.loadingText = "";
         // The launch has resolved (window arrived or the failure was shown):
         // the duplicate-guard marks have no business outliving it.
         root.launchPendingCommands = [];
@@ -1233,10 +1465,20 @@ property bool loadingFailFlash: false
     }
 
 
-    // "That did not work" -- the card says why, and the bar's under-line
-    // turns red for a moment (the glance: something you launched did not
-    // come up) before the whole thing fades away together.
+    // "That did not work" -- said in three places at once: the card carries
+    // the sentence, the bar's under-line blinks the WHOLE width red (the
+    // glance), and the thin whole-screen border flares once (ScreenFlash,
+    // through pulseScreenFlash) so a failed launch also reaches eyes that
+    // are nowhere near the small top bar -- requested 2026-10-18, after the
+    // red had been reported as living "only in the status bar".
     function showLoadingError(text) {
+        // The border is HELD, not flashed: one flat red edge for as long as
+        // the bar carries the sentence (asked for 2026-10-19 -- the double
+        // blink read as a second, louder event for a message already on the
+        // bar). It keys on its own flag, so the one-shot pulse below still
+        // belongs to the power failsafe and nothing else.
+        root.screenFailureHold = true;
+        root.loadingFailureInBar = true;
         loadingGraceTimer.stop();
         loadingLineTimer.stop();
         // The verdict is in: stop the clock that was going to produce it, or
@@ -1255,9 +1497,12 @@ property bool loadingFailFlash: false
         // The line stays up but switches to its failure face (see
         // loadingFailFlash) -- it stops charging, glows red briefly, and
         // takes itself down with the card.
-        root.loadingLine = true;
-        root.loadingFailFlash = true;
-        loadingFailFlashTimer.restart();
+        // The row is the whole surface for a launch failure now (see
+        // loadingFailureInBar): no under-bar line, no blink, no card. The row
+        // itself stays up until loadingErrorTimer retires the lifecycle.
+        root.loadingLine = false;
+        root.loadingFailFlash = false;
+        loadingFailFlashTimer.stop();
         loadingErrorTimer.restart();
     }
 
@@ -1298,6 +1543,23 @@ property bool loadingFailFlash: false
         onTriggered: {
             if (root.loadingPending && !root.loadingFailed && !root.loadingInfo)
                 root.loadingLine = true;
+        }
+    }
+
+    // The wait's ceiling (see loadingMaxMs). A download is the one thing that
+    // may legitimately run for minutes -- it renews nothing and has its own
+    // ending -- so it is exempt, and an expired ceiling does not touch it.
+    Timer {
+        id: loadingWatchdogTimer
+        interval: root.loadingMaxMs
+        repeat: false
+        running: false
+        onTriggered: {
+            if (!root.loadingPending || root.loadingFailed || root.loadingInfo)
+                return;
+            if (root.downloadProgress >= 0)
+                return;
+            root.finishLoading();
         }
     }
 
@@ -1510,6 +1772,9 @@ property bool loadingFailFlash: false
             loadingGraceTimer.stop();
             loadingErrorTimer.stop();
             loadingLineTimer.stop();
+            // A scripted wait has no failsafe, so the ceiling below is the ONLY
+            // thing that can promise it ends (see loadingMaxMs).
+            loadingWatchdogTimer.restart();
             // ...and it skips the failsafe for the same reason in reverse: the
             // caller OWNS this card (see the doc comment above -- it ends with
             // `dismiss` or `error`, and there is no timer waiting to take it
@@ -1522,6 +1787,19 @@ property bool loadingFailFlash: false
         }
         function dismiss(): void {
             root.finishLoading();
+        }
+        // The guarded ending: retire the wait only while it is still OURS.
+        // A caller that raised a wait and then hands the launch to something
+        // it cannot watch (the Files window hands a file to `gio open`, whose
+        // process exits in milliseconds) ends it with this, so a wait raised
+        // afterwards by someone else -- a real app launch, a download -- is
+        // never taken down by a late timer belonging to an older announce.
+        function dismissIf(text: string): void {
+            const wanted = String(text ?? "");
+            if (wanted.length === 0)
+                return;
+            if (root.loadingPending && root.loadingText === wanted)
+                root.finishLoading();
         }
         function error(text: string): void {
             if (!root.loadingPending)
@@ -1550,7 +1828,9 @@ property bool loadingFailFlash: false
                 + ` ticks=${root.launchFailsafeTicks}/${root.launchFailsafeTicksMax}`
                 + ` armedName="${root.launchFailsafeName}"`
                 + ` verdict=${root.launchFailsafeVerdict}`
-                + ` failed=${root.loadingFailed} failFlash=${root.loadingFailFlash}`;
+                + ` failed=${root.loadingFailed} failFlash=${root.loadingFailFlash}`
+                + ` inBar=${root.loadingFailureInBar} hold=${root.screenFailureHold}`
+                + ` cap=${root.loadingMaxMs}`;
         }
         function fail(text: string): void {
             root.showLoadingError(text);
@@ -1696,15 +1976,53 @@ property bool loadingFailFlash: false
         }
     }
 
+    // The bare SUPER key: the numbers hint while it is held, and the ARMING that
+    // makes a quick tap open the app search. It no longer arms the desktop-grid
+    // hold (2026-10-14): that belongs to SUPER+Space, below.
     GlobalShortcut {
         name: "workspaceNumber"
         description: "Hold to show workspace numbers, release to show icons"
 
         onPressed: {
             root.superDown = true
+            root.superPressEdge(false)
         }
         onReleased: {
             root.superDown = false
+            root.superReleaseEdge()
+        }
+    }
+
+    // ── SUPER + SPACE: the desktops, on its own key (2026-10-14, retuned
+    //    2026-10-15 -- see the press edge below) ──────────────────────────
+    //
+    // The one command that used to be reachable only by holding the bare
+    // modifier: press it and the desktop grid comes up; press it again and it
+    // goes away. The numbers hint shows while the chord is down, exactly as it
+    // does on a bare-SUPER hold.
+    //
+    // IT TOGGLES ON THE PRESS, like the four-finger swipe it stands in for. It
+    // was a 300 ms hold until 2026-10-15, and a quick tap did nothing at all --
+    // which is the one thing a key that opens a view must not do, and it made
+    // the key and the swipe behave differently for no reason. A hold still
+    // works, trivially: the press has already done it.
+    //
+    // A shortcut of its OWN, not a second bind of `workspaceNumber`, and that is
+    // the point of it: a GlobalShortcut reports which NAME fired, so this is how
+    // the shell can tell a SUPER+Space press from a bare SUPER press -- which is
+    // what keeps the numbers hint and the search card on the bare key and the
+    // grid on this one.
+    GlobalShortcut {
+        name: "superHold"
+        description: "Toggle the desktops"
+
+        onPressed: {
+            root.superDown = true
+            root.superPressEdge(true)
+        }
+        onReleased: {
+            root.superDown = false
+            root.superReleaseEdge()
         }
     }
 
@@ -1738,17 +2056,15 @@ property bool loadingFailFlash: false
     //
     // The ordering is the part that makes it work, so it is worth stating: a
     // tap delivers the press first, then the shortcut's RELEASE, and only then
-    // `superDown = false`. Arming while superDown RISES therefore always lands
-    // before the release that reads it. Nothing happens on the falling edge --
-    // a chord must be free to clear the flag and keep it cleared.
-    onSuperDownChanged: {
-        if (!root.superDown) {
-            // The falling edge is the tap. If the hold never fired, this is
-            // where the app search card is about to open (the bare-SUPER
-            // release does that), so the hold has nothing left to do.
-            superHoldTimer.stop();
-            return;
-        }
+    // `superDown = false`. Arming on the press edge therefore always lands before
+    // the release that reads it. Nothing happens on the falling edge -- a chord
+    // must be free to clear the flag and keep it cleared.
+    //
+    // The edges are called BY the two shortcuts above rather than derived from
+    // `superDown` changing, because the two have to be told apart: a bare-SUPER
+    // press arms the tap and stops there, while a SUPER+Space press silences the
+    // tap and toggles the grid.
+    function superPressEdge(fromHoldChord: bool) {
         // ── A press while something the SUPER tap opened is still up ──────
         // "Press SUPER again and you are back where you were": that closes the
         // desktop grid, or the app search card, ON THE PRESS and silences the
@@ -1756,42 +2072,121 @@ property bool loadingFailFlash: false
         // is what the card does on its own) would leave a press-and-HOLD to
         // start the grid on top of the card, and either way the release would
         // then toggle the card open a beat after the grid went down.
+        //
+        // `superDismissedOnPress` is what makes that move a TOGGLE on a chord
+        // like SUPER+Space: the bare SUPER press gets here first and closes the
+        // grid, and the chord's press -- the other half of the same tap -- would
+        // otherwise open it again, which reads as the key doing nothing.
         if (root.desktopOverviewOpen) {
             root.desktopOverviewOpen = false;
             root.superReleaseMightTrigger = false;
+            root.superDismissedOnPress = true;
             superHoldTimer.stop();
             return;
         }
         if (root.appSearchOverlayOpen) {
             root.appSearchOverlayOpen = false;
             root.superReleaseMightTrigger = false;
+            root.superDismissedOnPress = true;
             superHoldTimer.stop();
             return;
         }
+        if (fromHoldChord) {
+            // ── The toggle half, on the PRESS edge ─────────────────────────
+            //
+            // The chord raised the grid only after a 300 ms hold until
+            // 2026-10-15, and a tap did nothing -- so it did not do what the
+            // four-finger swipe does (one action, grid up) and felt broken to
+            // anyone who did not know to keep holding. The press edge now
+            // toggles it outright.
+            //
+            // The CLOSE half is done above, by the `desktopOverviewOpen`
+            // branch at the top of this function (which is also where the
+            // app-search card is closed the same way). It is the BARE SUPER
+            // press that reaches it, because one tap fires both shortcuts --
+            // so this branch only fires the open half when that dismissal did
+            // not just happen. Without the check the close was undone in the
+            // same instant, which is what made SUPER+Space look dead on an open
+            // grid.
+            //
+            // The release still must not open the app search card: the SUPER
+            // release that ends this chord is not a tap. The chord-list bind in
+            // custom/keybinds.lua trips the same interrupt, so dropping the
+            // candidate here as well keeps the outcome identical whichever of
+            // the two the compositor reports first. No timer is armed: there is
+            // no hold left to measure.
+            root.superReleaseMightTrigger = false;
+            root.superHoldFromChord = true;
+            superHoldTimer.stop();
+            // This press sequence already put something away: the tap was a
+            // dismissal, and opening the grid here would be the second half of
+            // a toggle nobody asked for.
+            if (root.superDismissedOnPress) {
+                root.superDismissedOnPress = false;
+                return;
+            }
+            // ── The grid opens PLAIN: no desktop in hand (2026-10-16) ──
+            //
+            // This key used to come up HOLDING the desktop under the pointer
+            // (2026-10-15), exactly as the SUPER + four-finger swipe down did.
+            // That is asked away now, on both sides -- the gesture is deleted
+            // from custom/general.lua, and this press no longer raises a lift
+            // -- so the grid arrives empty-of-hand: click a card to switch
+            // desktop, click-hold one to reorder it, and nothing is carried
+            // because nothing was picked up.
+            //
+            // The lift MACHINERY stays whole (the signal above, the flag it
+            // sets, the `desktopOverviewGrab` global the gesture used to
+            // dispatch). It is the capability, the IPC `desktopOverview lift`
+            // still drives it, and re-binding it is one line here -- which is
+            // the reason this is a removed CALL and not a removed mechanism.
+            root.desktopOverviewOpen = true;
+            return;
+        }
         root.superReleaseMightTrigger = true;
+        root.superHoldFromChord = false;
+        root.superDismissedOnPress = false;
         superHoldTimer.restart();
     }
 
-    // ═══ Hold SUPER: the desktops come up under the key ═════════════════════
+    // The falling edge is either the tap or the end of the hold. If the hold
+    // never fired, this is where the app search card is about to open (the
+    // bare-SUPER release does that), so the hold has nothing left to do.
+    function superReleaseEdge() {
+        root.superHoldFromChord = false;
+        // The press sequence is over however it ended, so the dismissal mark
+        // goes with it: the next chord press is a fresh action, not the second
+        // half of this one.
+        root.superDismissedOnPress = false;
+        superHoldTimer.stop();
+    }
+
+    // ═══ The bare SUPER hold: it only calls off its own tap ══════════════════
     //
-    // Requested: holding SUPER shows the desktops -- the same stage the SUPER +
-    // four-finger swipe opens -- and it STAYS after SUPER is let go; the next
-    // SUPER press puts it away. A quick tap is untouched: it keeps opening the
-    // app search card.
+    // One timer, and one thing it does: a bare SUPER press that outlives the
+    // interval is someone looking at the workspace numbers, so the release that
+    // follows opens nothing. The app search card belongs to the tap alone.
+    //
+    // It used to have a SECOND arming source: SUPER+Space armed it to raise the
+    // desktop grid 300 ms in. That is gone (2026-10-15) -- the chord toggles the
+    // grid on its press edge now, in superPressEdge above, so there is no hold
+    // left for this timer to measure. The grid was never the bare key's job:
+    // the bare SUPER key keeps the numbers hint and its tap keeps the search
+    // card, and a slow bare press raises the grid no longer.
     //
     // WHY A TIMER AND NOT A KEYBIND. Nothing in either layer can be asked "is
     // something else down while SUPER is held". Hyprland's Lua config exposes
     // no key event to hook (only actions to bind), and this singleton only ever
     // hears the two edges of the bare-SUPER bind -- the same edges a chord
-    // produces. So the hold is measured, from the press edge:
-    //
-    //   * it fires only while `superDown` is still true AND the release is
-    //     still a candidate (`superReleaseMightTrigger`). Every SUPER chord in
-    //     custom/keybinds.lua clears that flag, which is exactly what keeps a
-    //     held chord -- SUPER+A, SUPER+arrow, a SUPER-drag -- from ever
-    //     reaching this: a hold that is really a shortcut cancels itself.
+    // produces. So a press that is meant to be read as a hold is measured from
+    // the press edge.
+    //   * it fires only while the key is still DOWN. Every SUPER chord in
+    //     custom/keybinds.lua trips the release-interrupt, which clears
+    //     `superReleaseMightTrigger` and so stops the timer -- which is what a
+    //     hold that is really a shortcut (SUPER+A, SUPER+arrow, a SUPER-drag)
+    //     deserves: it is not a look at the numbers.
     //   * firing clears the flag itself, so the release that follows does not
-    //     ALSO toggle the app search card open behind the grid.
+    //     ALSO toggle the app search card open behind it.
     //   * a release before the timer stops it. That is the tap, and the card
     //     stays the tap's.
     //
@@ -1805,21 +2200,28 @@ property bool loadingFailFlash: false
         interval: root.superHoldMs
         repeat: false
         onTriggered: {
-            // Re-checked rather than trusted: a chord can have cleared the flag
-            // and the key can have come up inside the interval.
-            if (!root.superDown || !root.superReleaseMightTrigger)
+            // Re-checked rather than trusted: the key can have been let go
+            // inside the interval, and another SUPER chord can have cancelled it.
+            if (!root.superDown)
                 return;
-            // Flag first, then the grid: one order, so a release landing in the
-            // same frame cannot read a stale "still armed" and open the card.
+            if (!root.superReleaseMightTrigger)
+                return;
+            // The press outlived the tap, so the release that follows opens
+            // nothing. Nothing else happens -- the grid is the chord's, and the
+            // chord has already opened it by the time anyone holds this long.
             root.superReleaseMightTrigger = false;
-            root.desktopOverviewOpen = true;
         }
     }
 
     // Every chord trips the interrupt (see the SUPER-chord block in
-    // custom/keybinds.lua). A hold that has not fired yet has to go with it, or
-    // holding SUPER+A for a third of a second would drag the grid up behind the
-    // sidebar the chord just opened.
+    // custom/keybinds.lua). A bare-SUPER hold that has not fired yet has to go
+    // with it, or holding SUPER+A for a third of a second would look like a
+    // deliberate hold of the bare key.
+    //
+    // The chord is no longer an exemption here (`superHoldChordHeld` is gone
+    // with the hold it belonged to): the chord's press clears the tap flag
+    // because its release must not open the search card, and stopping a timer
+    // the chord never armed costs nothing.
     onSuperReleaseMightTriggerChanged: {
         if (!root.superReleaseMightTrigger)
             superHoldTimer.stop();
@@ -1865,6 +2267,9 @@ property bool loadingFailFlash: false
     function failsafeAlert(text) {
         root.pulseScreenFlash(root.screenFireOrange);
         root.loadingText = Translation.tr(text ?? "");
+        // The failsafe's alert is a card and an orange pulse, not the bar row.
+        root.loadingFailureInBar = false;
+        root.screenFailureHold = false;
         root.loadingPending = false;
         root.loadingFailed = true;
         root.loadingInfo = false;
@@ -1903,6 +2308,63 @@ property bool loadingFailFlash: false
         repeat: false
         running: false
         onTriggered: root.finishLoading()
+    }
+
+    // ── The top-right signal card ─────────────────────────────────────────
+    // One short label ("Copied", "Image copied", "Cursor reclaimed") and the
+    // bare glyph that names its kind. The state lives here because the callers
+    // are not one widget: Cliphist copies, fix-mouse.sh reclaims the pointer,
+    // and a script may say something of its own. SignalToast.qml draws it; this
+    // is the only place that decides what is on it and for how long.
+    //
+    // REPLACED, not queued: a second say() rewrites the label and restarts the
+    // clock. `seq` is what the card watches, so even the SAME label said twice
+    // plays its entrance again instead of looking stuck.
+    //
+    // 1200ms is the copy toast's tuned hold; callers that need longer (the
+    // cursor notice is a two-word sentence, not a glance) pass their own.
+    property string signalToastText: ""
+    property string signalToastIcon: "info"
+    property int signalToastDurationMs: 1200
+    property int signalToastSeq: 0
+    property bool signalToastVisible: false
+
+    function showSignalToast(text, icon, ms) {
+        const label = String(text ?? "").trim();
+        if (label.length === 0)
+            return;
+        root.signalToastText = label;
+        root.signalToastIcon = (icon && String(icon).length > 0) ? String(icon) : "info";
+        root.signalToastDurationMs = (ms > 0) ? ms : 1200;
+        root.signalToastVisible = true;
+        root.signalToastSeq++;
+    }
+
+    function hideSignalToast() {
+        root.signalToastVisible = false;
+    }
+
+    IpcHandler {
+        target: "signalToast"
+
+        // Default icon, for a caller with nothing more specific to say:
+        //   qs -c ii ipc call signalToast say "Saved"
+        function say(text: string): void {
+            root.showSignalToast(text, "check_circle", 1500);
+        }
+
+        // Named glyph, for a caller that knows its kind:
+        //   qs -c ii ipc call signalToast sayIcon "Cursor reclaimed" mouse
+        function sayIcon(text: string, icon: string): void {
+            root.showSignalToast(text, icon, 1500);
+        }
+
+        function state(): string {
+            return `visible=${root.signalToastVisible} seq=${root.signalToastSeq}`
+                + ` text=${JSON.stringify(root.signalToastText)}`
+                + ` icon=${JSON.stringify(root.signalToastIcon)}`
+                + ` ms=${root.signalToastDurationMs}`;
+        }
     }
 
     IpcHandler {

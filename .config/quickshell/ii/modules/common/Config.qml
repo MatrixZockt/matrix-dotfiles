@@ -211,6 +211,18 @@ Singleton {
                     property bool enable: false
                     property int intervalS: 300 // seconds between changes
                 }
+                // The clock wallpaper (modules/ii/background/
+                // ClockWallpaper.qml): the desktop becomes the pen's #282828
+                // page, and the neumorphic clock with its hourly line is the
+                // whole picture.
+                //
+                // Off by default, and it never touches the wallpaper file: the
+                // path in `wallpaperPath` stays what the theme and the lock
+                // screen read, so turning this off brings the picture straight
+                // back (and the colour palette never had to change).
+                property JsonObject clockWallpaper: JsonObject {
+                    property bool enable: false
+                }
                 property JsonObject widgets: JsonObject {
                     // (The sidebar WidgetsBoard and the SoundBar desktop rail
                     // were deleted; their config blocks went with them.)
@@ -281,6 +293,10 @@ Singleton {
                 // Optional: a picture baked into the login (SDDM) screen on the
                 // next Reinstall. Empty = the desktop wallpaper is baked.
                 property string wallpaperPathLogin: ""
+                // Optional: the picture the lock screen (SUPER+L) draws. Empty
+                // = the lock shows the same wallpaper as the desktop, and it
+                // keeps following it as the desktop changes.
+                property string wallpaperPathLock: ""
                 property bool hideWhenFullscreen: true
                 property JsonObject parallax: JsonObject {
                     property bool vertical: false
@@ -879,7 +895,11 @@ Singleton {
                             { "size": 1, "type": "idleInhibitor" },
                             { "size": 1, "type": "mic" },
                             { "size": 2, "type": "audio" },
-                            { "size": 2, "type": "nightLight" }
+                            { "size": 2, "type": "nightLight" },
+                            // The compositor's anti-flashbang shader (upstream
+                            // end-4's). Left click turns it on and off; right
+                            // click switches the weak/strong strength.
+                            { "size": 1, "type": "antiFlashbang" }
                         ]
                     }
                 }
@@ -893,7 +913,16 @@ Singleton {
             }
 
             property JsonObject screenRecord: JsonObject {
-                property string savePath: Directories.videos.replace("file://","") // strip "file://"
+                // EMPTY = TEMPORARY, the same contract screenSnip has had all
+                // along ("only copy to clipboard when empty"). A recording is
+                // something you paste into a chat or an editor, so by default it
+                // is put on the clipboard and kept in the cache, where the
+                // recording script prunes it. It used to default to ~/Videos,
+                // which meant every take ever recorded stayed on disk forever
+                // (asked for 2026-10-22: "they should only be saved temp so i can
+                // copy the video like a snip i can copy"). Set a path here to
+                // keep every clip there instead.
+                property string savePath: ""
             }
 
             property JsonObject screenSnip: JsonObject {

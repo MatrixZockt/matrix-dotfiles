@@ -291,10 +291,65 @@ Item {
         onPressed: root.commitOpenEdit()
     }
 
+    // ── The list is only as tall as its tasks ──────────────────────────
+    //
+    // The page is given the sidebar's whole height, and the list used to
+    // `anchors.fill` it: a 832px scroll area holding three 44px rows, so the
+    // widget presented a tall empty band that belonged to the list and could
+    // be scrolled in (and dragged through) as if there were more below the
+    // last task.
+    //
+    // The list now stops at its own content: one row-pitch per task, the last
+    // pitch being the trailing gap the rows keep between them (see the
+    // footer). Add a task and it grows by exactly that pitch; delete one and
+    // it gives the space back. Only when the tasks no longer fit the page
+    // does it take the full height and start scrolling, and even then the
+    // trailing gap is part of the content, so the scroll ends one gap below
+    // the last task rather than cutting it off at the edge.
+    //
+    // `contentHeight` is read for its real, measured value -- a row that is
+    // expanded is taller than `rowHeight`, and the list has to make room for
+    // it -- and `listMinHeight` is the collapsed-height bootstrap that keeps
+    // the binding from settling on the 0 a not-yet-laid-out view reports.
+    readonly property real listMinHeight: taskList.length === 0
+        ? 0
+        : taskList.length * rowPitch
+
     StyledListView {
         id: listView
-        anchors.fill: parent
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: Math.min(parent.height, Math.max(contentHeight, root.listMinHeight))
+        // KEPT ALIVE, all of it, and this is the fix for the phantom scroll
+        // that appeared at the bottom of an OPENED task.
+        //
+        // A ListView only keeps delegates near the viewport; the rest are
+        // destroyed and their heights are ESTIMATED from whatever delegate is
+        // still instantiated. That is invisible while every row is the same
+        // 44px -- but opening the long task makes ONE row 5169px tall in a
+        // 832px viewport, so the moment scrolling throws the two short rows
+        // away the view sizes the whole list as if all three were 5169px
+        // (measured: contentHeight jumped 5284 -> 15534 with the real rows
+        // still summing to 5275). The wheel clamp is derived from that
+        // number, so the scroll range opened up roughly 10000px of nothing
+        // below the last task -- which is exactly "I can still scroll down so
+        // much more" at the bottom of an opened task.
+        //
+        // The list is small and one row per task, so the cheapest exact
+        // answer is to hold every delegate in memory for the life of the
+        // list: contentHeight is then the sum of the real rows, never an
+        // estimate, and the clamp lands one trailing gap under the last task.
+        cacheBuffer: 100000
         spacing: root.todoListItemSpacing
+        // The trailing gap: the same space the rows leave between each other,
+        // after the last one. Part of the CONTENT, not padding on the view, so
+        // it grows with the list and gives the scroll a place to end that is
+        // not the last task's own edge.
+        footer: Item {
+            width: 0
+            height: root.todoListItemSpacing
+        }
         // No flicking while a grip drag is in progress. Without this the list
         // scrolls under the row being dragged, which both fights the reorder
         // and leaves the drop line pointing at the wrong task.
@@ -802,26 +857,23 @@ Item {
                     Layout.preferredWidth: root.gripWidth
                     Layout.fillHeight: true
 
-                    // THE HOVER TREATMENT.
+                    // THE HOVER TREATMENT -- deliberately the quietest cue in
+                    // the row.
                     //
-                    // The grip had exactly one cue: the icon's colour stepping
-                    // from `colPrimary` to `m3onSurface`. On a #141313 panel
-                    // those two are close enough in luminance that the change
-                    // is invisible until you are already looking for it, so
-                    // "hover the dots" did not appear to do anything.
+                    // It used to be loud: an 18% wash that grew into a full
+                    // pill, plus the dots stepping to `m3onSurface`. On a list
+                    // where every row has one, that put a bright lozenge under
+                    // the pointer on every pass down the sidebar, and it read
+                    // as the row being selected rather than as a handle being
+                    // available. The grip is not the way to move a task any
+                    // more either -- holding the task itself starts the drag
+                    // -- so it should whisper rather than announce.
                     //
-                    // Three cues now, in increasing order of how hard they are
-                    // to miss:
-                    //   1. a translucent wash behind the dots that grows into
-                    //      a vertical pill on hover -- a drag strip, which is
-                    //      how a draggable handle is actually read
-                    //   2. the colour step, kept as the finishing touch
-                    //
-                    // The dots themselves never change SIZE. Growing them was
-                    // tried and dropped: on a row this narrow a 1.2x drag
-                    // indicator crowded the completion circle next to it, and
-                    // the motion drew more attention to the grip than the
-                    // highlight did. The wash and the colour step carry it.
+                    // What is left: a 3% wash (10% was still a visible
+                    // lozenge -- almost transparent, per request) that barely
+                    // swells, and the hand cursor. The dots keep one colour at
+                    // rest and in flight unless the row is actually being
+                    // carried, which is the only state worth shouting about.
                     //
                     // The wash is a low-opacity `colPrimary` rather than a
                     // lighter solid colour, which is the only reliable "lift"
@@ -872,8 +924,13 @@ Item {
                         // particular size.
                         radius: height / 2
                         color: Appearance.colors.colPrimary
-                        opacity: lit ? 0.18 : 0.0
-                        scale: lit ? 1.0 : 0.72
+                        // 3%, by request: the hover cue is a hint that the
+                        // strip is live, not a highlight on the row. At 10% it
+                        // still read as a lozenge appearing under the pointer
+                        // -- almost a selection. What is left is a wash you
+                        // notice only while looking at it.
+                        opacity: lit ? 0.03 : 0.0
+                        scale: lit ? 0.86 : 0.72
 
                         // 70ms, matching NotificationItem's `hoverDuration`
                         // rather than the 200ms `expressiveEffectsDuration`.
@@ -915,13 +972,12 @@ Item {
                         iconSize: 18
 
 
-                        // `colPrimary` at rest, stepping to `m3onSurface` on
-                        // hover and while the row is in flight.
+                        // One colour at rest AND on hover -- the wash under it
+                        // is the whole hover cue now. It steps up only while
+                        // this row is the one being carried.
                         color: root.draggingIndex === todoItem.index
                             ? Appearance.m3colors.m3onSurface
-                            : (gripMouse.containsMouse
-                                ? Appearance.m3colors.m3onSurface
-                                : Appearance.colors.colPrimary)
+                            : Appearance.colors.colPrimary
                     }
 
                     MouseArea {
@@ -1125,7 +1181,7 @@ Item {
                         // It is a FUNCTION, and it re-derives everything from the
                         // press point, so calling it twice with the same pointer
                         // position is a no-op rather than an accumulation.
-                        function trackDrag(lx, ly) {
+                        function trackDrag(lx, ly, fresh) {
                             // Whoever owns the gesture may drive it; the
                             // CALLERS are what keep the other area out.
                             //
@@ -1159,11 +1215,42 @@ Item {
                             // A Qt pointer grab is exclusive: every motion event
                             // after the press arrives here and nowhere else.
                             //
-                            // Measured in the SCENE, not in this area's own
-                            // space -- see the note on sceneAt. In a
-                            // frame-independent space this delta is just how far
-                            // the pointer has travelled since the press.
-                            const p = sceneAt(lx, ly);
+                            // FRESH EVENTS ARE MAPPED, POLLS ARE NOT -- and the
+                            // difference is a real drag offset, not tidiness.
+                            //
+                            // `sceneAt` cancels our own `Translate` by adding
+                            // `dragOffset` back to a local coordinate. That is
+                            // exact as long as the row's LAYOUT does not move,
+                            // and after a double-tap it does: expanding a row
+                            // animates its height for 90ms and re-anchors the
+                            // text from the row's vertical centre to its top.
+                            // Start dragging inside that window -- which is
+                            // exactly what a double-tap-then-drag is -- and the
+                            // text block slides under the press by half the
+                            // height the row grew. `sceneAt` has no term for
+                            // that, so the error is baked into the offset and
+                            // the carried card sits a fixed distance from the
+                            // cursor for the rest of the gesture, which is the
+                            // report: "double tap then drag fast enough and the
+                            // dragging task is shifted from the cursor".
+                            //
+                            // A live event has no such blindness: its local
+                            // coordinates and the current transform describe the
+                            // same instant, so mapping through the area IS the
+                            // pointer's scene position, whatever the layout did
+                            // in between.
+                            //
+                            // That is only true of a live event. The poll
+                            // timers re-read the area's `mouseX/mouseY` after
+                            // the transform has already changed (our own
+                            // `Translate` moving the row counts), and mapping a
+                            // sample that old adds the movement to itself --
+                            // the runaway the note on `sceneAt` describes. So
+                            // the polls keep the arithmetic, where the offset
+                            // cancels by construction, and only events map.
+                            const p = (fresh === false)
+                                ? sceneAt(lx, ly)
+                                : dragOwner.mapToItem(null, lx, ly);
 
                             // No new pointer position, nothing to do. This is
                             // what makes the poll timer inert: it re-samples the
@@ -1288,7 +1375,7 @@ Item {
                             repeat: true
                             running: gripMouse.pressed && !gripMouse.motionSeen
                                 && gripMouse.dragOwner === gripMouse
-                            onTriggered: gripMouse.trackDrag(gripMouse.mouseX, gripMouse.mouseY)
+                            onTriggered: gripMouse.trackDrag(gripMouse.mouseX, gripMouse.mouseY, false)
                         }
 
                         // Commits the reorder and tears the drag state down.
@@ -1544,6 +1631,39 @@ Item {
                             // reset by it.
                             property bool clickSwallowed: false
 
+                            // PRESS-AND-HOLD picks the row up as well.
+                            //
+                            // A double-click that is then dragged is a gesture
+                            // nobody discovers: two taps in quick succession and
+                            // only THEN hold still, on a row whose single click
+                            // already does something else. Holding the task and
+                            // dragging is the gesture people actually try, and it
+                            // is the one a phone list uses, so it is the one
+                            // this row answers. Nothing is armed until the hold
+                            // lasts a beat, so a tap is still a tap.
+                            //
+                            // It also cannot fight the list's own scrolling: a
+                            // press that moves before the timer fires is taken
+                            // by the Flickable (which clears `pressed`, and with
+                            // it this timer), and a press that does NOT move is
+                            // not a scroll in the first place.
+                            Timer {
+                                id: textHoldArm
+                                interval: 300
+                                // One arm per gesture: cancelled the moment a
+                                // drag is already in flight (the double-click
+                                // path below), and dead as soon as the press
+                                // ends.
+                                running: textDragMouse.pressed && !gripMouse.dragHeld
+                                onTriggered: {
+                                    if (!textDragMouse.pressed || gripMouse.dragHeld)
+                                        return;
+                                    const o = textDragMouse.mapToItem(null, 0, 0);
+                                    gripMouse.beginDrag(textDragMouse,
+                                        o.x, o.y, textDragMouse.mouseX, textDragMouse.mouseY);
+                                }
+                            }
+
                             // A DOUBLE-CLICK picks the row up, so the pointer
                             // never has to find the dots.
                             //
@@ -1589,8 +1709,15 @@ Item {
                                 running: gripMouse.dragOwner === textDragMouse
                                     && gripMouse.dragHeld
                                     && !gripMouse.motionSeen
-                                onTriggered: gripMouse.trackDrag(textDragMouse,
-                                    textDragMouse.mouseX, textDragMouse.mouseY)
+                                // (This call used to pass `textDragMouse` as
+                                // the first argument, so `lx` was a MouseArea
+                                // and `ly` was its `mouseX` -- trackDrag read
+                                // NaN out of both and the text-column poll
+                                // could never move anything. It is a plain
+                                // `false` in the third slot now: this is the
+                                // stale-sample path.)
+                                onTriggered: gripMouse.trackDrag(textDragMouse.mouseX,
+                                    textDragMouse.mouseY, false)
                             }
 
                             onReleased: (mouse) => {

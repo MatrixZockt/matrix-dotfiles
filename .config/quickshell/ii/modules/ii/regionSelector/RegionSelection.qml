@@ -18,7 +18,17 @@ PanelWindow {
     color: "transparent"
     WlrLayershell.namespace: "quickshell:regionSelector"
     WlrLayershell.layer: WlrLayer.Overlay
-    WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
+    // EXCLUSIVE while the surface is up, None the rest of the time.
+    //
+    // It used to be OnDemand, and that mode only grants focus when the surface
+    // is interacted with -- so opening the selector and pressing Esc or R sent
+    // the key to whatever application was underneath. Esc was documented here
+    // as "Esc to close" and did nothing; the R that switches this surface
+    // between screenshot and record would have been dead for the same reason.
+    // A modal picker is exactly the case for Exclusive (WallpaperModal does the
+    // same): it owns the keyboard for the second or two it exists, and gives it
+    // back the moment it closes.
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
     exclusionMode: ExclusionMode.Ignore
     anchors {
         left: true
@@ -199,29 +209,32 @@ PanelWindow {
         screenshotPath: root.screenshotPath
         onExited: (exitCode, exitStatus) => {
             if (root.enableContentRegions) imageDetectionProcess.running = true;
-            root.preparationDone = !checkRecordingProc.running;
+            root.preparationDone = true;
         }
     }
-    property bool isRecording: root.action === RegionSelection.SnipAction.Record || root.action === RegionSelection.SnipAction.RecordWithSound
-    property bool recordingShouldStop: false
-    Process {
-        id: checkRecordingProc
-        running: isRecording
-        command: ["pidof", "wf-recorder"]
-        onExited: (exitCode, exitStatus) => {
-            root.preparationDone = !screenshotProc.running
-            root.recordingShouldStop = (exitCode === 0);
-        }
-    }
+    // The old flow asked `pidof wf-recorder` here to decide whether opening the
+    // selector MEANT "stop the current recording". That is gone, together with
+    // wf-recorder: a recording is stopped from its own control box
+    // (modules/ii/recording/RecordingPill.qml), so this surface never has to
+    // guess what a running recorder means.
     property bool preparationDone: false
     onPreparationDoneChanged: {
         if (!preparationDone) return;
-        if (root.isRecording && root.recordingShouldStop) {
-            Quickshell.execDetached([Directories.recordScriptPath]);
-            root.dismiss();
-            return;
-        }
         root.visible = true;
+    }
+
+    // ── Record mode ───────────────────────────────────────────────────────
+    // The same selection, with the camera rolling instead of the shutter. `R`
+    // flips it before or during a drag; the pill in the toolbar shows which
+    // one a release would do, so the answer is never a surprise. Screenshot
+    // stays the default, because that is what this surface has always been.
+    readonly property bool recordMode: root.action === RegionSelection.SnipAction.Record
+        || root.action === RegionSelection.SnipAction.RecordWithSound
+
+    function toggleRecordMode() {
+        root.action = root.recordMode
+            ? RegionSelection.SnipAction.Copy
+            : RegionSelection.SnipAction.Record;
     }
 
     Process {
@@ -285,6 +298,7 @@ PanelWindow {
         if (root.regionWidth <= 0 || root.regionHeight <= 0) {
             console.warn("[Region Selector] Invalid region size, skipping snip.");
             root.dismiss();
+            return;
         }
 
         // Clamp region to screen bounds
@@ -292,6 +306,26 @@ PanelWindow {
         root.regionY = Math.max(0, Math.min(root.regionY, root.screen.height - root.regionHeight));
         root.regionWidth = Math.max(0, Math.min(root.regionWidth, root.screen.width - root.regionX));
         root.regionHeight = Math.max(0, Math.min(root.regionHeight, root.screen.height - root.regionY));
+
+        // ── Record mode: the overlay goes, the control box takes over ──────
+        // Deliberately NOT the old "stay open in Post phase" behaviour. What
+        // was on screen then was a dimmed, frozen screenshot of the desktop
+        // sitting on top of the very thing being recorded, with no way to stop
+        // it except re-opening this surface. A recording wants its frame back:
+        // this dismisses, and the pill carries pause and stop.
+        //
+        // LOGICAL coordinates: QuickRecord passes the rectangle to
+        // gpu-screen-recorder, which scales to the output's real pixels
+        // itself. The grim path below is the one that multiplies by
+        // monitorScale.
+        if (root.recordMode) {
+            QuickRecord.startRegion(
+                root.regionX + root.monitorOffsetX, root.regionY + root.monitorOffsetY,
+                root.regionWidth, root.regionHeight,
+                root.action === RegionSelection.SnipAction.RecordWithSound);
+            root.dismiss();
+            return;
+        }
 
         // Adjust action
         if (root.action === RegionSelection.SnipAction.Copy || root.action === RegionSelection.SnipAction.Edit) {
@@ -311,12 +345,7 @@ PanelWindow {
             screenshotDir
         )
         Quickshell.execDetached(command);
-        if (root.action == RegionSelection.SnipAction.Record || root.action == RegionSelection.SnipAction.RecordWithSound) {
-            root.phase = RegionSelection.Phase.Post
-            root.selectionMode = RegionSelection.SelectionMode.RectCorners
-        } else {
-            root.dismiss();
-        }
+        root.dismiss();
     }
 
     // Only clickable in Selection phase
@@ -327,6 +356,7 @@ PanelWindow {
         }
     }
 
+
     ScreencopyView { // For freezing
         anchors.fill: parent
         live: false
@@ -334,9 +364,19 @@ PanelWindow {
         visible: root.phase === RegionSelection.Phase.Select
 
         focus: root.visible
-        Keys.onPressed: (event) => { // Esc to close
-            if (event.key === Qt.Key_Escape) {
+        Keys.onPressed: (event) => {
+            if (event.key === Qt.Key_Escape) { // Esc to close
                 root.dismiss();
+                return;
+            }
+            // R: screenshot <-> record. No phase guard is needed any more: the
+            // only phase this surface has left is Select (a record selection
+            // closes it instead of parking it), and the guard that was here
+            // made the key do nothing at all -- the enum comparison failed at
+            // runtime, which is not a thing a key should be able to fail.
+            if (event.key === Qt.Key_R) {
+                root.toggleRecordMode();
+                event.accepted = true;
             }
         }
     }
@@ -557,6 +597,72 @@ PanelWindow {
                 animation: Appearance.animation.elementMove.numberAnimation.createObject(this)
             }
             spacing: 6
+
+            // ── Screenshot <-> Record ──────────────────────────────────
+            // The one question this surface has to answer before anything is
+            // selected is "what will the release do", so the mode is a WORD,
+            // not a bare glyph: a camera icon on its own reads as a screenshot
+            // tool even while it is about to record. Clicking it and pressing
+            // R do the same thing (see Keys.onPressed above); the tooltip is
+            // where the shortcut is taught.
+            Rectangle {
+                id: recordModePill
+                anchors.verticalCenter: parent.verticalCenter
+                implicitWidth: modeRow.implicitWidth + 22
+                implicitHeight: 34
+                radius: 17
+                readonly property bool on: root.recordMode
+                readonly property color accent: on ? Appearance.colors.colError : Appearance.colors.colOnLayer0
+                color: on ? ColorUtils.transparentize(Appearance.colors.colError, 0.86)
+                         : ColorUtils.transparentize(Appearance.colors.colLayer1, 0.6)
+                border.width: 1
+                border.color: on ? ColorUtils.transparentize(Appearance.colors.colError, 0.45)
+                                 : ColorUtils.transparentize(Appearance.colors.colOnLayer0, 0.85)
+
+                Behavior on color {
+                    ColorAnimation { duration: 140 }
+                }
+                Behavior on border.color {
+                    ColorAnimation { duration: 140 }
+                }
+
+                MouseArea {
+                    id: modeHover
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.toggleRecordMode()
+                }
+
+                Row {
+                    id: modeRow
+                    anchors.centerIn: parent
+                    spacing: 6
+
+                    MaterialSymbol {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: recordModePill.on ? "screen_record" : "photo_camera"
+                        iconSize: 16
+                        fill: recordModePill.on ? 1 : 0
+                        color: recordModePill.accent
+                        autoHover: true
+                    }
+
+                    StyledText {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: recordModePill.on ? Translation.tr("Record") : Translation.tr("Screenshot")
+                        font.pixelSize: Appearance.font.pixelSize.smallie
+                        font.weight: Font.DemiBold
+                        color: recordModePill.accent
+                    }
+                }
+
+                StyledToolTip {
+                    text: recordModePill.on
+                        ? Translation.tr("Record · click or press R for a screenshot")
+                        : Translation.tr("Screenshot · click or press R to record")
+                }
+            }
 
             OptionsToolbar {
                 Synchronizer on action {

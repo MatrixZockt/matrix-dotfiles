@@ -422,6 +422,71 @@ elif [ -n "${CORE_MB:-}" ]; then
     ok "coredumps occupy ${CORE_MB}MB"
 fi
 
+# ── RENDERING ──────────────────────────────────────────────────────────────
+# Is every Chromium/Electron app actually drawing on the GPU?
+#
+# Added 2026-10-23 after WhatsApp was found compositing on the CPU: its GPU
+# process had NO render node open (nothing under /dev/dri), because Chromium
+# had given up on ANGLE and fallen back to SwiftShader. Nothing reported it --
+# the app opens, looks normal, and simply burns a core. Same for Freebuff's
+# software path (`--disable-gpu`). A launcher that silently loses the GPU is
+# invisible until someone reads /proc, which is exactly what this check is.
+#
+# A GPU process that HOLDS a /dev/dri/renderD* descriptor is hardware
+# accelerated. swiftshader being *mapped* does not mean software rendering: it
+# is loaded for the WebGL fallback even in otherwise fully accelerated apps.
+head_ "gpu rendering"
+
+GPU_REPORT=$(python3 - <<'PY' 2>/dev/null
+import glob, os
+
+rows = []
+for p in glob.glob("/proc/[0-9]*"):
+    try:
+        cmd = open(p + "/cmdline", "rb").read().replace(b"\0", b" ").decode("utf-8", "replace")
+    except OSError:
+        continue
+    if "--type=gpu-process" not in cmd:
+        continue
+    pid = p.rsplit("/", 1)[1]
+    exe = cmd.split(" ")[0]
+    name = os.path.basename(exe)
+    nodes = set()
+    try:
+        for fd in glob.glob(p + "/fd/*"):
+            try:
+                target = os.readlink(fd)
+            except OSError:
+                continue
+            if target.startswith("/dev/dri/"):
+                nodes.add(os.path.basename(target))
+    except OSError:
+        pass
+    forced_soft = any(a in cmd.split() for a in ("--disable-gpu", "--use-gl=disabled"))
+    rows.append((name, pid, sorted(nodes), forced_soft))
+
+for name, pid, nodes, forced_soft in sorted(rows):
+    if forced_soft:
+        print(f"SOFT\t{name} (pid {pid}) launched with --disable-gpu -- every pixel is drawn on the CPU")
+    elif nodes:
+        print(f"GPU\t{name} (pid {pid}) on {','.join(nodes)}")
+    else:
+        print(f"SOFT\t{name} (pid {pid}) holds NO /dev/dri render node -- Chromium fell back to software")
+PY
+)
+
+if [ -z "$GPU_REPORT" ]; then
+    ok "no Chromium/Electron GPU processes running to check"
+else
+    while IFS=$'\t' read -r kind text; do
+        [ -n "${kind:-}" ] || continue
+        case "$kind" in
+            GPU)  ok "$text" ;;
+            SOFT) warn "$text" ;;
+        esac
+    done <<< "$GPU_REPORT"
+fi
+
 # ── VERDICT ────────────────────────────────────────────────────────────────
 say ""
 say "═══════════════════════════════════════════════"

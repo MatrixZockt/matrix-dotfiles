@@ -509,7 +509,10 @@ Item { // Notification item area
                 // changes nothing at all.
                 RippleButton {
                     Layout.fillWidth: false
-                    visible: root.popup
+                    // Never on a signal: "Copied" is not something to throw
+                    // away, and a delete icon is the exact notification chrome
+                    // this card is supposed to stop wearing.
+                    visible: root.popup && !(root.notificationObject?.isSignal ?? false)
                     implicitWidth: 24
                     implicitHeight: 24
                     // The same wash as the sidebar's delete plate, and for the same

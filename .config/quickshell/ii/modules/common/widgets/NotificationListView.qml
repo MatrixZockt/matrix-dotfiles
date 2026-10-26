@@ -1,5 +1,6 @@
 pragma ComponentBehavior: Bound
 
+import qs.modules.common
 import qs.modules.common.widgets
 import qs.services
 import QtQuick
@@ -34,6 +35,13 @@ StyledListView { // Scrollable window
     // it. The sidebar list below is a list that was already there, so it
     // keeps the default pop.
     addScaleFrom: root.popup ? 0.92 : 0
+
+    // The popup's own entrance/exit clock, shared by every card in it: the
+    // SAME 140ms as the card's drop translate, so the drop, the fade and the
+    // scale are one gesture (the sidebar keeps the shared elementMove clock).
+    // In is a snap; out is shorter still -- a card that is finished is gone.
+    addDuration: root.popup ? Math.round(140 * Appearance.animationCurves.motionScale) : 0
+    removeDuration: root.popup ? Math.round(160 * Appearance.animationCurves.motionScale) : 0
 
     // ONE CARD PER NOTIFICATION, newest first.
     //
@@ -87,7 +95,10 @@ StyledListView { // Scrollable window
             // at. The name carries its own label now, and two tooltips for one
             // pointer position -- the card's and the name's -- would stack on
             // top of each other over the same pixels.
-            extraVisibleCondition: !notifCard.appNameHovered
+            // ...and a signal gets no tooltip at all: "Click to go to Clipboard"
+            // names an app that does not exist and a gesture the card no longer
+            // answers.
+            extraVisibleCondition: !notifCard.appNameHovered && !notifCard.isSignal
         }
     }
 }

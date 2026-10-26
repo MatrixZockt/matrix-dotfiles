@@ -233,6 +233,10 @@ Scope {
     // text is already fully visible at k=0.4, the remaining 60% of the slide
     // reads as a separate, second motion. Content fully opaque at k=0.55
     // keeps the arrival and the fade braided together.
+    // These follow `k` on the way IN, and on every animated way out. The one
+    // exit that does not animate -- a desktop switch -- never reaches them: it
+    // unmaps the surface outright (see `instantClose`), so there is no frame in
+    // which a half-faded card is drawn over a moving desktop.
     readonly property real cardSlideOffset: (1 - root.k) * 40
     readonly property real cardOpacity: Math.min(1, root.k * 2.5)
     // The information's own travel, in the content column's coordinates.
@@ -844,6 +848,31 @@ Scope {
         function toggle(): void { GlobalStates.nowBarPanelOpen = !GlobalStates.nowBarPanelOpen; }
         function setMode(m: int): void { root.setMode(m); }
 
+        // The desktop-swipe takeover, driven without a touchpad. A swipe is the
+        // one exit that happens while the screen is moving, so it is also the
+        // one that can only be judged by what the card does at the START of a
+        // gesture -- and a hand cannot be put on the pad from a script. This
+        // feeds the SHIPPED predicate and the SHIPPED exit the four numbers the
+        // tracker itself reports, so what it exercises is the real path:
+        //
+        //   qs -c ii ipc call nowbarPanel swipeProbe 4 2 0.12 0.01
+        //   qs -c ii ipc call nowbarPanel swipeProbe 2 2 0.03 0.001
+        //
+        // (fingers, start, htotal, total): the live count, the count the
+        // gesture began with, and the sideways/vertical travel.
+        // `at` is the instant of the decision, and it is the number the check
+        // measures against: the compositor says when the surface actually
+        // left (`closelayer`), and the gap between the two is what the eye
+        // sees -- an exit animation, a forked read, or one frame.
+        function swipeProbe(fingers: int, start: int, htotal: real, total: real): string {
+            const take = root.desktopSwipe(fingers, start, htotal, total);
+            if (take && (root.open || root.t > 0.001)) {
+                root.close("desktop switch");
+                root.startTransition();
+            }
+            return `take=${take} open=${root.open} t=${Math.round(root.t * 100) / 100} at=${Date.now()}`;
+        }
+
         // Scriptable access to the power-mode buttons, so what a press of one
         // of them does can be driven and read back without a pointer:
         //
@@ -995,10 +1024,65 @@ Scope {
         }
     }
 
-    onOpenChanged: {
-        root.syncMeterClaim();
-        root._syncAiClaim();
-        root.publishPanelState();
+    // ── The exit a desktop switch gets: none at all ──────────────────────
+    //
+    // Switching desktop is not a dismissal of this card -- it is the whole
+    // context the card describes going away -- and it is closed from outside
+    // the card (GlobalStates, plus the workspace handler below). What that exit
+    // may NOT be is an animation, and that is a measurement, not a taste:
+    //
+    //   * this surface is the WHOLE OUTPUT, on the Overlay layer
+    //     (`exclusiveZone: -1`, all four anchors), and the compositor blurs it
+    //     (`layer_rule { blur = true }` on `quickshell:barPanel`,
+    //     custom/rules.lua). Laid over a desktop that is sliding, that is a
+    //     full-screen blurred snapshot of the desktop being LEFT, re-blurred
+    //     on every frame of the switch -- which is the visible glitch (a still,
+    //     foggy sheet over moving content) and its cost.
+    //
+    //   * measured per switch, one switch per reading, against the shell's own
+    //     tick instrument (`qs -c ii ipc call bar swipeDiag`, where `tickMax`
+    //     is the event loop's worst lateness in ms):
+    //
+    //       card shut    tickMax  51-69ms
+    //       card open    tickMax  64-130ms, with the stalls landing in the
+    //                              switch's own window (~500ms after the reset)
+    //
+    // An exit animation is 120ms of exactly those two things, spent on a card
+    // nobody can read while the desktop underneath is moving. So a desktop
+    // switch gets NO animation: the card is unmapped in the same frame the
+    // switch arrives, and the switch's own animation is the entire transition.
+    //
+    // The other four ways out keep the expressive retract: a press on the
+    // veil, Escape, the close shortcut and the chevron are all deliberate
+    // dismissals of a card that was being read, and a card leaving the screen
+    // backwards is the right answer to a press. Only a change of desktop is
+    // not a dismissal -- and it is the one exit with something else on screen
+    // competing for the same frames.
+    property bool instantClose: false
+
+    // ── The transition, in one place ────────────────────────────────────
+    //
+    // Called by the state change, and again by the desktop switch below --
+    // which has to be able to RE-TARGET an exit that has already begun, because
+    // it cannot know whether GlobalStates closed this card before its own
+    // handler ran. `alwaysRunToEnd: false` makes the second call a re-target
+    // rather than a queue.
+    function startTransition() {
+        // A desktop switch: no animation, no frames. `t` goes to 0 in one write,
+        // and the surface's own `visible` binding (`open || t > 0.01`) releases
+        // it in the same frame -- so the compositor has no blurred full-screen
+        // layer to re-composite while the desktops slide, and the shell has no
+        // animation to run. Stopping the runner FIRST is what makes this
+        // instant even when it interrupts an open that is still travelling:
+        // without the stop, the running animation would keep writing `t` and
+        // paint the very frames this exists to avoid.
+        //
+        // See the `instantClose` note above for the measurements behind it.
+        if (!root.open && root.instantClose) {
+            tAnim.stop();
+            root.t = 0;
+            return;
+        }
         // 200 in / 130 out.
         //
         // It was 380 in, and that is what "slow paced" was. The duration was
@@ -1048,6 +1132,24 @@ Scope {
             : Appearance.animationCurves.emphasizedAccel;
         tAnim.to = root.open ? 1 : 0;
         tAnim.start();
+    }
+
+    onOpenChanged: {
+        // The motion starts FIRST: before the claims, before the state file is
+        // written, before the timer-edit cancellation below. That ordering is
+        // not tidying -- it is the same ordering the SUPER menu's own handler
+        // uses, and the exit used to be started at the very END of this one,
+        // after the claims and after a process had been spawned for the state
+        // file. Nothing on the far side of this handler needs the motion to
+        // have started: `startTransition` reads two properties and starts one
+        // animation.
+        root.startTransition();
+        // An open cancels an instant close that was armed but never consumed.
+        if (root.open)
+            root.instantClose = false;
+        root.syncMeterClaim();
+        root._syncAiClaim();
+        root.publishPanelState();
 
         // ── An interval edit does not outlive the card it was opened in ──
         //
@@ -1122,6 +1224,21 @@ Scope {
     }
 
     function close(reason) {
+        // The one close that is not a dismissal of the card: a desktop switch
+        // takes its whole context away, so it does not animate at all (see the
+        // `instantClose` note above for what that is and how it was measured).
+        // Decided HERE rather than in the workspace handler, so every caller
+        // naming this reason gets the same exit: the reason string is the
+        // funnel, and it is the only thing a caller has to know.
+        //
+        // ASSIGNED, not set. The flag tracks the close in flight, so an
+        // ordinary dismissal clears it again. (The first attempt cleared it when
+        // the animation finished, which was wrong in a way worth recording: the
+        // quiet branch calls `tAnim.stop()` before it re-targets, `stop()` drops
+        // `running`, and the handler ran there -- so the flag was cleared one
+        // line before the quiet spec was applied and the card still slid.
+        // MEASURED: 5px of the 40px slide, read at t=0.89.)
+        root.instantClose = reason === "desktop switch";
         // `reason` is optional so the many existing callers keep working; the
         // ones that ARE a dismissal path name themselves, and the rest report
         // as a plain close. What happens to an open interval edit when the card
@@ -1191,37 +1308,177 @@ Scope {
     // -- one object per signal, which is the rule this file has been bitten by
     // before.
     //
-    // The target is `HyprlandData`, not the `Hyprland` singleton the file
-    // already imports. Quickshell's own `activeWorkspace` never fired here --
-    // the card sat open straight through a desktop switch, three trials in a
-    // row -- and this project has settled on `HyprlandData` everywhere it
-    // needs to react to a workspace change (WallpaperSwipe, TaskViewContent,
-    // ActiveWindow all listen to that one).
+    // THE TRIGGER IS THE COMPOSITOR'S OWN EVENT, and how fast it arrives is the
+    // whole point of the exit above. `Hyprland.monitorFor(<the card's screen>)`
+    // is a native `HyprlandMonitor` fed by Quickshell's event socket: a desktop
+    // switch notifies `activeWorkspace` in the same batch it arrives in. This
+    // used to watch `HyprlandData.activeWorkspace` instead, which costs a
+    // forked `hyprctl activeworkspace -j` and a JSON parse FIRST -- and that
+    // wait is exactly what the instant exit cannot afford:
     //
-    // The id comparison is not optional. `HyprlandData.activeWorkspace` is
-    // re-read by running `hyprctl activeworkspace -j` again, and its
-    // `updateWorkspaces()` does exactly that on every window open, title
-    // change and monitor event. Each re-read parses fresh JSON and assigns a
-    // NEW object, so the signal fires constantly while the desktop stands
-    // still. Closing straight on the signal meant the card could not be opened
-    // at all -- it shut itself within a second of every attempt. So the last
-    // id is remembered and only a genuine CHANGE closes the card.
+    //   measured 2026-10-15, three switches, both signals timestamped inside the
+    //   shell on the same clock: the native event is 52-67ms EARLIER than the
+    //   forked read's assignment. At 60Hz that is 3-4 frames where a
+    //   full-screen blurred card is still sitting over the desktops sliding
+    //   underneath it -- the lag and the glitch, in the last place they were
+    //   still reachable.
+    //
+    // Watching the card's OWN MONITOR is also the correct scope: the card
+    // belongs to the bar of the screen it was opened on, so a switch on another
+    // screen is not this card's business at all. The forked read could not tell
+    // the two apart -- it reports the FOCUSED monitor's workspace globally.
+    // (This machine has one monitor, so that half is reasoning, not measurement:
+    // the speed half is measured, above.)
+    //
+    // ("Quickshell's `activeWorkspace` never fired here" is why this used to
+    // reach for HyprlandData, and the note is worth keeping for what it got
+    // wrong: the singleton has no `activeWorkspace` of its own -- the property
+    // lives on the MONITOR, which is what this binds. Reading a property that
+    // does not exist is a signal that never fires, which is what three trials
+    // in a row measured.)
+    //
+    // The id comparison is not optional. A monitor's workspace object is
+    // replaced as the compositor re-reads its state, so the signal can fire
+    // while the desktop stands still; closing straight on the signal alone once
+    // meant the card could not be opened at all -- it shut itself within a
+    // second of every attempt. So the last id is remembered and only a genuine
+    // CHANGE closes the card.
     //
     // -1 is "not seen yet": the first signal after startup only records the
     // desktop we are already on, so a panel that happens to be created during
     // startup does not slam itself shut.
+    readonly property var cardMonitor: Hyprland.monitorFor(root.cardScreen ?? root.fallbackScreen)
     property int lastWorkspaceId: -1
     Connections {
-        target: HyprlandData
+        target: root.cardMonitor
         function onActiveWorkspaceChanged() {
-            const id = HyprlandData.activeWorkspace?.id;
-            if (id === undefined || id === null) return;
+            const id = Number(root.cardMonitor?.activeWorkspace?.id ?? 0);
+            if (id < 1) return;
             if (root.lastWorkspaceId === -1 || root.lastWorkspaceId === id) {
                 root.lastWorkspaceId = id;
                 return;
             }
             root.lastWorkspaceId = id;
+            // Nothing on screen: a switch closes nothing, and marks nothing.
+            // Arming the quiet close anyway would leave the flag set for the
+            // NEXT close -- a press outside -- and that one is a dismissal,
+            // which is supposed to retract.
+            if (!root.open && root.t <= 0.001)
+                return;
             root.close("desktop switch");
+            // And then re-assert the exit, unconditionally.
+            //
+            // GlobalStates closes this card on the same signal (its
+            // `closeTransientPopups` is where every flag in the shell is put
+            // away), and nothing orders the two handlers: if that one ran
+            // first, the exit has already begun as an ordinary retract, and
+            // `close()` above changes no state (the flag was already false), so
+            // nothing would turn it into the instant one. Setting `t` to 0 is
+            // idempotent and stops whatever runner is going, so the card is
+            // gone in this frame whichever handler won the race -- and being
+            // gone in this frame is the whole point: the surface must not be on
+            // screen while the desktop slides.
+            root.startTransition();
+        }
+    }
+
+    // ── ...and the desktop SWIPE takes it at the gesture's own start ─────
+    //
+    // The handler above is one frame late for a swipe, and a swipe is how the
+    // desktops change on this machine. `gestures.workspace_swipe_distance` is
+    // 500 (custom/general.lua keeps it there on purpose), which means the
+    // desktop swipe is INTERACTIVE: the workspaces follow the fingers, live,
+    // and the compositor only announces the new one -- `workspace>>N` -- when
+    // the gesture is over. Measured on this pad: a four-finger desktop swipe
+    // runs 168-293ms (the shell's own tracker logs every one of them, 340 in
+    // one session's log). So for the whole gesture the compositor has no news
+    // to give, while it is busy dragging the desktops -- and this card's
+    // surface is the WHOLE OUTPUT on the Overlay layer with the compositor's
+    // blur on it (see the `instantClose` note above). A four-finger swipe is
+    // therefore 170-290ms of a frozen, foggy sheet with a dim veil on it,
+    // laid over desktops that are already moving: the "lag and glitch when
+    // switching desktops" this exit was supposed to have ended.
+    //
+    // Waiting for the compositor cannot fix that, because at the start of a
+    // swipe there is nothing to wait FOR. The shell can see it directly
+    // instead: `TouchpadSwipe` reads this pad over evdev (the same stream the
+    // compositor reads, not grabbed) and reports every gesture frame as it
+    // happens -- the bar's brightness/volume swipe already rides it. So the
+    // card is taken at the START of the gesture, one input frame after the
+    // fingers move, which is before the desktops have moved at all.
+    //
+    // WHICH gestures, though -- the wrong gate here is worse than the bug:
+    //
+    //   * FOUR fingers, minimum. Two- and three-finger horizontal swipes are
+    //     this card's OWN tab swipe, and two fingers over the bar are
+    //     brightness/volume; closing on those would take the card away from a
+    //     hand that was only changing tabs.
+    //   * SIDEWAYS, and only sideways. A four-finger VERTICAL drag is the
+    //     dismiss drag the popups share (`dragSession`, TouchpadSwipe.qml) --
+    //     the card is supposed to FOLLOW those fingers, not vanish -- and four
+    //     fingers down also means "close the focused window" in
+    //     custom/general.lua. So two ways of reading "this is the sideways one":
+    //
+    //       DOMINANCE -- sideways travel of at least three times the vertical
+    //       travel, with 1% of a pad width under it as the floor. This is the
+    //       same shape, with the same constants, that BarContent.qml already
+    //       uses to REFUSE its own vertical swipe when the gesture turns out to
+    //       be this one: one reading of the same document, so the two cannot
+    //       disagree about which gesture is in flight. It is the fast half --
+    //       both sums accumulate per frame, so it is satisfied within the first
+    //       millimetre of a real swipe and cannot be satisfied at all by a
+    //       vertical drag (this pad's vertical drift is ~1/100th of its
+    //       vertical travel, so it never gets within 3:1).
+    //
+    //       OR the tracker's OWN threshold for calling a swipe horizontal at
+    //       all (`horizontalSwipeRatio`, the same number its `horizontalSwipeEnded`
+    //       announcement gates on). That covers the hand that comes in
+    //       DIAGONALLY: Hyprland axis-locks a swipe after 10 units of travel
+    //       (gestures.workspace_swipe_direction_lock, custom/general.lua), so a
+    //       60/40 gesture still drags the desktops even though its vertical
+    //       travel is not negligible -- and the measured four-finger desktop
+    //       swipes in this shell's log all ended at 0.073-0.123 of a pad width,
+    //       so this lands well inside a real one. A four-finger vertical drag
+    //       stays near 0.017, nowhere near it.
+    //
+    // `start` (the count the gesture began with) is checked as well as the
+    // live count, because on this pad a four-finger swipe usually arrives as
+    // `start=2` and grows: three fingers simply land first. Either count being
+    // four is enough, and the live one gets there within a few frames.
+    //
+    // One predicate, and the IPC probe below calls the same one, so what a
+    // test exercises is the shipped decision and not a copy of it.
+    function desktopSwipe(fingers, start, htotal, total) {
+        if (start < 4 && fingers < 4)
+            return false;
+        if (Math.abs(htotal) > Math.abs(total) * 3 && Math.abs(htotal) > 0.01)
+            return true;
+        return Math.abs(htotal) >= TouchpadSwipe.horizontalSwipeRatio;
+    }
+    Connections {
+        target: TouchpadSwipe
+        function onMoved(dy, x, y, fingers, start) {
+            // Nothing on screen: a swipe closes nothing, and marks nothing --
+            // the same rule as the workspace handler above, and for the same
+            // reason (an armed quiet close would be inherited by the next
+            // dismissal, which is supposed to retract).
+            if (!root.open && root.t <= 0.001)
+                return;
+            if (!root.desktopSwipe(fingers, start, TouchpadSwipe.htotal, TouchpadSwipe.total))
+                return;
+            // A swipe that goes NOWHERE -- the left edge of desktop 1 is the
+            // only one left, and it shakes the screen instead of moving -- still
+            // takes the card, and that is deliberate: the gesture asked to leave
+            // this desktop, and what the card describes is this desktop. Waiting
+            // to find out whether the desktop actually moved is the same wait
+            // that put 170-290ms of frozen blur on screen in the first place.
+            //
+            // The same exit and the same reason as the workspace switch: one
+            // funnel (`close()` decides the quiet exit from the reason), and
+            // the reason is honest -- a desktop switch is exactly what the
+            // hand is doing.
+            root.close("desktop switch");
+            root.startTransition();
         }
     }
 
@@ -1477,10 +1734,23 @@ Scope {
                 opacity: root.contentOpacity
 
                 // ── Header: the tabs ─────────────────────────────────────
+                //
+                // SYMMETRIC BY CONSTRUCTION: a spacer on each side of the
+                // chips, so the five of them land on the card's own centre
+                // line -- which is where the tick row below already sits.
+                //
+                // The row used to be left-packed against a close chevron in
+                // the top-right corner, and the chevron is gone. It was one of
+                // five ways out (a press on the veil, Escape, the close
+                // shortcut and a desktop switch are the others), so the header
+                // bought a pointer exit it did not need -- and paid for it
+                // with the one thing the row is for.
                 RowLayout {
                     Layout.fillWidth: true
                     Layout.preferredHeight: root.headerHeight - 6
                     spacing: 6
+
+                    Item { Layout.fillWidth: true }
 
                     Repeater {
                         model: root.tabs
@@ -1489,12 +1759,40 @@ Scope {
                             required property var modelData
                             readonly property bool active: root.mode === modelData.m
                             Layout.alignment: Qt.AlignVCenter
-                            implicitWidth: tabRow.implicitWidth + 20
+                            // 28, not 20: at 20 the label sat close enough to
+                            // the box that the pill read as a tight fit around
+                            // the words rather than a box the words sit in.
+                            implicitWidth: tabRow.implicitWidth + 28
                             implicitHeight: 26
-                            radius: Appearance.rounding.full
+                            // A rounded rectangle, not a pill. `full` on a 26px
+                            // box is a 13px corner, and at that radius the curve
+                            // is the whole shape -- the chip stops reading as a
+                            // box with a label in it.
+                            radius: Appearance.rounding.normal
+                            // Hover is the card's OWN colour, a small step
+                            // toward its text colour -- not a wash of white, and
+                            // not a lift taken from another layer. Measured with
+                            // a pointer parked on a chip, the fill on screen is
+                            // #101010 over a #0C0C0C card: +4/255, where the old
+                            // cue (colLayer1Hover at 0.45, a blue-grey) landed
+                            // near +10, and the selected chip's own fill carries
+                            // +39.
+                            //
+                            // It is NOT `colLayer0Hover`: that token is
+                            // `transparentize(mix(colLayer0, colOnLayer0, 0.9))`,
+                            // and `transparentize` with no percentage defaults
+                            // to alpha 0 -- so the token renders as nothing at
+                            // all over any surface. Measured, not assumed: a
+                            // swatch of it over this card is pixel-identical to
+                            // the card.
                             color: tabChip.active
                                 ? ColorUtils.transparentize(Appearance.colors.colPrimary, 0.78)
-                                : tabChip.hovered ? ColorUtils.transparentize(Appearance.colors.colLayer1Hover, 0.45) : "transparent"
+                                : tabChip.hovered
+                                    ? ColorUtils.mix(Appearance.colors.colLayer0,
+                                        Appearance.colors.colOnLayer0, 0.98)
+                                    : "transparent"
+                            // The stroke stays: on a rounded-rectangle corner the
+                            // outline is what says "this one" at a glance.
                             border.width: tabChip.active ? 1 : 0
                             border.color: ColorUtils.transparentize(Appearance.colors.colPrimary, 0.4)
                             property bool hovered: false
@@ -1523,23 +1821,14 @@ Scope {
                                     iconSize: 15
                                     color: tabChip.active ? Appearance.colors.colPrimary : Appearance.colors.colOnLayer0
 
-                                    // The hover cue, and the ONLY one.
-                                    //
-                                    // This chip is a bare Rectangle with its own
-                                    // HoverHandler -- it is not a RippleButton, so
-                                    // none of that component's underline work
-                                    // reached it. What it had instead was
-                                    // `colLayer1Hover` on `hovered`: a background
-                                    // fill, which is exactly the thing that was
-                                    // asked to go away. So the one control you
-                                    // actually point at had the wrong cue, and
-                                    // every line that did exist was under some
-                                    // other button.
-                                    //
-                                    // The hover cue is the chip's own fill
-                                    // again (see `color` above): a slight rise
-                                    // toward the background, fading on the
-                                    // shell's fast colour animation. No line.
+                                    // The hover cue, and the ONLY one: the
+                                    // chip's own fill (see `color` above), one
+                                    // step lighter than the card it sits on,
+                                    // fading on the shell's fast colour
+                                    // animation. No underline, no ring -- this
+                                    // chip is a bare Rectangle with its own
+                                    // HoverHandler, not a RippleButton, so the
+                                    // fill is the whole vocabulary it has.
                                 }
                                 StyledText {
                                     anchors.verticalCenter: parent.verticalCenter
@@ -1554,21 +1843,6 @@ Scope {
                     }
 
                     Item { Layout.fillWidth: true }
-
-                    // Pop it back in (the same thing as pressing outside).
-                    RippleButton {
-                        Layout.alignment: Qt.AlignVCenter
-                        implicitWidth: 24
-                        implicitHeight: 24
-                        colRipple: Appearance.colors.colLayer1Hover
-                        onClicked: root.close("chevron")
-                        MaterialSymbol {
-                            anchors.centerIn: parent
-                            text: "keyboard_arrow_up"
-                            iconSize: 18
-                            color: Appearance.colors.colOnLayer0
-                        }
-                    }
                 }
 
                 // ── The island's tabs, continued ─────────────────────────
@@ -4614,7 +4888,7 @@ ColumnLayout {
                                                 const k = metricCell.modelData.key;
                                                 if (k === "cpu") return SystemNow.pct(SystemNow.cpuPct);
                                                 if (k === "ram") return SystemNow.pct(SystemNow.ramPct);
-                                                if (k === "gpu") return SystemNow.pct(SystemNow.gpuClockPct);
+                                                if (k === "gpu") return root.gpuMetricValue();
                                                 const t = root.cpuPackageTemp();
                                                 return t !== null ? t + "°" : "—°";
                                             }
@@ -4736,7 +5010,7 @@ ColumnLayout {
                                             const k = metricCell.modelData.key;
                                             if (k === "cpu") return ResourceUsage.cpuUsageHistory;
                                             if (k === "ram") return ResourceUsage.memoryUsageHistory;
-                                            if (k === "gpu") return SystemNow.gpuHistory;
+                                            if (k === "gpu") return root.gpuMetricSeries();
                                             return SystemNow.tempLoadHistory;
                                         }
                                         readonly property bool isTemp:
@@ -6253,10 +6527,24 @@ ColumnLayout {
     // The live half of perfGauges. Reading a service property from inside a
     // function called by a binding still registers the dependency, so these
     // re-evaluate on every sample without ever changing the model.
+    // ── The live GPU number ────────────────────────────────────────────
+    //
+    // The discrete card's utilization, by way of SystemNow (gpuMetric*), so
+    // this card, the island's gauges, the bar pocket and the task manager
+    // cannot drift apart. It briefly read the chip that renders the desktop
+    // instead; that is reverted -- see SystemNow for the two measurements that
+    // ended it ("Intel Graphics 100%" from a frozen RC6 counter).
+    function gpuMetricValue() {
+        return SystemNow.pct(SystemNow.gpuMetricPct);
+    }
+    function gpuMetricSeries() {
+        return SystemNow.gpuMetricHistory;
+    }
+
     function perfValue(key) {
         if (key === "cpu") return SystemNow.pct(SystemNow.cpuPct);
         if (key === "ram") return SystemNow.pct(SystemNow.ramPct);
-        if (key === "gpu") return SystemNow.pct(SystemNow.gpuClockPct);
+        if (key === "gpu") return root.gpuMetricValue();
         if (key === "temp") return SystemNow.tempText(SystemNow.tempC);
         return "--";
     }
@@ -6265,7 +6553,7 @@ ColumnLayout {
     function perfLoad(key) {
         if (key === "cpu") return SystemNow.cpuPct;
         if (key === "ram") return SystemNow.ramPct;
-        if (key === "gpu") return SystemNow.gpuClockPct;
+        if (key === "gpu") return SystemNow.gpuMetricPct;
         if (key === "temp") return SystemNow.tempLoad(SystemNow.tempC);
         return -1;
     }
@@ -6284,9 +6572,13 @@ ColumnLayout {
         // anywhere: it is the GPU power row further down this same tab, where
         // it reads "4.2 of 55 W" and is labelled as watts rather than implied
         // by a percentage.
-        if (key === "gpu") return root.shortGpuName() !== ""
-            ? root.shortGpuName()
-            : (SystemNow.gpuClockMhz >= 0 ? Translation.tr("%1 MHz").arg(Math.round(SystemNow.gpuClockMhz)) : "");
+        // The card the percentage belongs to: the discrete GPU, named as the
+        // inventory spells it (minus the maker suffix -- see shortGpuName).
+        if (key === "gpu") {
+            return root.shortGpuName() !== ""
+                ? root.shortGpuName()
+                : (SystemNow.gpuClockMhz >= 0 ? Translation.tr("%1 MHz").arg(Math.round(SystemNow.gpuClockMhz)) : "");
+        }
         if (key === "temp") return root.tempState(SystemNow.tempC);
         return "";
     }

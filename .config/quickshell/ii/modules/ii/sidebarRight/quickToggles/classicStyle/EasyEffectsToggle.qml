@@ -16,16 +16,18 @@ QuickToggleButton {
         EasyEffects.fetchActiveState()
     }
 
+    // Left click: toggle EasyEffects on/off
     onClicked: {
         EasyEffects.toggle()
     }
 
+    // Right click: open detailed view / configure
     altAction: () => {
         Quickshell.execDetached(["bash", "-c", "flatpak run com.github.wwmm.easyeffects || easyeffects"])
         GlobalStates.sidebarRightOpen = false
     }
 
     StyledToolTip {
-        text: Translation.tr("EasyEffects | Right-click to configure")
+        text: Translation.tr("EasyEffects | Left-click to toggle\nRight-click to configure")
     }
 }

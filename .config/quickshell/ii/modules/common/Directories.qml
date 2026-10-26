@@ -64,6 +64,11 @@ Singleton {
     property string aiChats: FileUtils.trimFileProtocol(`${Directories.state}/user/ai/chats`)
     property string aiTranslationScriptPath: FileUtils.trimFileProtocol(`${Directories.scriptPath}/ai/gemini-translate.sh`)
     property string recordScriptPath: FileUtils.trimFileProtocol(`${Directories.scriptPath}/videos/record.sh`)
+    // gpu-screen-recorder wrapper: region or monitor recording, with pause and
+    // a graceful stop. This is what services/QuickRecord.qml drives; record.sh
+    // above is the older wf-recorder path and still exists for anything that
+    // calls it directly.
+    property string recordRegionScriptPath: FileUtils.trimFileProtocol(`${Directories.scriptPath}/videos/record-region.sh`)
     property string userAvatarPathAccountsService: FileUtils.trimFileProtocol(`/var/lib/AccountsService/icons/${SystemInfo.username}`)
     property string userAvatarPathRicersAndWeirdSystems: FileUtils.trimFileProtocol(`${Directories.home}.face`)
     property string userAvatarPathRicersAndWeirdSystems2: FileUtils.trimFileProtocol(`${Directories.home}.face.icon`)

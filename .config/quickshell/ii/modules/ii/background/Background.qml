@@ -127,6 +127,18 @@ Variants {
         property int lastWorkspaceId: relevantWindows[relevantWindows.length - 1]?.workspace.id || 10
         property int workspaceChunkSize: Config?.options.bar.workspaces.shown ?? 10
         property int totalWorkspaces: Math.ceil(lastWorkspaceId / workspaceChunkSize) * workspaceChunkSize
+        // ── The OLED clock wallpaper ────────────────────────────────────
+        //
+        // When on, the PICTURE is not drawn at all; ClockWallpaper.qml paints
+        // the pen's own #282828 page and the neumorphic clock with its hourly
+        // line on it, and that is the whole desktop. (It was pure black for a
+        // while -- an OLED panel off everywhere the clock is not -- but a
+        // neumorphic dial is the same grey as its page, so on black the effect
+        // had nowhere to live.) The wallpaper PATH is deliberately left alone -- it
+        // is what the theme palette and the lock screen read, so this mode
+        // costs no re-theming and turning it off brings the picture straight
+        // back.
+        readonly property bool clockWallpaperEnabled: Config.options.background.clockWallpaper?.enable ?? false
         // Wallpaper
         // Resolved through Appearance, so with a separate light/dark wallpaper
         // turned on this follows the theme the moment it changes.
@@ -218,6 +230,11 @@ Variants {
         // the wallpaper is being hidden for safety, its colour must NOT be on
         // screen, so that branch stays as it was.
         color: {
+            // Pure black, not the picture's dominant tone: the point of the
+            // clock wallpaper is that the panel is switched off everywhere the
+            // clock is not.
+            if (bgRoot.clockWallpaperEnabled)
+                return "#000000";
             if (bgRoot.wallpaperSafetyTriggered && !bgRoot.wallpaperIsVideo)
                 return CF.ColorUtils.mix(Appearance.colors.colLayer0, Appearance.colors.colPrimary, 0.75);
             return Appearance.wallpaperDominantColor;
@@ -378,7 +395,10 @@ Variants {
                     return - bgRoot.parallaxTotalPixelsY * usedFractionY;
                 }
 
-                source: bgRoot.wallpaperSafetyTriggered ? "" : bgRoot.wallpaperPath
+                // No source at all in clock-wallpaper mode: an invisible image
+                // that still decodes a 5120x2880 JPEG is exactly the disk read
+                // this mode exists to avoid.
+                source: (bgRoot.wallpaperSafetyTriggered || bgRoot.clockWallpaperEnabled) ? "" : bgRoot.wallpaperPath
                 fillMode: Image.PreserveAspectCrop
                 Behavior on x {
                     NumberAnimation {
@@ -432,7 +452,7 @@ Variants {
                 }
                 width: wallpaper.width
                 height: wallpaper.height
-                source: bgRoot.wallpaperSafetyTriggered ? "" : bgRoot.wallpaperPath
+                source: (bgRoot.wallpaperSafetyTriggered || bgRoot.clockWallpaperEnabled) ? "" : bgRoot.wallpaperPath
                 fillMode: Image.PreserveAspectCrop
                 cache: false
                 asynchronous: true
@@ -561,6 +581,22 @@ Variants {
                 function onWallpaperStageOpenChanged() {
                     if (!GlobalStates.wallpaperStageOpen)
                         stageExitHold.restart();
+                }
+            }
+
+            // ── The clock wallpaper ────────────────────────────────────
+            //
+            // Above the blur and the theatre scrim (so a lock blur cannot
+            // smear a live clock) and below the widget canvas. Hidden while
+            // locked on purpose: the lock screen has its own clock, and two
+            // clocks on one screen is never the answer.
+            ClockWallpaper {
+                id: clockWallpaper
+                anchors.fill: parent
+                visible: bgRoot.clockWallpaperEnabled
+                opacity: GlobalStates.screenLocked ? 0 : 1
+                Behavior on opacity {
+                    NumberAnimation { duration: 320; easing.type: Easing.OutCubic }
                 }
             }
 

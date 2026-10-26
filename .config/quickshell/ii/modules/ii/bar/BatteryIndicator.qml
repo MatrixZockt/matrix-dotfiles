@@ -70,7 +70,19 @@ MouseArea {
     // the indicator sits inside the bar's own section MouseArea, which grabs the
     // press before a TapHandler can ever complete, so a handler here never
     // fired and the battery was not clickable at all.
-    onClicked: {
+    //
+    // SWAPPED 2026-10-20: the card opens on a TWO-finger tap only.
+    //
+    // A one-finger tap is a left click, and it now does nothing on purpose. The
+    // battery sits at the very edge of the bar, where a careless tap is most
+    // likely, and its card is a whole window over a blurred backdrop -- the one
+    // panel here that should not appear because a finger brushed the bar's end.
+    // Two fingers (a right click) opens it, which is also how the rest of this
+    // bar's icons now treat their second gesture.
+    acceptedButtons: Qt.LeftButton | Qt.RightButton
+    onClicked: (mouse) => {
+        if (mouse.button !== Qt.RightButton)
+            return;
         if (panelLoader.item) {
             if (panelLoader.item.open)
                 panelLoader.item.close();

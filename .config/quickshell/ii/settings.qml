@@ -131,13 +131,20 @@ Window {
             icon: "apps",
             component: "QuickConfig.qml"
         },
+        // The Accounts page, which is now about the account. It used to open
+        // KeybindsConfig.qml -- the rail said "Accounts", the search index sent
+        // the words account/user/login/password to the keybinds page, and the
+        // page that could have held a password control held a shortcut list
+        // instead. Keybinds moved to its own entry below (with the keyboard it
+        // belongs to); this slug is new, so nothing that opened "keybinds"
+        // changes meaning.
         {
-            name: Translation.tr("Accounts"),
-            slug: "keybinds",
+            name: Translation.tr("Account"),
+            slug: "account",
             section: "",
             group: Translation.tr("Accounts"),
             icon: "person",
-            component: "KeybindsConfig.qml"
+            component: "AccountConfig.qml"
         },
         {
             name: Translation.tr("Time & language"),
@@ -146,6 +153,18 @@ Window {
             group: Translation.tr("Time & language"),
             icon: "schedule",
             component: "KeyboardConfig.qml"
+        },
+        // Where the shortcut list ended up. Same slug as before ("keybinds"),
+        // so a deep link or a search hit that already named it still lands here
+        // -- it is only the rail that moved it, next to the keyboard settings it
+        // belongs with rather than under Accounts.
+        {
+            name: Translation.tr("Keybinds"),
+            slug: "keybinds",
+            section: "",
+            group: Translation.tr("Time & language"),
+            icon: "keyboard_command_key",
+            component: "KeybindsConfig.qml"
         },
         {
             name: Translation.tr("Sound"),

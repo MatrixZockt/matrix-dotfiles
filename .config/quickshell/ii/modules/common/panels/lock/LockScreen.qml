@@ -110,6 +110,7 @@ Scope {
             }
 
             Loader {
+                id: lockSurfaceLoader
                 anchors.fill: parent
                 active: GlobalStates.screenLocked
                 sourceComponent: root.lockSurface
@@ -121,7 +122,20 @@ Scope {
                 onLoaded: {
                     item.context = lockContext;
                     if (item.backdropUrl !== undefined)
-                        item.backdropUrl = root.greeterBackdropUrl;
+                        item.backdropUrl = root.lockBackdropUrl;
+                }
+            }
+
+            // A picture picked while the screen is ALREADY locked (the
+            // wallpaper selector can do that) reaches the live surface, not
+            // just the next lock. Lives here, beside the Loader it talks to:
+            // the id above belongs to this delegate, so a Connections at the
+            // Scope's level could not see it.
+            Connections {
+                target: root
+                function onLockBackdropUrlChanged() {
+                    if (lockSurfaceLoader.item && lockSurfaceLoader.item.backdropUrl !== undefined)
+                        lockSurfaceLoader.item.backdropUrl = root.lockBackdropUrl;
                 }
             }
         }
@@ -164,6 +178,21 @@ Scope {
     // surface is created, one resolution serves every monitor, and the
     // `lock backdrop` diagnostic can read it with the screen unlocked.
     property string greeterBackdropUrl: ""
+
+    // ── ...unless a picture was picked FOR THE LOCK ──────────────────────
+    // Settings → Appearance → Lock screen picture (and the wallpaper
+    // selector's "Lock" target) write background.wallpaperPathLock. That
+    // setting used to land in hyprlock/lock-wallpaper.conf, a file the lock
+    // no longer reads now that the lock is this shell's own surface -- so
+    // picking a lock picture changed a setting and changed nothing on screen.
+    // Reading it here is what makes the setting real.
+    //
+    // Empty = follow the login picture below, which is the normal state: the
+    // lock and the login are one screen, so they show one picture.
+    readonly property string configuredLockWallpaper: Config.options.background.wallpaperPathLock ?? ""
+    readonly property string lockBackdropUrl: root.configuredLockWallpaper.length > 0
+        ? "file://" + root.configuredLockWallpaper
+        : root.greeterBackdropUrl
 
     Process {
         id: greeterBackdropProc
@@ -278,8 +307,9 @@ Scope {
         // locking to check it would need the password to undo.
         function backdrop(): string {
             root.refreshGreeterBackdrop();
-            return "backdrop=" + (root.greeterBackdropUrl.length > 0
-                ? root.greeterBackdropUrl : "NONE (flat wash)")
+            return "backdrop=" + (root.lockBackdropUrl.length > 0
+                ? root.lockBackdropUrl : "NONE (flat wash)")
+                + " source=" + (root.configuredLockWallpaper.length > 0 ? "lock" : "login")
                 + " locked=" + String(GlobalStates.screenLocked);
         }
         // Which login template the lock is about to draw, and where that

@@ -127,6 +127,17 @@ Item {
         return Appearance.colors.colSecondary;
     }
 
+    // WHICH listed card the live clock and load belong to. The counters are
+    // ONE card's (`card2/gt_*` is the Intel iGPU on this laptop) while the rail
+    // lists every chip, so printing them under the other card's name made the
+    // idle 4070 read the iGPU's 1650 MHz clock and the iGPU's graph. Matched by
+    // PCI address, the same way the resource overlay rows do it.
+    function gpuOwnsLiveNumbers(name) {
+        const gpu = (root.sys.gpus ?? []).find(entry => entry.name === name) ?? {};
+        const pci = gpu.pci ?? "";
+        return pci === "" || HardwareStats.gpuClockPci === "" || pci === HardwareStats.gpuClockPci;
+    }
+
     // The little number at the rail's right edge, per entry kind.
     function railValue(key) {
         const head = key.indexOf(":") >= 0 ? key.slice(0, key.indexOf(":")) : key;
@@ -136,8 +147,16 @@ Item {
             return (ResourceUsage.cpuUsage * 100).toFixed(0) + "%";
         case "memory":
             return (ResourceUsage.memoryUsedPercentage * 100).toFixed(0) + "%";
-        case "gpu":
+        case "gpu": {
+            if (!root.gpuOwnsLiveNumbers(name))
+                return "—";
+            // Busy fraction where the driver reports one (the chip that
+            // renders); the clock only as a fallback, because a clock is a
+            // number to explain and a percentage is not.
+            if (HardwareStats.gpuLoad >= 0)
+                return (HardwareStats.gpuLoad * 100).toFixed(0) + "%";
             return HardwareStats.gpuClockMhz > 0 ? `${HardwareStats.gpuClockMhz.toFixed(0)} MHz` : "—";
+        }
         case "disk": {
             const d = HardwareStats.disks.find(x => x.name === name);
             return d ? HardwareStats.formatBytes(Math.max(d.readBps, d.writeBps)) : "—";
@@ -705,12 +724,19 @@ Item {
 
     readonly property string pageBigValue: {
         const head = root.selectedKey.indexOf(":") >= 0 ? root.selectedKey.slice(0, root.selectedKey.indexOf(":")) : root.selectedKey;
+        const name = root.selectedKey.indexOf(":") >= 0 ? root.selectedKey.slice(root.selectedKey.indexOf(":") + 1) : "";
         switch (head) {
         case "cpu":
             return (ResourceUsage.cpuUsage * 100).toFixed(0) + "%";
         case "memory":
             return (ResourceUsage.memoryUsedPercentage * 100).toFixed(0) + "%";
         case "gpu":
+            // A percentage, like the processor and memory cards -- the same
+            // question, answered the same way (see gpuOwnsLiveNumbers).
+            if (!root.gpuOwnsLiveNumbers(name))
+                return "—";
+            if (HardwareStats.gpuLoad >= 0)
+                return (HardwareStats.gpuLoad * 100).toFixed(0) + "%";
             return HardwareStats.gpuClockMhz > 0 ? HardwareStats.gpuClockMhz.toFixed(0) : "—";
         case "disk": {
             const d = HardwareStats.disks.find(x => x.name === root.selectedKey.slice(5));
@@ -733,13 +759,19 @@ Item {
 
     readonly property string pageBigCaption: {
         const head = root.selectedKey.indexOf(":") >= 0 ? root.selectedKey.slice(0, root.selectedKey.indexOf(":")) : root.selectedKey;
+        const name = root.selectedKey.indexOf(":") >= 0 ? root.selectedKey.slice(root.selectedKey.indexOf(":") + 1) : "";
         switch (head) {
         case "cpu":
             return Translation.tr("Utilization");
         case "memory":
             return Translation.tr("In use · %1 of %2").arg(SystemFacts.bytes(ResourceUsage.memoryUsed * 1024)).arg(SystemFacts.bytes(root.sys.memory.total));
-        case "gpu":
+        case "gpu": {
+            if (!root.gpuOwnsLiveNumbers(name))
+                return Translation.tr("No live counters for this chip");
+            if (HardwareStats.gpuLoad >= 0 && HardwareStats.gpuClockMhz > 0)
+                return Translation.tr("Busy · %1 MHz").arg(HardwareStats.gpuClockMhz.toFixed(0));
             return Translation.tr("Clock · max %1").arg(HardwareStats.gpuClockMaxMhz > 0 ? `${HardwareStats.gpuClockMaxMhz.toFixed(0)} MHz` : "—");
+        }
         case "disk":
             return Translation.tr("Read + write");
         case "net":
@@ -764,7 +796,14 @@ Item {
         case "memory":
             return ResourceUsage.memoryUsageHistory;
         case "gpu":
-            return HardwareStats.gpuHistory;
+            // That card's OWN curve, never another chip's: its busy history
+            // when its driver publishes one, its clock history otherwise. A
+            // chip this desktop keeps no counters for starts empty, which is
+            // what the page's note is for.
+            if (!root.gpuOwnsLiveNumbers(name))
+                return [];
+            return HardwareStats.gpuLoad >= 0
+                ? (HardwareStats.gpuLoadHistory ?? []) : HardwareStats.gpuHistory;
         case "disk": {
             const d = HardwareStats.disks.find(x => x.name === name);
             return d?.history ?? [];
@@ -820,7 +859,12 @@ Item {
             out.push({ label: Translation.tr("Driver"), value: gpu.driver ?? "" });
             out.push({ label: Translation.tr("PCI address"), value: gpu.pci ?? "" });
             out.push({ label: Translation.tr("Device ID"), value: gpu.deviceId ?? "" });
-            out.push({ label: Translation.tr("Clock"), value: HardwareStats.gpuClockMhz > 0 ? `${HardwareStats.gpuClockMhz.toFixed(0)} MHz` : "", live: HardwareStats.gpuClockMhz > 0 });
+            {
+                const live = root.gpuOwnsLiveNumbers(name) && HardwareStats.gpuClockMhz > 0;
+                out.push({ label: Translation.tr("Clock"), value: live ? `${HardwareStats.gpuClockMhz.toFixed(0)} MHz` : "", live: live });
+                if (root.gpuOwnsLiveNumbers(name) && HardwareStats.gpuLoad >= 0)
+                    out.push({ label: Translation.tr("Load"), value: (HardwareStats.gpuLoad * 100).toFixed(0) + "%", live: true });
+            }
             if (root.sys.temperatures.length > 0) {
                 const t = root.sys.temperatures.find(x => /gpu|amdgpu|radeon|nouveau|nvidia/i.test(`${x.chip} ${x.label}`));
                 if (t)

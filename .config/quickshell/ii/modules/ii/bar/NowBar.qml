@@ -171,7 +171,21 @@ Item {
         // lands the meter is already running and there is nothing to wait for.
         if (root.audioPlaying && !root.prevAudioPlaying) {
             AudioVisualizer.warm();
-            if (root.mode !== root.modeMedia)
+            // But NOT into an open card. This handler writes `root.mode`, and
+            // the island and the popped-out card are ONE piece of state
+            // (GlobalStates.nowBarMode), so a track starting while the card was
+            // up dragged it off whatever tab the user had opened -- the exact
+            // shape of "the user opened a tab on purpose and it was taken away"
+            // that the swap timer below already documents, arriving through the
+            // one door that guard does not cover.
+            //
+            // The press-to-play case the comment above is about is untouched:
+            // nothing is popped out, the island still swaps the instant the
+            // track starts. The track still gets its waveform either way
+            // (`warm` is unconditional), and the card left where it was gets
+            // walked back to the media view by the standing swap once it
+            // closes -- see onNowBarPanelOpenChanged.
+            if (!GlobalStates.nowBarPanelOpen && root.mode !== root.modeMedia)
                 root.setMode(root.modeMedia);
         }
         root.prevAudioPlaying = root.audioPlaying;
@@ -398,21 +412,23 @@ Item {
     function perfValue(key) {
         if (key === "cpu") return SystemNow.pct(SystemNow.cpuPct);
         if (key === "ram") return SystemNow.pct(SystemNow.ramPct);
-        if (key === "gpu") return SystemNow.pct(SystemNow.gpuClockPct);
+        if (key === "gpu") return SystemNow.pct(SystemNow.gpuMetricPct);
         if (key === "temp") return SystemNow.tempText(SystemNow.tempC);
         return "--";
     }
     function perfLoad(key) {
         if (key === "cpu") return SystemNow.cpuPct;
         if (key === "ram") return SystemNow.ramPct;
-        if (key === "gpu") return SystemNow.gpuClockPct;
+        // The discrete card's utilization -- the card the gauge is named
+        // after. See SystemNow.gpuMetricPct for why it is not the renderer.
+        if (key === "gpu") return SystemNow.gpuMetricPct;
         if (key === "temp") return SystemNow.tempLoad(SystemNow.tempC);
         return -1;
     }
     function perfHistory(key) {
         if (key === "cpu") return ResourceUsage.cpuUsageHistory;
         if (key === "ram") return ResourceUsage.memoryUsageHistory;
-        if (key === "gpu") return SystemNow.gpuHistory;
+        if (key === "gpu") return SystemNow.gpuMetricHistory;
         if (key === "temp") return SystemNow.tempLoadHistory;
         return [];
     }

@@ -29,10 +29,24 @@ ShellRoot {
     id: root
 
     // Whole-screen alert border: blinks once when GlobalStates raises a
-    // screen-wide alert (the power failsafe, and its return). Deliberately NOT
-    // for a failed app launch -- that is the bar's indication line and its
-    // card. See ScreenFlash.qml.
+    // screen-wide alert -- the power failsafe and its return, and (since
+    // 2026-10-18, requested) every failed launch, whose showLoadingError()
+    // pulses the error colour here alongside the bar's line and its card.
     ScreenFlash {}
+
+    // The bottom-right corner card: one short sentence, shown on request over
+    // IPC, gone on its own. Family-independent like ScreenFlash because its
+    // callers are desktop-level scripts rather than panels. The input failsafe
+    // (SUPER+CTRL+M) used to speak here and now uses SignalToast instead, so
+    // this stays mounted as the longer-sentence channel, not as the cursor's.
+    CornerNotice {}
+
+    // The top-right "that worked" card: a bare glyph and one short label,
+    // sized to the sentence rather than to a panel width. It serves the
+    // clipboard's copied feedback and the input failsafe's cursor messages
+    // (see GlobalStates.showSignalToast and custom/scripts/fix-mouse.sh), so
+    // those two no longer live in different corners of the desktop.
+    SignalToast {}
 
     // Stuff for every panel family
 
@@ -234,11 +248,70 @@ ShellRoot {
     // `begin` can be reported as 2 or 3 fingers (they do not all land in the
     // same millisecond), so gating this on `start === 4` would quietly never
     // arm -- the same trap the tracker's own `peak` fix was about.
+    //
+    // There are TWO kinds of popup under a gesture, and they are gone at
+    // different moments:
+    //
+    //   * a FLAG popup -- the launcher, the desktop grid, the island -- keeps
+    //     no compositor grab, so nothing takes its input away and it is still
+    //     up when the gesture ends. The begin snapshot is the record of it.
+    //   * a GRAB popup -- a bar card (VPN, wifi, bluetooth, battery, the
+    //     clock) -- holds the session's input through GlobalFocusGrab, and the
+    //     compositor drops that grab AS THE SWIPE STARTS. The card is closed
+    //     before this shell has parsed the gesture's own `begin`, so the
+    //     snapshot above reads FALSE about the one popup the swipe just closed
+    //     -- and the swipe owed a desktop move that then never came. Measured
+    //     in the log: the flag popups produced "popup under the gesture"
+    //     lines, the cards produced none at all, across a whole session of
+    //     real swipes over real cards.
+    //
+    // So the second fact comes from the grab itself: when the COMPOSITOR last
+    // cleared it, which is the only way a swipe can put a card away. If that
+    // falls inside this gesture's own span, the swipe had a card under it.
+    // That clock is deliberately not moved by our own dismissals (a backdrop
+    // press, Escape, another popup opening), so "the card closed a moment ago"
+    // cannot be manufactured by anything except something taking the input.
+    //
+    // The two halves of that are named in the log, so one real swipe over one
+    // real card settles the question from the record instead of from argument:
+    // `[focusGrab] compositor cleared the grab (had=quickshell:barPanel)` is
+    // the compositor taking the card away, and the `[swipe] begin:` line right
+    // behind it says what was still standing when the decision started.
     property bool swipeHadPopup: false
     property int swipeFromWorkspace: 0
+    // When the gesture began, and how far back the grab's clear may be and
+    // still belong to it. The gesture is 150-250ms long and its `begin` line
+    // reaches the shell a few tens of ms after the fingers land, so a clear
+    // that happened as the fingers landed sits a little BEFORE the begin.
+    property double swipeStartedAt: 0
+    readonly property int swipeGrabWindowMs: 400
 
     function settleSwipePopups(travel) {
-        if (!root.swipeHadPopup)
+        const clearedAgo = GlobalFocusGrab.clearedAt > 0
+            ? Date.now() - GlobalFocusGrab.clearedAt : -1;
+        const liveAgo = GlobalFocusGrab.lastLiveAt > 0
+            ? Date.now() - GlobalFocusGrab.lastLiveAt : -1;
+        // Two clocks, because a grab popup can stop being on screen by two
+        // routes and only the first has a dismissal to its name:
+        //
+        //   `clearedAt`  the COMPOSITOR took the input away -- the swipe's own
+        //                doing, and the exact event this exists for;
+        //   `lastLiveAt` the grab list simply emptied -- a card whose loader is
+        //                torn down mid-swipe removes itself and is gone with no
+        //                dismissal called anywhere (a bar card keeps no flag,
+        //                so the grab list IS its open state and this is the only
+        //                trace of it having been there).
+        //
+        // Either one inside this gesture's span means the swipe had a popup
+        // under it and owes the desktop move. The window is deliberately short
+        // (400ms) so that a card closed by hand long before a swipe cannot arm
+        // one -- see the 140ms guard below for why a wrong arm at a wall costs
+        // nothing anyway.
+        const underGrab = (GlobalFocusGrab.clearedAt > 0
+                && GlobalFocusGrab.clearedAt >= root.swipeStartedAt - root.swipeGrabWindowMs)
+            || (GlobalFocusGrab.lastLiveAt > 0
+                && GlobalFocusGrab.lastLiveAt >= root.swipeStartedAt - root.swipeGrabWindowMs);
+        if (!root.swipeHadPopup && !underGrab)
             return;
         const hadPopup = GlobalStates.closeTransientPopups();
         const from = root.swipeFromWorkspace;
@@ -250,7 +323,9 @@ ShellRoot {
         // the desktop after.
         swipeFallback.forward = travel < 0;
         swipeFallback.restart();
-        console.log(`[swipe] popup under the gesture (closed=${hadPopup})`
+        console.log(`[swipe] popup under the gesture (closed=${hadPopup} flag=${root.swipeHadPopup}`
+            + ` byGrab=${underGrab} clearedAgo=${clearedAgo}ms lastLiveAgo=${liveAgo}ms`
+            + ` cleared=${GlobalFocusGrab.clearedNames || "-"})`
             + ` travel=${travel.toFixed(3)} from=${from} fallback=${swipeFallback.forward ? "+1" : "-1"}`);
     }
 
@@ -285,6 +360,26 @@ ShellRoot {
         function onGestureStarted(start) {
             root.swipeHadPopup = GlobalStates.transientPopupOpen;
             root.swipeFromWorkspace = Number(HyprlandData.activeWorkspace?.id ?? 0);
+            // The clock the grab half of the decision is measured against --
+            // see the two-kinds-of-popup note above.
+            root.swipeStartedAt = Date.now();
+            // One line per gesture begin that had a popup in it, present or
+            // very recent, because "why did the desktop not move?" and "why did
+            // it move?" are both questions about what was true HERE -- and for
+            // a grab popup, the answer is already "gone" by the time the end
+            // of the gesture is being decided. Printed only when there is
+            // something to say, so a day of swiping over an empty desktop
+            // leaves the log exactly as it was.
+            const clearedAgo = GlobalFocusGrab.clearedAt > 0
+                ? Date.now() - GlobalFocusGrab.clearedAt : -1;
+            const liveAgo = GlobalFocusGrab.lastLiveAt > 0
+                ? Date.now() - GlobalFocusGrab.lastLiveAt : -1;
+            if (GlobalStates.transientPopupOpen || GlobalFocusGrab.liveDismissable.length > 0
+                || (clearedAgo >= 0 && clearedAgo <= root.swipeGrabWindowMs)
+                || (liveAgo >= 0 && liveAgo <= root.swipeGrabWindowMs))
+                console.log(`[swipe] begin: flag=${GlobalStates.transientPopupOpen}`
+                    + ` grab=${GlobalFocusGrab.liveDismissable.length}`
+                    + ` clearedAgo=${clearedAgo}ms lastLiveAgo=${liveAgo}ms`);
         }
 
         function onHorizontalSwipeEnded(travel) {
@@ -380,10 +475,51 @@ ShellRoot {
         }
     }
 
-    // Removable media. The announcements are the service's; these three are
-    // how they can be checked without a screwdriver -- there is no way to plug
-    // a device in from a script, so `forget` removes one from the census and
-    // the next poll fires the real "inserted" path for it.
+    // The swipe decision, reachable by hand.
+    //
+    // Everything that decides this one is a fact about the gesture's START,
+    // and a real four-finger swipe is the only thing that can supply it -- this
+    // machine has no synthesised touchpad. `simulate` runs the REAL decision
+    // with both facts a gesture would have supplied, read now: the desktop it
+    // starts from and the moment it starts. What it answers is not "did a
+    // desktop move" (the 140ms settle timer below owns that, under its own
+    // guard) but "did the decision ARM", which is the half that was silently
+    // failing for the bar cards.
+    //
+    //   qs -c ii ipc call swipe state
+    //   qs -c ii ipc call swipe simulate -0.08
+    IpcHandler {
+        target: "swipe"
+
+        function state(): string {
+            return `ws=${Number(HyprlandData.activeWorkspace?.id ?? 0)}`
+                + ` popup=${GlobalStates.transientPopupOpen}`
+                + ` grab=${GlobalFocusGrab.liveDismissable.length}`
+                + ` clearedAgo=${GlobalFocusGrab.clearedAt > 0 ? Date.now() - GlobalFocusGrab.clearedAt : -1}ms`
+                + ` lastCleared=${GlobalFocusGrab.clearedNames || "-"}`;
+        }
+
+        function simulate(travel: string): string {
+            const value = parseFloat(travel);
+            if (isNaN(value))
+                return "travel must be a number, e.g. -0.08 (negative = leftward)";
+            root.swipeStartedAt = Date.now();
+            root.swipeFromWorkspace = Number(HyprlandData.activeWorkspace?.id ?? 0);
+            root.swipeHadPopup = GlobalStates.transientPopupOpen;
+            root.settleSwipePopups(value);
+            return `simulated travel=${value} from=${root.swipeFromWorkspace}`
+                + ` popup=${root.swipeHadPopup}`
+                + ` grabClearedAgo=${GlobalFocusGrab.clearedAt > 0 ? Date.now() - GlobalFocusGrab.clearedAt : -1}ms`;
+        }
+    }
+
+    // Removable media. The announcements are the service's; these are how they
+    // can be checked without a screwdriver -- there is no way to plug a device
+    // in from a script, so `forget` removes one from the census and the next
+    // poll fires the real "inserted" path for it. `usbForget`/`usbScan` are
+    // the same pair for the USB census, which is what a phone or a pad appears
+    // in: same notice and same click, a different question asked of a
+    // different source.
     IpcHandler {
         target: "volumes"
 
@@ -402,6 +538,19 @@ ShellRoot {
 
         function phantom(path: string, kind: string, label: string, size: string): string {
             return Volumes.phantom(path, kind, label, Number(size));
+        }
+
+        function usbForget(name: string): string {
+            return Volumes.usbForget(name);
+        }
+
+        function usbPhantom(name: string, kind: string, product: string): string {
+            return Volumes.usbPhantom(name, kind, product);
+        }
+
+        function usbScan(): string {
+            Volumes.scanUsb();
+            return "scanning (read `state` in a moment)";
         }
 
         // The automount pass, on demand: what "auto mounted when plugged in"

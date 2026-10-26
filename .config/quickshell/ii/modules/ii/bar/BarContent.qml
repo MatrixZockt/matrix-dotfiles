@@ -396,7 +396,13 @@ Item { // Bar content region
         const plainWait = GlobalStates.loadingPending
             && !GlobalStates.loadingFailed && !GlobalStates.loadingInfo;
         const label = plainWait ? Translation.tr("Opening") : Translation.tr("Status");
-        const value = GlobalStates.loadingText || "";
+        // Only a LIVE lifecycle has words. `loadingText` alone is not enough:
+        // it is a plain string that good launches used to leave behind (see
+        // finishLoading), and measuring it kept the row at the width of an
+        // app name nothing was opening.
+        const value = (GlobalStates.loadingPending || GlobalStates.loadingFailed
+            || GlobalStates.loadingInfo || GlobalStates.loadingFailureInBar)
+            ? (GlobalStates.loadingText || "") : "";
         return statusLineMetrics.advanceWidth(label)
             + 10
             + statusLineMetrics.advanceWidth(value)
@@ -472,6 +478,21 @@ Item { // Bar content region
     // layout is capped by the same number (`inlineSpace`), so the measurement
     // path and the fit test can never disagree.
     readonly property real rightIconSlotMaxW: Math.max(0, root.inlineCapW)
+
+    // Take the status row down, if it is still up and the launch lifecycle
+    // has nothing left to say. The lifecycle has THREE live flags and not
+    // every end is a change of `loadingPending` -- an "already open" notice
+    // begins with that one already false -- so the row's retirement is keyed
+    // on the whole state. Without this the row could stay armed with an
+    // empty value: a status chip that never left (2026-10-19).
+    function retireStatusRow() {
+        if (GlobalStates.loadingPending || GlobalStates.loadingFailed
+            || GlobalStates.loadingInfo || GlobalStates.loadingFailureInBar)
+            return;
+        if (root.inlinePocketId === "status" || LiquidBar.pocketId === "status")
+            root.armPocket("", root.centerXFor(soundButton),
+                root.rightIslandLeft, root.rightIslandRight);
+    }
 
     function armPocket(id, centerX, minX, maxX, forceDrop) {
         // ── THE DROP IS RETIRED (2026-10-07, user request) ──────────────
@@ -1277,7 +1298,8 @@ Item { // Bar content region
                     if (LiquidBar.pocketId === "" && root.inlinePocketId === "")
                         root.armPocket("status", root.centerXFor(soundButton),
                             root.rightIslandLeft, root.rightIslandRight);
-                } else if (root.inlinePocketId === "status" || LiquidBar.pocketId === "status") {
+                } else if (!GlobalStates.loadingFailureInBar
+                    && (root.inlinePocketId === "status" || LiquidBar.pocketId === "status")) {
                     root.armPocket("", root.centerXFor(soundButton),
                         root.rightIslandLeft, root.rightIslandRight);        }
 
@@ -1300,6 +1322,10 @@ Item { // Bar content region
                     root.armPocket("status", root.centerXFor(soundButton),
                         root.rightIslandLeft, root.rightIslandRight);
                 } else if (!GlobalStates.loadingPending
+                    // A failure that owns the row (see loadingFailureInBar) is
+                    // NOT an ending: the wait's retire must not take the row
+                    // down the instant the failure replaces it.
+                    && !GlobalStates.loadingFailureInBar
                     && (root.inlinePocketId === "status" || LiquidBar.pocketId === "status")) {
                     root.armPocket("", root.centerXFor(soundButton),
                         root.rightIslandLeft, root.rightIslandRight);
@@ -1339,9 +1365,31 @@ Item { // Bar content region
                     root.armPocket("status", root.centerXFor(soundButton),
                         root.rightIslandLeft, root.rightIslandRight);
                 } else if (!GlobalStates.loadingPending
+                    // A failure that owns the row (see loadingFailureInBar) is
+                    // NOT an ending: the wait's retire must not take the row
+                    // down the instant the failure replaces it.
+                    && !GlobalStates.loadingFailureInBar
                     && (root.inlinePocketId === "status" || LiquidBar.pocketId === "status")) {
                     root.armPocket("", root.centerXFor(soundButton),
                         root.rightIslandLeft, root.rightIslandRight);
+                }
+            }
+            // The notice and the failure end without touching `loadingPending`
+            // (both start with it already false), so their own endings take the
+            // row down here. 
+            function onLoadingInfoChanged() { root.retireStatusRow(); }
+            function onLoadingFailedChanged() { root.retireStatusRow(); }
+            // A LAUNCH FAILURE is the row's own message now (the corner card
+            // is gone for it), so it arms the row itself and holds it for the
+            // failure's twelve seconds. Its retirement runs through the same
+            // idle test, which is what keeps one state machine in charge.
+            function onLoadingFailureInBarChanged() {
+                if (GlobalStates.loadingFailureInBar) {
+                    if (LiquidBar.pocketId === "" && root.inlinePocketId === "")
+                        root.armPocket("status", root.centerXFor(soundButton),
+                            root.rightIslandLeft, root.rightIslandRight);
+                } else {
+                    root.retireStatusRow();
                 }
             }
         }
@@ -1416,7 +1464,16 @@ Item { // Bar content region
                     // nothing at all. The wait is already carried by the
                     // accent colour and the under-island line; the name
                     // stands alone, whole, in both presentations.
-                    return GlobalStates.loadingText || "";
+                    //
+                    // And only while the lifecycle is LIVE. `loadingText` is a
+                    // plain string that outlives the card in older state (see
+                    // GlobalStates.finishLoading), so the row must ask the
+                    // lifecycle, not the string, whether it has anything to
+                    // say -- otherwise it keeps painting the last app opened.
+                    const waitLive = GlobalStates.loadingPending
+                        || GlobalStates.loadingFailed || GlobalStates.loadingInfo
+                        || GlobalStates.loadingFailureInBar;
+                    return waitLive ? (GlobalStates.loadingText || "") : "";
 
                 }
                 // Battery alert and launch failure take the error colour; a
@@ -1442,13 +1499,18 @@ Item { // Bar content region
                 // both read it), so one expression drives the whole blink.
                 accent: StatusSignal.hasBatteryAlert
                     ? Appearance.colors.colError
-                    : (GlobalStates.loadingFailFlash
-                        ? (StatusSignal.loadingFailOn
-                            ? Appearance.colors.colError
-                            : ColorUtils.transparentize(Appearance.colors.colError, 0.72))
-                        : (loadingLine.blinkLive && loadingLine.blinkText !== ""
-                            ? loadingLine.blinkColor
-                            : (StatusSignal.loadingLine ? Appearance.colors.colPrimary : "transparent")))
+                    : (GlobalStates.loadingFailureInBar
+                        // Steady, not blinking: the message IS the failure, so
+                        // the words hold still while the screen's edge does the
+                        // pointing (see ScreenFlash's held mode).
+                        ? Appearance.colors.colError
+                        : (GlobalStates.loadingFailFlash
+                            ? (StatusSignal.loadingFailOn
+                                ? Appearance.colors.colError
+                                : ColorUtils.transparentize(Appearance.colors.colError, 0.72))
+                            : (loadingLine.blinkLive && loadingLine.blinkText !== ""
+                                ? loadingLine.blinkColor
+                                : (StatusSignal.loadingLine ? Appearance.colors.colPrimary : "transparent"))))
             }
         }
 
@@ -1939,7 +2001,9 @@ Item { // Bar content region
             function perfHistory(key) {
                 if (key === "cpu") return ResourceUsage.cpuUsageHistory;
                 if (key === "ram") return ResourceUsage.memoryUsageHistory;
-                if (key === "gpu") return SystemNow.gpuHistory;
+                // The discrete card the gauge names -- see
+                // SystemNow.gpuMetricPct.
+                if (key === "gpu") return SystemNow.gpuMetricHistory;
                 if (key === "temp") return SystemNow.tempLoadHistory;
                 return [];
             }
@@ -2744,12 +2808,15 @@ Item { // Bar content region
             enabled: hoverIconButton.panelComponent !== null || hoverIconButton.activateAction !== null
             cursorShape: Qt.PointingHandCursor
             onClicked: (mouse) => {
-                if (mouse.button === Qt.RightButton) {
+                if (mouse.button === Qt.LeftButton) {
+                    // Left click: toggle icon on/off
+                    if (hoverIconButton.activateAction) hoverIconButton.activateAction();
+                    else hoverIconButton.togglePanel();
+                } else if (mouse.button === Qt.RightButton) {
+                    // Right click: open detailed view
                     if (hoverIconButton.altAction) hoverIconButton.altAction();
                     return;
                 }
-                if (hoverIconButton.activateAction) hoverIconButton.activateAction();
-                else hoverIconButton.togglePanel();
             }
         }
         Loader {
@@ -3607,8 +3674,12 @@ Item { // Bar content region
     //
     //   * charge (app opening): the line fills from the left until the window
     //     arrives, then fades. GlobalStates owns this lifecycle.
-    //   * failure: the line turns the error colour for the flash window and
-    //     takes itself down. The corner card still carries the sentence.
+    //   * failure: the WHOLE line blinks -- full-width red on the on beat,
+    //     gone on the off beat, with no easing into position (the old face
+    //     LOADED UP to full width and drained, twice, then ended -- removed
+    //     on request 2026-10-18: that read as a progress meter dying, not as
+    //     an alarm). The corner card still carries the sentence and the
+    //     screen-border flare says it beyond the bar.
     //   * blink (general status -- charger connected, screenshot, ...): one
     //     soft full-width pulse in the signal's colour. Over a fullscreen app
     //     the bar is hidden, so the same pulse also renders as a tiny tell in
@@ -3640,8 +3711,18 @@ Item { // Bar content region
         // middle island names which of the two. StatusSignal owns the
         // lifecycle -- every change re-arms its clock, so a continuous swipe
         // keeps the line up for the whole gesture.
+        //
+        // It OUTRANKS the charge, deliberately. A launch in flight is progress;
+        // a value under a moving finger is the thing being SET, and the charge
+        // used to win -- so a swipe made while an app was opening drew the
+        // launch's own fill instead (100%, once the charge had run long enough
+        // to reach the end) and then, when the window arrived, slid down to the
+        // value the fingers had already set. The volume it changed was never in
+        // doubt; the bar was simply reporting the wrong face. The failure and
+        // alert faces stay above this one because they are WARNINGS, and a
+        // warning outranks a readout; progress does not.
         readonly property bool meterLive: StatusSignal.meterLive
-            && !chargeLive && !failLive && !blinkLive && !StatusSignal.hasBatteryAlert
+            && !failLive && !blinkLive && !StatusSignal.hasBatteryAlert
         readonly property bool meterIsBrightness: StatusSignal.meterKind === "brightness"
         readonly property color meterColor: meterIsBrightness
             ? Appearance.colors.colTertiary
@@ -3652,6 +3733,44 @@ Item { // Bar content region
         // but below the launch failure.
         readonly property bool alertLive: StatusSignal.hasBatteryAlert
             && !chargeLive && !failLive && !blinkLive
+
+        // -- Which face the line fades out WITH ----------------------------
+        //
+        // The meter is the line's face while it is live, and it STAYS the
+        // face while its own exit fades. Both fills below read this, because
+        // the alternative was reported and read as a deliberate signal: the
+        // instant the meter stopped, `chargeFill` -- gated only on "the meter
+        // is not live" -- appeared at the width a COMPLETED launch leaves
+        // behind (`fillProgress` is 1 from then on, until a fresh launch
+        // zeroes it), so the whole strip flashed one bright full-width bar
+        // and then faded out. The volume the fingers had just set was nowhere
+        // in that picture. With this, the meter's own fill keeps drawing at
+        // its last value for the length of the fade, which is what "the bar
+        // at the level it is, fading out" has to mean.
+        //
+        // A fresh meter clears the hold, and so does every OTHER face taking
+        // the line over: a launch's own fade must draw its own fill, not
+        // whatever volume was last set. Clearing on all four faces is what
+        // keeps this state from outliving the exit it belongs to, and the
+        // visible test retires it with the line itself.
+        property bool meterExit: false
+        readonly property bool meterFace: loadingLine.meterLive
+            || (loadingLine.meterExit && !loadingLine.chargeLive && !loadingLine.failLive
+                && !loadingLine.blinkLive && !loadingLine.alertLive)
+        onChargeLiveChanged: if (chargeLive) loadingLine.meterExit = false
+        onFailLiveChanged: if (failLive) loadingLine.meterExit = false
+        onBlinkLiveChanged: if (blinkLive) loadingLine.meterExit = false
+        onAlertLiveChanged: if (alertLive) loadingLine.meterExit = false
+        onVisibleChanged: if (!visible) loadingLine.meterExit = false
+        Connections {
+            target: StatusSignal
+            function onMeterLiveChanged() {
+                // Only a meter that was actually on screen earns the hold.
+                loadingLine.meterExit = StatusSignal.meterLive
+                    ? false
+                    : loadingLine.visible;
+            }
+        }
 
         // Edge to edge under all three islands, with the bar's own side gap
         // as breathing room on each end.
@@ -3665,8 +3784,17 @@ Item { // Bar content region
         height: 2
         visible: opacity > 0.01
         opacity: (loadingLine.chargeLive || loadingLine.failLive || loadingLine.blinkLive
-            || loadingLine.meterLive || loadingLine.alertLive || loadingLine.finishing) ? 1 : 0
+            || loadingLine.meterLive || loadingLine.alertLive || loadingLine.finishing)
+            // The failure face blinks the WHOLE line: off beat = gone, on
+            // beat = the full width in red (the fill is pinned to full while
+            // failLive -- see chargeWidth). This is the request of
+            // 2026-10-18: blink the full bar, do not load it up twice.
+            ? (loadingLine.failLive && !StatusSignal.loadingFailOn ? 0 : 1)
+            : 0
         Behavior on opacity {
+            // Hard cuts while the failure blinks (an eased blink reads as a
+            // wobble, not a flag); every other face keeps its fade.
+            enabled: !loadingLine.failLive
             animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
         }
 
@@ -3793,7 +3921,7 @@ Item { // Bar content region
                     ? ColorUtils.transparentize(loadingLine.blinkColor, 0.72)
                     : loadingLine.alertLive
                         ? ColorUtils.transparentize(Appearance.colors.colError, 0.78)
-                        : loadingLine.meterLive
+                        : loadingLine.meterFace
                             ? ColorUtils.transparentize(loadingLine.meterColor, 0.78)
                             : ColorUtils.transparentize(Appearance.colors.colPrimary, 0.78)
             Behavior on color {
@@ -3801,10 +3929,12 @@ Item { // Bar content region
             }
         }
 
-        // The fill: the charge's progress, the full-width blink, or the
-        // meter's live value. The meter fill eases so single key-press steps
-        // glide rather than teleport, but the Behavior is short enough that
-        // a continuous swipe still reads as tracking the fingers.
+        // The charge's fill: the launch's progress, or one of the blink faces.
+        // The METER has its own item, right below: the two faces carry
+        // unrelated widths (a launch's charge sits at 100% once it has run to
+        // the end and stays there until the next launch) and sharing one item
+        // let the value inherit the charge's width -- the "the bar jumps from
+        // 100 to the actual value" report.
         Rectangle {
             id: chargeFill
             anchors {
@@ -3816,16 +3946,33 @@ Item { // Bar content region
             // bypass the ease: a new launch has to appear EMPTY, and an
             // animated width would show the last launch's 100% running back
             // out of the bar first.
+            //
+            // The meter is deliberately NOT a branch here any more: what it
+            // draws has nothing to do with a charge's progress, and being one
+            // is what left a completed charge's 1.0 on the item the meter then
+            // appeared in (the meter's own fill below owns that value).
+            // The failure face is FULL width. Its blink deliberately does NOT
+            // come from a width toggle (that would read as a wobble, not a flag);
+            // the blink lives in the line's opacity instead, on/off with no
+            // animation. chargeWidth is pinned to 1 while failLive so the line
+            // stays fully lit in red during the failure blink.
             readonly property real chargeWidth: parent.width
                 * (loadingLine.blinkLive ? 1
-                    : loadingLine.failLive ? (loadingLine.failOn ? 1 : 0.04)
+                    : loadingLine.failLive ? 1
                     : loadingLine.alertLive ? (StatusSignal.batteryAlertOn ? 1 : 0.04)
-                    : loadingLine.meterLive ? StatusSignal.meterValue
                     : loadingLine.fillProgress)
             // Both branches are 0 while restarting -- fillProgress has
             // already been zeroed -- so switching the behaviour back on a
             // tick later cannot start an animation from nothing.
-            width: loadingLine.restarting ? 0 : chargeFill.chargeWidth
+            width: loadingLine.restarting ? 0 : chargeWidth
+            // Hidden, not merely overdrawn: while the meter is the line's face
+            // this fill's number is not what the bar says -- and that now
+            // covers the meter's own fade-out, where this fill used to
+            // reappear at a finished launch's 100% (see `meterFace`).
+            // The failure blink uses hard on/off in chargeWidth (set to 1 above),
+            // and the line's opacity flickers (see failLive / loadingFailOn in
+            // StatusSignal). This gives a clean flag without the wobble.
+            visible: !loadingLine.meterFace
             radius: height / 2
             color: loadingLine.failLive
                 ? Appearance.colors.colError
@@ -3833,15 +3980,47 @@ Item { // Bar content region
                     ? loadingLine.blinkColor
                     : loadingLine.alertLive
                         ? Appearance.colors.colError
-                        : loadingLine.meterLive
-                            ? loadingLine.meterColor
-                            : Appearance.colors.colPrimary
+                        : Appearance.colors.colPrimary
             Behavior on width {
                 enabled: !loadingLine.restarting
                 NumberAnimation { duration: 180; easing.type: Easing.OutQuad }
             }
             Behavior on color {
                 animation: Appearance.animation.elementMoveFast.colorAnimation.createObject(this)
+            }
+        }
+
+        // The meter's fill: brightness or volume, and nothing else.
+        //
+        // A separate item for two reasons. The first is TRUTH: this width is
+        // `StatusSignal.meterValue` and can never be anything else, so the bar
+        // shows the value the frame the face appears -- where the shared fill
+        // eased down from whatever the previous face had left on it, which for
+        // a swipe made around a launch was the charge's 100%. The second is
+        // that the width is genuinely two things: the charge's progress and the
+        // value being set were never the same number, and one item made them
+        // fight over one.
+        //
+        // The ease stays, for the reason the shared fill had one -- a single
+        // key-press step should glide rather than teleport -- but it is now
+        // confined to a live face. Zero WHILE THE LINE IS DOWN (keyed on the
+        // line, not on the face): a face that appears with the line already
+        // down grows from nothing as the line fades in, which is invisible,
+        // and one that takes over a line already up (a launch resolving mid-
+        // swipe) is untouched and so appears at the value outright.
+        Rectangle {
+            id: meterFill
+            anchors {
+                left: parent.left
+                top: parent.top
+                bottom: parent.bottom
+            }
+            visible: loadingLine.meterFace
+            width: loadingLine.visible ? parent.width * StatusSignal.meterValue : 0
+            radius: height / 2
+            color: loadingLine.meterColor
+            Behavior on width {
+                NumberAnimation { duration: 180; easing.type: Easing.OutQuad }
             }
         }
     }
@@ -3910,8 +4089,10 @@ Item { // Bar content region
             if (event.button === Qt.LeftButton) {
                 // The empty stretch of the bar used to toggle the left
                 // sidebar. It opens the desktop overview now (design A in
-                // design/desktop-view/index.html) -- the same surface the
-                // SUPER + four-finger swipe down opens. The sidebar still has
+                // design/desktop-view/index.html) -- the same surface SUPER+Tab
+                // and SUPER+Z open. (It used to be named as the SUPER +
+                // four-finger swipe down's surface as well; that gesture is
+                // removed, 2026-10-16.) The sidebar still has
                 // its own explicit entry points (its own button, SUPER+A), so
                 // nothing became unreachable; what changed is that a tap on
                 // bare bar no longer summons a panel you did not ask for.
@@ -4303,27 +4484,39 @@ Item { // Bar content region
                 // (see soundPocket); the tooltip would only repeat the level, so
                 // it carries what the bar cannot: what a click and a right click
                 // do, and that the wheel still moves the volume.
-                tooltipText: `${Translation.tr("Click: open the right sidebar")} · ${Translation.tr("Right click: mute or unmute")} · ${Translation.tr("Scroll: change volume")}`
+                tooltipText: `${Translation.tr("Click: mute or unmute")} · ${Translation.tr("Two-finger tap: quick settings overlay")} · ${Translation.tr("Scroll: change volume")}`
                 symbol.text: muted ? "volume_off" : "volume_up"
-                // OPEN, never toggle.
+                // ── Which gesture does which (2026-10-20, final) ──────────
                 //
-                // This was `sidebarRightOpen = !sidebarRightOpen`, which made a
-                // second click on an already-open sidebar CLOSE it. The bar's
-                // right section is also a click target for the whole section
-                // (see `barRightSideMouseArea`, which opens the overview), so
-                // closing by clicking the sound icon while the sidebar was
-                // already up was the fastest way to lose it -- the control you
-                // just pressed to get the panel is the one that took it away.
+                // On this desktop a 1-finger tap IS a left click and a
+                // 2-finger tap IS a right click (`tap_button_map = "1,2,3"`
+                // with `clickfinger_behavior`, custom/general.lua), so the two
+                // gestures this icon answers are simply the two buttons it can
+                // see:
                 //
-                // An "open" affordance should be idempotent: clicking it
-                // again does nothing, exactly like clicking a launcher icon for
-                // a window that is already showing. Closing the sidebar stays
-                // with the ways that mean "close" -- its own close button, the
-                // edge, the keyboard shortcut, or clicking away. This is also
-                // what the top-bar widget beside it has always done.
-                activateAction: () => GlobalStates.sidebarRightOpen = true
+                //   one finger    mute, and unmute (toggleSoundMute);
+                //   two fingers   the SUPER + G overlay (toggleOverlayFromTap).
+                //
+                // A two-finger tap arrives TWICE -- as the right click below and
+                // as the tracker's `onTapTriggered(2)` -- so exactly one of them
+                // is allowed to act. See the note under `altAction`.
+                activateAction: () => {
+                    console.log(`[tap] 1-finger tap on the sound icon: ${root.toggleSoundMute()}`);
+                }
+                // The right click is the ONLY thing that acts on a two-finger
+                // tap: a toggle has to be driven exactly once per gesture.
+                //
+                // Both paths used to call it and a time-based latch tried to
+                // collapse them. Measured in the log, that cannot work: the
+                // compositor's click lands immediately, while the tracker's
+                // report only arrives after its python process has spawned
+                // `qs ipc call` -- hundreds of milliseconds later, and variable.
+                // A latch wide enough to cover that would also swallow a
+                // deliberate second tap. So the split is not by time but by
+                // role: this click toggles, and `onTapTriggered` below only
+                // reports. Nothing to race.
                 altAction: () => {
-                    if (Audio.sink?.audio) Audio.sink.audio.muted = !Audio.sink.audio.muted;
+                    console.log(`[tap] 2-finger tap on the sound icon: ${root.toggleOverlayFromTap()}`);
                 }
                 WheelHandler {
                     acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
@@ -4576,7 +4769,7 @@ Item { // Bar content region
                         // name is missing, not the other way round: a wired
                         // link with no address yet (DHCP still running) must
                         // not fall back to "Wired connection 1".
-                        tooltipText: `${root.networkIdentity}\n${Translation.tr("Click: Wi-Fi menu")} · ${Translation.tr("Right click: turn Wi-Fi on or off")}`
+                        tooltipText: `${root.networkIdentity}\n${Translation.tr("Click: turn Wi-Fi on or off")} · ${Translation.tr("Two-finger tap: Wi-Fi menu")}`
                         symbol.text: Network.materialSymbol
                         // The panel, not the settings app (requested again
                         // 2026-10-12). A click gives you the adapter switch, the
@@ -4587,10 +4780,11 @@ Item { // Bar content region
                         // and the 802.1X cases; the header's tune button is that
                         // door, one click away.
                         property bool popupOpen: false
-                        activateAction: () => networkButton.popupOpen = !networkButton.popupOpen
-                        // Right click stays the fastest path: toggle the radio
-                        // without opening anything.
-                        altAction: () => Network.toggleWifi()
+                        // SWAPPED 2026-10-20: one finger is the fastest path
+                        // now -- toggle the radio without opening anything --
+                        // and two fingers opens the card.
+                        activateAction: () => Network.toggleWifi()
+                        altAction: () => networkButton.popupOpen = !networkButton.popupOpen
                         HoverHandler {
                             id: networkHover
                             cursorShape: Qt.PointingHandCursor
@@ -4608,18 +4802,20 @@ Item { // Bar content region
                         hovered: bluetoothHover.hovered
                         tooltipText: {
                             const device = BluetoothStatus.firstActiveDevice?.name ?? Translation.tr("No device connected");
-                            return `${device} · ${BluetoothStatus.enabled ? Translation.tr("Enabled") : Translation.tr("Disabled")}\n${Translation.tr("Click: Bluetooth menu")} · ${Translation.tr("Right click: turn Bluetooth on or off")}`;
+                            return `${device} · ${BluetoothStatus.enabled ? Translation.tr("Enabled") : Translation.tr("Disabled")}\n${Translation.tr("Click: turn Bluetooth on or off")} · ${Translation.tr("Two-finger tap: Bluetooth menu")}`;
                         }
                         symbol.text: BluetoothStatus.connected ? "bluetooth_connected" : BluetoothStatus.enabled ? "bluetooth" : "bluetooth_disabled"
                         // The panel, on the same reasoning as the Wi-Fi icon
                         // above.
                         property bool popupOpen: false
-                        activateAction: () => bluetoothButton.popupOpen = !bluetoothButton.popupOpen
-                        altAction: () => {
+                        // SWAPPED 2026-10-20, same as Wi-Fi: one finger flips
+                        // the adapter, two fingers opens the card.
+                        activateAction: () => {
                             if (!Bluetooth.defaultAdapter) return;
                             Bluetooth.defaultAdapter.enabled = !BluetoothStatus.enabled;
                             Bluetooth.defaultAdapter.discovering = BluetoothStatus.enabled ? false : true;
                         }
+                        altAction: () => bluetoothButton.popupOpen = !bluetoothButton.popupOpen
                         HoverHandler {
                             id: bluetoothHover
                             cursorShape: Qt.PointingHandCursor
@@ -4631,8 +4827,8 @@ Item { // Bar content region
 
                     // VPN. The one indicator on the bar that says whether the
                     // tailnet is up -- and the one that can bring it up
-                    // without a detour: press opens the connection list, right
-                    // click flips the tailnet where it stands.
+                    // without a detour: press flips the tailnet where it
+                    // stands, right click opens the connection list.
                     //
                     // Shown only when there is something to switch. Wi-Fi and
                     // Bluetooth are radios that always exist; the VPN is a
@@ -4654,7 +4850,7 @@ Item { // Bar content region
                         // already legible from the glyph, which fills and
                         // takes the accent when the tunnel is up.
                         hovered: vpnHover.hovered
-                        tooltipText: `${Tailscale.connected ? Translation.tr("VPN on") : Translation.tr("VPN off")} · My-Tailnet\n${Translation.tr("Click: connections")} · ${Translation.tr("Right click: turn the VPN on or off")}`
+                        tooltipText: `${Tailscale.connected ? Translation.tr("VPN on") : Translation.tr("VPN off")} · My-Tailnet\n${Translation.tr("Click: turn the VPN on or off")} · ${Translation.tr("Two-finger tap: connections")}`
                         symbol.text: Tailscale.connected ? "vpn_lock" : "vpn_key_off"
                         // The panel is driven by this flag, not by
                         // HoverIconButton's own lazy `panelComponent` loader:
@@ -4662,8 +4858,10 @@ Item { // Bar content region
                         // the flag-and-Connections arrangement below is the one
                         // the clock's calendar popup already runs on.
                         property bool popupOpen: false
-                        activateAction: () => vpnButton.popupOpen = !vpnButton.popupOpen
-                        altAction: () => Tailscale.toggle()
+                        // SWAPPED 2026-10-20: one finger flips the tailnet, two
+                        // fingers opens the connection list.
+                        activateAction: () => Tailscale.toggle()
+                        altAction: () => vpnButton.popupOpen = !vpnButton.popupOpen
                         HoverHandler {
                             id: vpnHover
                             cursorShape: Qt.PointingHandCursor
@@ -5094,6 +5292,20 @@ Item { // Bar content region
     // drift, which is the only thing it exists to reject.
     readonly property real swipeDeadzone: 0.003
     property bool swipeArmed: false
+
+    // ── How far ONE frame of a gesture may move the control ─────────────
+    // The gesture is absolute: `swipeTravel = base - total`, which is only
+    // meaningful while `total` is still the same gesture's accumulator. When
+    // the tracker restarts (or its `end` never arrives) that accumulator goes
+    // back to 0 and the whole previous travel lands in a single frame -- the
+    // control slams into a limit and walks back over the next second, which
+    // is the "sound/brightness jumps to 100% at random" report.
+    //
+    // A real pad frame cannot do that. Measured worst case on this touchpad is
+    // a flick of ~0.09 of the pad over ~130 ms, i.e. ~0.007 per frame at the
+    // tracker's rate; 0.03 is four times that, and still far below the 0.05+
+    // a reset produces. Anything beyond it is a discontinuity, not a swipe.
+    readonly property real swipeJumpLimit: 0.03
 
     // The gesture's gate, asked of the in-process tracker. Synchronous by
     // construction now: no fork, no pipe, no generation to race, and the
@@ -5570,8 +5782,17 @@ Item { // Bar content region
             root.benchTickPrev = now;
             root.benchPrev = now;
             root.benchTotal -= 0.0015;
-            if (root.benchTotal < -0.03)
+            if (root.benchTotal < -0.03) {
+                // The sweep wraps, and a wrap is TWO gestures, not one
+                // impossible frame: snapping the accumulator back to 0 while
+                // a latch is held is precisely the discontinuity
+                // `swipeJumpLimit` exists to reject, and the bench would then
+                // spend its time tripping the guard instead of measuring the
+                // path a hand takes. Re-latch exactly as a new gesture does.
                 root.benchTotal = 0;
+                root.resetSwipe();
+                root.latchSwipe(root.benchZone, root.swipeGeneration, 0);
+            }
             TouchpadSwipe.total = root.benchTotal;
             root.benchLeft -= 1;
             root.benchRan += 1;
@@ -5610,52 +5831,63 @@ Item { // Bar content region
     }
 
     // Flip one bisect switch. `name` is "writes" or "push".
-    // ── Two-finger tap on the sound icon: silence it, and put it back ────
+    // ── One-finger tap on the sound icon: mute, and unmute ────────────────
     //
-    // A tap has no pointer travel, so "on the icon" can only mean the pointer
-    // was already resting there when the fingers landed: the tap asks for the
-    // thing under it. Two-finger taps were inert on purpose before this (see
-    // shell.qml, which returns on 2), and this is the one place that gives the
-    // count a job -- deliberately here rather than in shell.qml, because the
-    // icon and its hover state are this component's.
+    // A plain mute flag, deliberately NOT the volume.
     //
-    // It TOGGLES, because a control that only ever silences is a one-way door
-    // in the place a person is likeliest to hit it by accident: the pointer can
-    // be left resting on the icon while the fingers are doing something else.
-    // The level to come back to is remembered here, so the second tap returns
-    // what the first one took rather than an arbitrary default.
-    property real preSilenceVolume: 0
+    // The previous version wrote `setSinkVolume(0)` and restored the remembered
+    // level on the next tap. Two extra volume writes per press, on the one icon
+    // that also owns a scroll handler writing the same property: the level
+    // jumped back and forth, the OSD fired twice, and a tap during a swipe
+    // fought it. That was the "glitchy" sound icon. Muting is a single flag,
+    // nothing to remember, and nothing for the swipe to race against.
+    // A one-finger tap is a single left click, so this is called once per tap.
+    // The 120ms guard is not about the tracker (it never routes a one-finger
+    // tap here) but about a click arriving twice from a stacking bug: two mute
+    // writes in a row look exactly like "the tap did nothing", which is how the
+    // glitchy icon was described. No human taps the same icon twice in 120ms.
+    property real lastMuteAt: 0
 
-    function tapSoundIcon(): string {
+    function toggleSoundMute(): string {
+        const now = Date.now();
+        if (now - root.lastMuteAt < 120)
+            return "repeat click ignored";
+        root.lastMuteAt = now;
         if (!Audio.sink?.audio)
             return "no sink";
-        const silent = (Audio.sink.audio.muted ?? false) || Audio.currentVolume() <= 0;
-        if (silent) {
-            // Back to where it was. `setSinkVolume` clears the mute itself when
-            // it moves a sink off zero (see Audio.setSinkVolume); clearing it
-            // here as well covers the other way in -- right-click mute at a
-            // non-zero level, which a tap should also undo, and where there is
-            // no zero for `setSinkVolume` to notice.
-            const back = root.preSilenceVolume > 0 ? root.preSilenceVolume : 0.25;
-            Audio.setSinkVolume(back);
-            Audio.sink.audio.muted = false;
-            return `restored ${Math.round(back * 100)}%`;
-        }
-        root.preSilenceVolume = Audio.currentVolume();
-        Audio.setSinkVolume(0);   // 0 is silence, and now says so
-        return `silenced from ${Math.round(root.preSilenceVolume * 100)}%`;
+        const muted = !(Audio.sink.audio.muted ?? false);
+        Audio.sink.audio.muted = muted;
+        return muted ? "muted" : "unmuted";
     }
 
-    // The same toggle, reachable from outside the shell. The gesture itself
-    // cannot be exercised without a touchpad, and "the tap did nothing" has
-    // three different causes -- no tracker event, the pointer resting
-    // elsewhere, or the toggle itself -- which one call separates. It reports
-    // the hover the way the real tap gates on it:
+    // ── Two-finger tap on the sound icon: the SUPER + G overlay ───────────
+    //
+    // SUPER + G is a global shortcut (`overlayToggle` in Overlay.qml) that
+    // flips `GlobalStates.overlayOpen`, so that is exactly what this flips. The
+    // gesture and the key mean the same thing, with no second implementation to
+    // drift away from the first.
+    //
+    // CALLED FROM EXACTLY ONE PLACE: the right click (`altAction`). The
+    // tracker's `onTapTriggered(2)` reports the same gesture but must not act --
+    // two toggles for one tap is open-then-instantly-close, which is what made
+    // the overlay flash for a second and vanish. See the note at the button for
+    // why a time-based latch could not fix that: the tracker's report is
+    // hundreds of milliseconds late, and variable.
+    function toggleOverlayFromTap(): string {
+        GlobalStates.overlayOpen = !GlobalStates.overlayOpen;
+        return GlobalStates.overlayOpen ? "overlay open" : "overlay closed";
+    }
+
+    // The mute toggle, reachable from outside the shell: the 1-finger tap's
+    // action, probeable without a touchpad. "The tap did nothing" has three
+    // different causes -- no click reached the icon, no sink, or the toggle
+    // itself -- which one call separates. It reports the hover the way the
+    // gesture path gates on it:
     //   qs -c ii ipc call bar soundTap
     function soundTapProbe(): string {
         if (!soundButton.hovered)
             return "pointer not on the sound icon (hover=false)";
-        return root.tapSoundIcon();
+        return root.toggleSoundMute();
     }
 
     function swipeOpt(name: string, on: string): string {
@@ -6172,10 +6404,25 @@ Item { // Bar content region
             root.swipeTravelPrev = 0;
             root.slog(`ARM rebased tr=0 total=${TouchpadSwipe.total.toFixed(4)}`);
         }
+        // ── Continuity: no single frame may jump ─────────────────────────
+        // See `swipeJumpLimit`. `swipeTravelBase` belongs to the gesture that
+        // latched it; if the accumulator behind it was reset, the next frame
+        // expresses months of old travel as one enormous step. Re-base on the
+        // CURRENT total and leave the control exactly where it is: the ghost
+        // travel is discarded, and the fingers carry on from this frame.
+        const step = root.swipeTravel - root.swipeTravelPrev;
+        if (Math.abs(step) > root.swipeJumpLimit) {
+            root.slog(`JUMP tr=${root.swipeTravel.toFixed(4)} prev=${root.swipeTravelPrev.toFixed(4)} step=${step.toFixed(4)} -- rebased to total=${TouchpadSwipe.total.toFixed(4)}`);
+            root.swipeTravelBase = TouchpadSwipe.total;
+            root.swipeTravel = 0;
+            root.swipeTravelPrev = 0;
+            return;
+        }
+
         // Direction for the hint. Deadzone on the DELTA (not on travel):
         // resting fingers wobble a few ten-thousandths and must not flip
         // the chevrons, while any real stroke crosses this instantly.
-        const dTravel = root.swipeTravel - root.swipeTravelPrev;
+        const dTravel = step;
         root.swipeTravelPrev = root.swipeTravel;
         const newDir = dTravel > 0.0015 ? "up" : (dTravel < -0.0015 ? "down" : "");
         // When the fingers reverse direction, the pipe may still be flushing
@@ -6291,11 +6538,12 @@ Item { // Bar content region
 
     Connections {
         target: TouchpadSwipe
-        // Two fingers, over the sound icon, is "silence now" (and a second tap
-        // puts the level back). Guarded on both counts: this must never be able
-        // to be confused with the three-finger play/pause or the four-finger
-        // desktop that shell.qml owns, and a two-finger tap anywhere else on
-        // the screen stays the nothing it has always been.
+        // Two fingers over the sound icon. Deliberately DOES NOT act: the right
+        // click that the same gesture synthesises already opened (or closed)
+        // the overlay, and a second toggle here is what closed it again a moment
+        // later. Reported only, so the log still shows the tracker saw the tap.
+        // Guarded as before: this must never be confusable with the three-finger
+        // play/pause or the four-finger desktop that shell.qml owns.
         function onTapTriggered(fingers) {
             if (fingers !== 2)
                 return;
@@ -6306,7 +6554,7 @@ Item { // Bar content region
                 console.log("[tap] 2-finger tap ignored: pointer not on the sound icon");
                 return;
             }
-            console.log(`[tap] 2-finger tap on the sound icon: ${root.tapSoundIcon()}`);
+            console.log("[tap] 2-finger tap on the sound icon: overlay left to the right click");
         }
         function onMoved(dy, x, y, fingers, start) {
             // Arrivals, frame gaps, the scroll block, the counter and the
@@ -6327,6 +6575,21 @@ Item { // Bar content region
         function onGestureStarted(f) {
             root.lastSwipeFrameAt = Date.now();
             root.slog(`BEGIN f=${f}`);
+        }
+        // The tracker went away: its process exited (seen as 25 kills in one
+        // session, back when its keepalive was starved and the shell mistook a
+        // resting hand for a dead reader) and is being restarted after a beat.
+        //
+        // A latch must not outlive the counter it is anchored to. The restarted
+        // tracker begins its accumulator at 0 again, so a held latch would read
+        // the next gesture's first frame as one giant swipe -- and the zone it
+        // would apply that to was chosen for the pointer position at the START
+        // of a gesture that is now over.
+        function onAvailableChanged() {
+            if (!TouchpadSwipe.available && root.swipeZone !== "") {
+                root.slog("TRACKER LOST -- dropping the latch");
+                root.resetSwipe();
+            }
         }
     }
 }

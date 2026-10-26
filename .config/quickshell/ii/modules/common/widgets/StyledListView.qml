@@ -20,6 +20,14 @@ ListView {
     // fade in from this value too, so a list that only wants a soft scale-in
     // would arrive already visible.
     property real addScaleFrom: 0
+    // An OVERRIDE for how long a newly added card takes to arrive, and how
+    // long a removed one takes to leave. 0 keeps the shared `elementMove`
+    // clock (500ms), which is what every list in the shell uses. The corner
+    // popup sets its own SHORTER clock: an arrival there is feedback, and a
+    // card that is still fading in half a second later is late rather than
+    // smooth (2026-10-19).
+    property int addDuration: 0
+    property int removeDuration: 0
     property bool animateAppearance: true
     property bool animateMovement: false
     // Accumulated scroll destination so wheel deltas stack while animating
@@ -352,8 +360,53 @@ ListView {
             root.fling.reset();
     }
 
+    // The override animations, as Components for the same reason the shared
+    // ones are: `animations` is a QML list of already-created objects, so a
+    // declaration cannot sit inline in the JS array that decides between the
+    // two clocks.
+    Component {
+        id: addFadeAnimation
+        NumberAnimation {
+            duration: root.addDuration
+            easing.type: Easing.OutCubic
+        }
+    }
+    Component {
+        id: addScaleAnimation
+        NumberAnimation {
+            duration: root.addDuration
+            // Past full size and back: the card "lands" instead of merely
+            // arriving, which is the goofy half of the popup's entrance.
+            easing.type: Easing.OutBack
+            easing.overshoot: 1.9
+        }
+    }
+    Component {
+        id: removeAnimation
+        NumberAnimation {
+            duration: root.removeDuration
+            easing.type: Easing.InCubic
+        }
+    }
+
     add: Transition {
-        animations: animateAppearance ? [
+        animations: animateAppearance ? (root.addDuration > 0 ? [
+            // The list's own arrival clock. Opacity comes in fast; the scale
+            // goes through OutBack, so the card pops a hair PAST full size and
+            // settles. Both share `addDuration` with the card's own drop
+            // translate, so the entrance is one gesture instead of a fade
+            // still running after the card has landed.
+            addFadeAnimation.createObject(this, {
+                property: "opacity",
+                from: 0,
+                to: 1,
+            }),
+            ...(popin ? [addScaleAnimation.createObject(this, {
+                property: "scale",
+                from: root.addScaleFrom,
+                to: 1,
+            })] : []),
+        ] : [
             Appearance?.animation.elementMove.numberAnimation.createObject(this, {
                 property: "opacity",
                 from: 0,
@@ -368,7 +421,7 @@ ListView {
                 from: root.addScaleFrom,
                 to: 1,
             })] : []),
-        ] : []
+        ]) : []
     }
 
     addDisplaced: Transition {
@@ -419,7 +472,20 @@ ListView {
     }
 
     remove: Transition {
-        animations: animateAppearance ? [
+        animations: animateAppearance ? (root.removeDuration > 0 ? [
+            // The popup's exit, shorter than its entrance on purpose: a card
+            // that is done should be GONE. Sliding out over the same half
+            // second it took to arrive read as the toast lingering after the
+            // confirmation had already been read.
+            removeAnimation.createObject(this, {
+                property: "x",
+                to: root.width + root.removeOvershoot,
+            }),
+            removeAnimation.createObject(this, {
+                property: "opacity",
+                to: 0,
+            }),
+        ] : [
             Appearance?.animation.elementMove.numberAnimation.createObject(this, {
                 property: "x",
                 to: root.width + root.removeOvershoot,
@@ -428,7 +494,7 @@ ListView {
                 property: "opacity",
                 to: 0,
             })
-        ] : []
+        ]) : []
     }
 
     // This is movement when something is removed, not removing animation!

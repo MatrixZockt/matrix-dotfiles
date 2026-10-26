@@ -26,6 +26,68 @@ MouseArea {
     readonly property bool requirePasswordToPower: Config.options.lock.security.requirePasswordToPower
 
     // ═════════════════════════════════════════════════════════════════════
+    // THE POWER MENU — one button, three actions.
+    //
+    // Power off and restart used to be two of three glyph-only buttons in a
+    // row (Sleep, power off, restart). The two irreversible things on this
+    // screen were therefore one 34px glyph apart, told apart by nothing but
+    // the drawing inside them, and the password guard did not change that --
+    // it asks AFTER the wrong one is clicked, and the wrong one here ends the
+    // session. The right sidebar's power button already answers this, so this
+    // is that button: one glyph that opens a card of named rows, ordered from
+    // harmless to final.
+    //
+    // The guard is unchanged, and it is the reason this is a menu and not just
+    // closer spacing: picking Restart or Power off arms root.context's
+    // targetAction exactly as the old button did, so the confirm key turns
+    // into that action's glyph and the password above performs THAT action
+    // rather than an unlock. Picking the same row again takes it back.
+    // ═════════════════════════════════════════════════════════════════════
+    readonly property var powerActions: [
+        { key: "sleep",    icon: "bedtime",        label: Translation.tr("Sleep") },
+        { key: "reboot",   icon: "restart_alt",    label: Translation.tr("Restart"),   action: LockContext.ActionEnum.Reboot },
+        { key: "poweroff", icon: "settings_power", label: Translation.tr("Power off"), action: LockContext.ActionEnum.Poweroff }
+    ]
+    property bool powerMenuOpen: false
+
+    function openPowerMenu(anchorItem) {
+        // Placed from the button's own geometry, clamped to the surface: the
+        // menu is a child of this item, and the two buttons that open it (the
+        // pill toolbar's, or the sheet's) are in different parents, so anchors
+        // are not available to it.
+        const p = anchorItem.mapToItem(root, 0, 0);
+        powerMenu.x = Math.round(Math.max(8, Math.min(p.x + p.width - powerMenu.width, root.width - powerMenu.width - 8)));
+        powerMenu.y = Math.round(Math.max(8, p.y - powerMenu.height - 8));
+        root.powerMenuOpen = true;
+    }
+
+    function closePowerMenu() {
+        root.powerMenuOpen = false;
+    }
+
+    function runPowerAction(action) {
+        root.closePowerMenu();
+        // Sleep is the reversible one: it keeps the session and needs no
+        // confirmation, which is also why it is not guarded like the other two.
+        if (action.key === "sleep") {
+            Session.suspend();
+            return;
+        }
+        if (!root.contextReady)
+            return;
+        if (!root.requirePasswordToPower) {
+            root.context.unlocked(action.action);
+            return;
+        }
+        if (root.context.targetAction === action.action) {
+            root.context.resetTargetAction();
+            return;
+        }
+        root.context.targetAction = action.action;
+        root.context.shouldReFocus();
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
     // THE "sheet" ARRANGEMENT
     // ═════════════════════════════════════════════════════════════════════
     // The login screen's most distinctive template, ported here value for
@@ -78,6 +140,11 @@ MouseArea {
     acceptedButtons: Qt.LeftButton
     onPressed: mouse => {
         forceFieldFocus();
+        // Any press that is not on a control dismisses the power menu. The
+        // menu's own rows and every button here take their own press, so this
+        // only ever fires for the background -- no scrim item needed.
+        if (root.powerMenuOpen)
+            root.closePowerMenu();
     }
     onPositionChanged: mouse => {
         forceFieldFocus();
@@ -777,22 +844,13 @@ MouseArea {
             color: (Battery.isLow && !Battery.isCharging) ? Appearance.colors.colError : Appearance.colors.colOnSurfaceVariant
         }
 
+        // The one control this row has that ends anything, and it asks first
+        // (see powerActions above). `toggled` doubles as the open indicator.
         IconToolbarButton {
-            id: sleepButton
-            onClicked: Session.suspend()
-            text: "dark_mode"
-        }
-
-        PasswordGuardedIconToolbarButton {
             id: powerButton
             text: "settings_power"
-            targetAction: LockContext.ActionEnum.Poweroff
-        }
-
-        PasswordGuardedIconToolbarButton {
-            id: rebootButton
-            text: "restart_alt"
-            targetAction: LockContext.ActionEnum.Reboot
+            toggled: root.powerMenuOpen
+            onClicked: root.powerMenuOpen ? root.closePowerMenu() : root.openPowerMenu(powerButton)
         }
     }
 
@@ -1205,7 +1263,10 @@ MouseArea {
         required property string glyph
         signal triggered()
         width: 34; height: 34; radius: 4
-        color: sheetHover.containsMouse
+        // `highlighted` is the open state of the menu this button opens, drawn
+        // with the same tint as hover so it needs no second visual vocabulary.
+        property bool highlighted: false
+        color: (sheetHover.containsMouse || sheetBtn.highlighted)
             ? Qt.rgba(1, 1, 1, 0.10) : "transparent"
         border.width: 1
         border.color: Qt.rgba(root.sheetOutline.r, root.sheetOutline.g, root.sheetOutline.b, 0.35)
@@ -1237,58 +1298,101 @@ MouseArea {
         anchors.bottomMargin: 18
         spacing: 6
 
-        SheetIconButton {
-            glyph: "dark_mode"
-            onTriggered: Session.suspend()
-        }
+        // The sheet's copy of the toolbar's button: same glyph, same menu, same
+        // guard. It replaces the three-button row that stood here for the same
+        // reason (see powerActions above).
         SheetIconButton {
             id: sheetPowerBtn
             glyph: "settings_power"
-            // Same guard as the toolbar's: arm, then confirm.
-            onTriggered: {
-                if (!root.requirePasswordToPower) {
-                    root.context.unlocked(LockContext.ActionEnum.Poweroff);
-                } else if (root.context.targetAction === LockContext.ActionEnum.Poweroff) {
-                    root.context.resetTargetAction();
-                } else {
-                    root.context.targetAction = LockContext.ActionEnum.Poweroff;
-                    root.context.shouldReFocus();
-                }
-            }
+            highlighted: root.powerMenuOpen
+            onTriggered: root.powerMenuOpen ? root.closePowerMenu() : root.openPowerMenu(sheetPowerBtn)
         }
-        SheetIconButton {
-            glyph: "restart_alt"
-            onTriggered: {
-                if (!root.requirePasswordToPower) {
-                    root.context.unlocked(LockContext.ActionEnum.Reboot);
-                } else if (root.context.targetAction === LockContext.ActionEnum.Reboot) {
-                    root.context.resetTargetAction();
-                } else {
-                    root.context.targetAction = LockContext.ActionEnum.Reboot;
-                    root.context.shouldReFocus();
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // THE POWER MENU CARD, the thing the row above opens.
+    //
+    // Drawn inside this surface rather than as a Quickshell PopupWindow, which
+    // is what the sidebar's power menu next door uses: the lock is a
+    // layer-shell surface on the TOP layer, and a popup window is an ordinary
+    // toplevel -- it would be composited underneath the lock and never seen.
+    //
+    // Declared last so it paints over the toolbar and the sheet telemetry.
+    // ═════════════════════════════════════════════════════════════════════
+    Rectangle {
+        id: powerMenu
+        visible: root.powerMenuOpen
+        width: 216
+        height: powerMenuColumn.implicitHeight + 16
+        radius: Appearance.rounding.windowRounding
+        color: Appearance.colors.colLayer0
+        border.width: 1
+        border.color: Appearance.colors.colLayer0Border
+        clip: true
+
+        // Swallows presses that land on the card's own padding: without it they
+        // reach the surface's MouseArea behind and close the menu the user was
+        // aiming at. Declared first so the rows stay above it.
+        MouseArea {
+            anchors.fill: parent
+        }
+
+        Column {
+            id: powerMenuColumn
+            anchors.centerIn: parent
+            width: parent.width - 16
+            spacing: 2
+
+            Repeater {
+                model: root.powerActions
+
+                delegate: RippleButton {
+                    id: powerRow
+                    required property var modelData
+
+                    width: powerMenuColumn.width
+                    height: 40
+                    buttonRadius: powerMenu.radius - 4
+                    colBackground: "transparent"
+                    colBackgroundHover: Appearance.colors.colLayer1Hover
+                    colRipple: Appearance.colors.colLayer1Active
+                    onClicked: root.runPowerAction(powerRow.modelData)
+
+                    contentItem: RowLayout {
+                        anchors {
+                            fill: parent
+                            leftMargin: 12
+                            rightMargin: 12
+                        }
+                        spacing: 10
+
+                        MaterialSymbol {
+                            Layout.alignment: Qt.AlignVCenter
+                            text: powerRow.modelData.icon
+                            iconSize: 18
+                            color: Appearance.colors.colOnLayer0
+                        }
+
+                        StyledText {
+                            Layout.fillWidth: true
+                            Layout.alignment: Qt.AlignVCenter
+                            text: powerRow.modelData.label
+                            font.pixelSize: Appearance.font.pixelSize.small
+                            color: Appearance.colors.colOnLayer0
+                        }
+                    }
                 }
             }
         }
     }
 
-    component PasswordGuardedIconToolbarButton: IconToolbarButton {
-        id: guardedBtn
-        required property var targetAction
-
-        toggled: root.context.targetAction === guardedBtn.targetAction
-
-        onClicked: {
-            if (!root.requirePasswordToPower) {
-                root.context.unlocked(guardedBtn.targetAction);
-                return;
-            }
-            if (root.context.targetAction === guardedBtn.targetAction) {
-                root.context.resetTargetAction();
-            } else {
-                root.context.targetAction = guardedBtn.targetAction;
-                root.context.shouldReFocus();
-            }
-        }
+    // Escape closes the menu, which is what a card floating over a lock should
+    // answer to. The password field keeps focus throughout, so the menu never
+    // swallows typing -- a password typed at a locked screen must always work.
+    Shortcut {
+        sequence: "Escape"
+        enabled: root.powerMenuOpen
+        onActivated: root.closePowerMenu()
     }
 
     component IconAndTextPair: Row {

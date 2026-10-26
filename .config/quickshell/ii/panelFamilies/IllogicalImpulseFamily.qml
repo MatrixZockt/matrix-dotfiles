@@ -5,6 +5,7 @@ import qs.modules.common
 import qs.modules.ii.background
 import qs.modules.ii.bar
 import qs.modules.ii.cheatsheet
+import qs.modules.ii.colorPicker
 import qs.modules.ii.desktopIndicator
 import qs.modules.ii.dock
 import qs.modules.ii.edgeReveal
@@ -74,6 +75,8 @@ Scope {
     PanelLoader { component: DesktopOverview {} }
     PanelLoader { component: Polkit {} }
     PanelLoader { component: RegionSelector {} }
+    // The in-shell colour picker (SUPER + C; replaces hyprpicker).
+    PanelLoader { component: ColorPicker {} }
     // The SUPER+R quick-record status pill (only visible while recording).
     PanelLoader { component: RecordingPill {} }
     // The visual window sizer (SUPER+SHIFT+R / dock right-click "Resize…"):

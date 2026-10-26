@@ -13,9 +13,11 @@ QuickToggleButton {
     // Mode, so Night Light uses the lamp.
     buttonIcon: Config.options.light.night.automatic ? "wb_twilight" : "table_lamp"
     onClicked: {
+        // Left click: toggle temperature on/off
         Hyprsunset.toggleTemperature()
     }
 
+    // Right click: toggle auto mode
     altAction: () => {
         Config.options.light.night.automatic = !Config.options.light.night.automatic
     }
@@ -25,6 +27,6 @@ QuickToggleButton {
     }
     
     StyledToolTip {
-        text: Translation.tr("Night Light | Right-click to toggle Auto mode")
+        text: Translation.tr("Night Light | Left-click to toggle\nRight-click to toggle Auto mode")
     }
 }

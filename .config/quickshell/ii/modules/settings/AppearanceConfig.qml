@@ -144,8 +144,14 @@ ContentPage {
         // through pkexec -- the same privileged path other settings use.
         root.sddmStatus = Translation.tr("Installing… confirm the password prompt");
         root.regenerateHyprlockConf();
+        // pkexec, spelled out: this wrote under /usr/share and /etc as the
+        // user, so every press of Reinstall (and every login-layout change)
+        // failed on the first `install -d` and the login screen kept the
+        // picture it was installed with. SUDO_USER is passed explicitly
+        // because the script resolves the invoking user's home from it --
+        // under pkexec, plain $USER is root.
         root.sddmInstallProc.exec(["bash", "-c",
-            `"${root.sddmInstallScript}" 2>&1 && echo OK || echo FAILED`]);
+            `pkexec env SUDO_USER="$USER" bash "${root.sddmInstallScript}" 2>&1 && echo OK || echo FAILED`]);
     }
 
     Process {
@@ -528,7 +534,25 @@ ContentPage {
                     autoSwitchIntervalS: Config.options.background.autoSwitch.intervalS
                     onAutoSwitched: path => Wallpapers.apply(String(path))
                     onActivated: path => Wallpapers.apply(String(path))
-                    onAddRequested: root.openWallpaperPicker()
+                    onAddRequested: {
+                        // Ask the SHELL to run its picker, by IPC.
+                        //
+                        // The picker machinery (the job file, the dialog, the
+                        // poll that applies what comes back) lives in the
+                        // desktop shell's WallpaperModal. This page is a
+                        // SEPARATE Quickshell instance (`qs -p settings.qml`),
+                        // so GlobalStates, Directories and the rest of the
+                        // singletons here are this process's own copies -- a
+                        // signal emitted here never reaches the shell's modal,
+                        // and `requestWallpaperAdd()` from Settings did nothing
+                        // for exactly that reason.
+                        //
+                        // WallpaperModal also exposes `add()` over IPC for
+                        // this, documented there as the scriptable path to the
+                        // same function the carousel's add row calls. Same
+                        // dialog every other Open dialog on this desktop gets.
+                        Quickshell.execDetached(["qs", "-c", "ii", "ipc", "call", "wallpaperStage", "add"]);
+                    }
                     onRemoveRequested: path => {
                         pickerRemove.mp = String(path);
                         pickerRemove.restart();
@@ -593,8 +617,8 @@ ContentPage {
             WallpaperSlotCard {
                 id: lockSlot
                 slotTitle: Translation.tr("Lock screen picture")
-                slotSubtitle: root.lockWallpaperPath.length > 0 ? root.wallpaperName(root.lockWallpaperPath) : Translation.tr("Follows the desktop wallpaper")
-                slotPath: root.lockWallpaperPath.length > 0 ? root.lockWallpaperPath : Config.options.background.wallpaperPath
+                slotSubtitle: root.lockWallpaperPath.length > 0 ? root.wallpaperName(root.lockWallpaperPath) : Translation.tr("Same as the login screen")
+                slotPath: root.lockPreviewPath
                 clearable: true
                 adoptable: false
                 onPickRequested: {
@@ -648,7 +672,7 @@ ContentPage {
 
                     Image {
                         anchors.fill: parent
-                        source: Qt.resolvedUrl("file://" + (root.lockWallpaperPath.length > 0 ? root.lockWallpaperPath : Config.options.background.wallpaperPath))
+                        source: Qt.resolvedUrl("file://" + root.lockPreviewPath)
                         fillMode: Image.PreserveAspectCrop
                         asynchronous: true
                     }
@@ -1161,46 +1185,33 @@ ContentPage {
     }
 
     // ── Lock screen wallpaper ────────────────────────────────────────────
-    // The lock screen's own picture lives in hyprlock/lock-wallpaper.conf
-    // as a $background_image assignment; an empty or missing file means
-    // "follow the desktop wallpaper". Read here for the settings preview
-    // and cards; written through set-lock-wallpaper.sh, the same script
-    // the wallpaper picker uses, so both paths stay in agreement.
-    readonly property string lockWallpaperScript: `${FileUtils.trimFileProtocol(Directories.scriptPath)}/colors/set-lock-wallpaper.sh`
-    property string lockWallpaperPath: ""
+    // One value, background.wallpaperPathLock, read by the lock screen itself
+    // (modules/common/panels/lock/LockScreen.qml -> lockBackdropUrl). Empty
+    // means "the lock shows the login picture", which is the normal state.
+    //
+    // It used to be a $background_image line in hyprlock/lock-wallpaper.conf,
+    // written by set-lock-wallpaper.sh and read back from that file. The lock
+    // is the shell's own surface now and reads no such file, so a picture
+    // picked here was saved and never drawn. The config value is the one place
+    // both screens and the picker already agree on.
+    readonly property string lockWallpaperPath: Config.options.background.wallpaperPathLock ?? ""
 
-    function readLockWallpaper() {
-        const match = lockWallpaperFile.text().match(/^\$background_image\s*=\s*(.+)$/m);
-        root.lockWallpaperPath = match ? match[1].trim() : "";
-    }
-
-    FileView {
-        id: lockWallpaperFile
-        path: `${root.hyprConfigDir}/hyprlock/lock-wallpaper.conf`
-        watchChanges: true
-        onLoaded: root.readLockWallpaper()
-        onFileChanged: lockWallpaperFile.reload()
-        onLoadFailed: root.lockWallpaperPath = ""
-    }
+    // What the lock draws when no picture was picked for it: the login
+    // screen's picture, which itself falls back to the desktop wallpaper. The
+    // cards and the preview use this so they show what SUPER+L will show.
+    readonly property string lockFallbackPath: Config.options.background.wallpaperPathLogin.length > 0
+        ? Config.options.background.wallpaperPathLogin
+        : Config.options.background.wallpaperPath
+    readonly property string lockPreviewPath: root.lockWallpaperPath.length > 0
+        ? root.lockWallpaperPath
+        : root.lockFallbackPath
 
     function applyLockWallpaper(path) {
-        Quickshell.execDetached(["bash", "-c", `"${root.lockWallpaperScript}" '${path}'`]);
-        // hyprlock.conf bakes the wallpaper path in at generation time, so a
-        // new lock picture needs a regeneration to reach the lock screen.
-        root.regenerateHyprlockConf();
-        lockWallpaperReloadTimer.restart();
+        Config.options.background.wallpaperPathLock = path;
     }
 
     function clearLockWallpaper() {
-        Quickshell.execDetached(["bash", "-c", `"${root.lockWallpaperScript}" --clear`]);
-        root.regenerateHyprlockConf();
-        lockWallpaperReloadTimer.restart();
-    }
-
-    Timer {
-        id: lockWallpaperReloadTimer
-        interval: 900
-        onTriggered: lockWallpaperFile.reload()
+        Config.options.background.wallpaperPathLock = "";
     }
 
     // ── Login layout values for the preview ─────────────────────────────

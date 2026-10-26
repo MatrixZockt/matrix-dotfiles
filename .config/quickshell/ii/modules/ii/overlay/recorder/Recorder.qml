@@ -56,9 +56,13 @@ StyledOverlayWidget {
                 BigRecorderButton {
                     materialSymbol: "capture"
                     name: "Record screen"
+                    // QuickRecord, not record.sh: the latter drives wf-recorder,
+                    // which is not installed here, so this button used to close
+                    // the overlay and record nothing. Sound stays on, which is
+                    // what this entry point has always asked for.
                     onClicked: {
                         GlobalStates.overlayOpen = false;
-                        Quickshell.execDetached([Directories.recordScriptPath, "--fullscreen", "--sound"]);
+                        QuickRecord.startFullscreen(true);
                     }
                 }
             }

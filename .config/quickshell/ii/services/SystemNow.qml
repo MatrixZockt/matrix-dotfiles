@@ -158,6 +158,32 @@ Singleton {
     property var tempHistory: []
     property var gpuHistory: []
 
+    // ── What the generic "GPU" number means ────────────────────────────────
+    //
+    // The DISCRETE card: its name and its utilization (`gpuClockPct`) -- what
+    // the tile drew all along. It briefly spoke about the chip that RENDERS
+    // the desktop instead, and that was reverted on 2026-10-23 for two reasons
+    // a single screenshot showed at once, "Intel Graphics 100%":
+    //
+    //   1. It renamed the tile to a card its owner does not call "my GPU". A
+    //      correct reading of the wrong chip is still the wrong answer.
+    //   2. The number was not even correct. i915's RC6 residency counter is
+    //      FROZEN on this laptop (delta 0 ms per second), so the busy
+    //      fraction derived from it was a permanent 100% -- see
+    //      HardwareStats.gpuLoad, where that source is now gone.
+    //
+    // What was right about the attempt is kept: every chip gets its OWN row in
+    // the Resources view and the task manager, matched by PCI address
+    // (`gpuOwnsLiveNumbers`), so the integrated GPU's clock and history are no
+    // longer printed under the 4070's name.
+    //
+    // One policy in one place, because four surfaces draw it: the island's
+    // tile and graphs, the bar pocket, the task manager card and the bar's
+    // popup all read these three properties.
+    readonly property real gpuMetricPct: root.gpuClockPct
+    readonly property var gpuMetricHistory: root.gpuHistory
+    readonly property string gpuMetricName: root.gpuName
+
     // ── Temperature, normalised for the graphs ───────────────────────────
     // A temperature is a real quantity, not a fraction of anything, so a chart
     // of it needs a fixed window to mean anything: 30-90 °C, the same window

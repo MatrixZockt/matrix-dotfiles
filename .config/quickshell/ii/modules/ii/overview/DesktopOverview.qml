@@ -38,20 +38,31 @@ import qs.modules.common.functions
  *   empty desktops .... say so, instead of showing a dead preview
  *
  * What it is NOT: the existing overview. That one is a full drag-and-drop
- * window manager surface (drag a window between desktops, drag a floating
- * window to a new position, middle-click to close). This one only LOOKS and
- * JUMPS -- a click focuses a desktop, and no WINDOW is ever moved or killed.
- * The one rearrangement it offers is deliberate and explicit: press a CARD
- * and drag it onto another card to swap the two desktops' positions (see
- * swapDesktops -- workspace ids trade through a scratch id, windows never
- * move). A casual bar tap still cannot rearrange anything: a click is a
- * click until the pointer travels past the drag threshold.
+ * window manager surface. This one LOOKS, JUMPS, and -- since 2026-10-15,
+ * requested -- moves a WINDOW between desktops by hand. No window is ever
+ * killed here, and nothing moves without a deliberate gesture: two things can
+ * be rearranged by hand and each has its own grant.
+ *
+ *   a CARD ............ click-hold ~450ms, or double-tap then press-and-move:
+ *                      two desktops trade places (see reorderCells -- workspace
+ *                      ids trade through a scratch id, windows never move)
+ *   a WINDOW .......... press on a window preview inside a card and MOVE: the
+ *                      window is carried, every other card rings itself as a
+ *                      target, and releasing over one moves the window there
+ *                      and TAKES YOU WITH IT
+ *
+ * A hold on a card still means "the desktop", and a move off a window means
+ * "the window": the smaller object gets the smaller gesture, and both are
+ * decided before the pointer has travelled far. A casual bar tap still cannot
+ * rearrange anything: a click is a click until the pointer travels past a drag
+ * threshold.
  *
  * Entry points: the bar's two empty stretches (left of the clock island and
  * right of the now-bar island) used to toggle the sidebars -- they open this
- * now, and the sidebar buttons remain the explicit way in. SUPER + four-finger
- * swipe down opens it too (custom/general.lua); the plain four-finger down
- * gesture, which closes the focused window, is untouched.
+ * now, and the sidebar buttons remain the explicit way in. The SUPER +
+ * four-finger swipe down that used to open it as well is REMOVED (2026-10-16,
+ * requested); the plain four-finger down gesture, which closes the focused
+ * window, is untouched.
  *
  * Dismissal: Escape, a press outside the cards, picking a desktop, or a
  * desktop switch. The wallpaper is the shell's own (Appearance.themeWallpaperPath
@@ -215,29 +226,70 @@ Scope {
         return first.charAt(0).toUpperCase() + first.slice(1);
     }
 
-    // Resident memory of the processes behind this desktop's windows. A window
-    // knows its pid (hyprctl clients reports it), so this is the sum over the
-    // pids the desktop's windows own -- the honest "what is this desktop
-    // costing me", not a guess from the process list's app grouping.
-    function memoryFor(id) {
+    // Resident memory of the processes a desktop's windows are responsible for:
+    // the window's own pid AND everything below it, because the process holding
+    // a window is almost never the process holding the memory.
+    //
+    // Measured on this machine, 2026-10-15: Brave's window is ONE pid at 359 MB
+    // while its twenty processes total 2.84 GB, so a desktop running a browser
+    // read "RAM 1%" while the browser was costing 9% of the machine. The old sum
+    // was over the window pids alone -- honest arithmetic on the wrong set, and
+    // it under-reported every desktop whose apps are multi-process, which is
+    // every browser, Electron app and IDE there is.
+    //
+    // Attribution is by ANCESTRY, and each process is counted exactly once, by
+    // the desktop of its nearest window ancestor. Both halves matter: a helper
+    // belongs to the window it descends from rather than to whichever card
+    // happens to share its name, and an app with a window on EACH of two
+    // desktops must not be billed in full to both cards -- the same 2.84 GB on
+    // two cards would sum to 5.7 GB of a 31 GB machine and read as fact. A pid
+    // that owns windows on two desktops goes to the first, which under-counts
+    // one card rather than inventing memory that is not there.
+    //
+    // Every process with no window above it -- daemons, the compositor, the
+    // shell itself -- belongs to no desktop and is deliberately left out: this
+    // answers "what is this desktop costing me", not "what is the machine
+    // using", so the cards are not expected to add up to the bar's figure.
+    readonly property var memoryByDesktop: {
         const __t0 = Date.now();
-        const wins = root.windowsByDesktop[id] ?? [];
-        if (wins.length === 0)
-            return 0;
         const _ = ProcessList.revision; // re-read on every sample
-        const pids = {};
-        for (const win of wins) {
-            const pid = Number(win?.pid ?? 0);
-            if (pid > 0)
-                pids[pid] = true;
+        const procs = ProcessList.processes ?? [];
+        const parent = {};
+        for (const proc of procs)
+            parent[Number(proc?.pid ?? 0)] = Number(proc?.ppid ?? 0);
+        // Window pid -> the desktop its window is on, read from the shell's own
+        // window list, so the card bills the desktop it is drawing.
+        const owner = {};
+        for (const key in root.windowsByDesktop) {
+            for (const win of (root.windowsByDesktop[key] ?? [])) {
+                const pid = Number(win?.pid ?? 0);
+                if (pid > 0 && owner[pid] === undefined)
+                    owner[pid] = Number(key);
+            }
         }
-        let total = 0;
-        for (const proc of (ProcessList.processes ?? [])) {
-            if (pids[proc?.pid] === true)
-                total += Number(proc?.memory ?? 0);
+        const byDesktop = {};
+        for (const proc of procs) {
+            let cur = Number(proc?.pid ?? 0);
+            let desktop = -1;
+            // Bounded: a broken ppid chain must not walk forever. 64 is far
+            // past the deepest tree here (measured: 4).
+            for (let hops = 0; cur > 0 && hops < 64; hops++) {
+                if (owner[cur] !== undefined) {
+                    desktop = owner[cur];
+                    break;
+                }
+                cur = Number(parent[cur] ?? 0);
+            }
+            if (desktop < 1)
+                continue;
+            byDesktop[desktop] = Number(byDesktop[desktop] ?? 0) + Number(proc?.memory ?? 0);
         }
-        StatusSignal.perfMark("ovMemoryFor", Date.now() - __t0);
-        return total;
+        StatusSignal.perfMark("ovMemoryByDesktop", Date.now() - __t0);
+        return byDesktop;
+    }
+
+    function memoryFor(id) {
+        return Number(root.memoryByDesktop[id] ?? 0);
     }
 
     // The player whose window lives on this desktop, so a card can say what is
@@ -337,6 +389,294 @@ Scope {
     readonly property int holdArmMs: 450  // click-hold grant time
     readonly property int doubleTapMs: 400  // double-tap window
 
+    // ── A desktop in your hand WITHOUT a button: the lift, now with NO WAY IN ──
+    //
+    // SUPER + four-finger swipe down opens this grid, and the desktop the
+    // pointer was standing on comes up IN YOUR HAND: move the pointer and that
+    // card is carried, the neighbours part to open the gap, and the next CLICK
+    // drops it where the pointer is -- the same insert a release commits for a
+    // held card (`reorderCells`), so desktops can be arranged without
+    // click-holding anything. Escape puts it back, and the lift dies with the
+    // grid, however the grid ended.
+    //
+    // NO INPUT ASKS FOR THIS ANY MORE (2026-10-16, requested). The SUPER +
+    // four-finger swipe down that dispatched it is deleted from
+    // custom/general.lua, and SUPER+Space raises no lift request, so nothing a
+    // pointer or a key can do reaches `liftFrom` with a request standing. The
+    // machinery stays whole on purpose -- the IPC `desktopOverview lift` still
+    // drives it and one bind brings it back -- which is why this block
+    // describes a mechanism that no entry point currently enters rather than
+    // being deleted along with them.
+    //
+    // WHY THE GESTURE ALONE, and not the keys or the bar's empty stretches.
+    // Those toggle the grid with no pointer intent behind them: there is no
+    // "the desktop I meant", so a lift there would either guess or take the
+    // grid's click-to-switch away from someone who only tapped a key. The swipe
+    // is the one way in that IS a pointer action -- the cursor is parked on the
+    // desktop the fingers are on -- which is what makes "the desktop under the
+    // pointer" a fact about the gesture rather than a guess at intent. So this
+    // has its own global, dispatched by that gesture (custom/general.lua) and
+    // never by the toggle.
+    //
+    // Two flags, because the request and the state are a frame apart:
+    // `liftRequested` is set before the grid opens and spent by the open (a
+    // point can only be mapped onto a card that has been laid out), and
+    // `gestureLift` is the state that answers "is a card in hand with no press
+    // behind it" -- read by the motion handler, taken over by the press that
+    // drops it, and cleared by Escape, a close, or the drop itself.
+    property bool liftRequested: false
+    property bool gestureLift: false
+    // Where the pointer stood when the card came up, in veil coordinates. The
+    // carry is measured from here: a hover lift has no press point to be
+    // relative to.
+    property real liftOriginX: 0
+    property real liftOriginY: 0
+
+    // The pointer, from the compositor, because a hover lift rides no event of
+    // its own: the grid appears under a pointer that has not moved, and Qt
+    // delivers no motion for a surface it has only just mapped. One
+    // `hyprctl cursorpos` per lift (~13 ms, the same source the bar's own
+    // pointer reads use) answers the lift's only question -- which card is
+    // under the pointer right now. A failed read lifts nothing, which is the
+    // old behaviour and the honest one.
+    //
+    // It is also the LIFT'S KEEPER while a card is in hand: the same read on a
+    // ~40 ms beat carries the card even when the hover path has lost the
+    // pointer entirely (see `carryGestureTo`). The two writers cannot fight,
+    // because both land in that one function.
+    Process {
+        id: cursorProbe
+        command: ["hyprctl", "cursorpos", "-j"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const nums = String(this.text ?? "").match(/-?\d+/g) ?? [];
+                if (nums.length < 2)
+                    return;
+                const x = Number(nums[0]);
+                const y = Number(nums[1]);
+                // One process, two jobs, told apart by which question is live:
+                // with a card already in hand this is a CARRY, and otherwise
+                // it is the lift that just arrived.
+                if (root.gestureLift)
+                    root.carryGestureTo(x, y);
+                else
+                    root.liftFrom(x, y);
+            }
+        }
+    }
+
+    // The beat behind that keeper. Deliberately slower than the pointer's own
+    // motion: while the pointer is over the carried card the hover events are
+    // exact and this only has to agree with them, and the case it exists for --
+    // a pointer that has left the card -- is a position, not a trajectory.
+    // ~25 reads/s of a ~13 ms process for the second or so a card is in hand.
+    Timer {
+        id: liftPoll
+        interval: 40
+        repeat: true
+        running: root.gestureLift
+        onTriggered: {
+            if (!cursorProbe.running)
+                cursorProbe.running = true;
+        }
+    }
+
+    // Put the desktop under (x, y) in hand. The coordinates are the
+    // compositor's, which are the veil's: this surface is anchored over the
+    // whole monitor at 0,0, so `cellAt` -- the same lookup a drop uses --
+    // answers directly. Off the grid, or on the trailing "new desktop" slot,
+    // there is nothing to pick up and the grid simply opens.
+    function liftFrom(x, y) {
+        // ── ONLY a standing request may lift ────────────────────────────
+        // The probe is shared with the carry (see `cursorProbe`), so a read
+        // that was already in flight when the card was put down arrives a
+        // beat AFTER the drop -- with `gestureLift` false and nothing asking
+        // for anything -- and, unchecked, it read as a fresh lift and picked
+        // the card straight back up: measured after a real drop click,
+        // `gestureLift=true cell=0 desktop=1 origin=251,251`, the desktop
+        // still in hand with the grid already showing it in its new slot.
+        //
+        // The request is SPENT right here, on its first answer -- including
+        // the answer "nothing to pick up". Left standing, it would survive to
+        // the next open and lift a card for an entry point that never asked
+        // (SUPER+Tab, the bar's empty stretches) the moment the pointer
+        // happened to be over the grid.
+        if (!root.liftRequested)
+            return;
+        root.liftRequested = false;
+        if (!GlobalStates.desktopOverviewOpen)
+            return;
+        const cell = root.cellAt(x, y);
+        // Off the grid, or on the trailing "+" slot: there is no desktop
+        // there to pick up, so the grid simply opens.
+        if (cell < 0 || cell === root.cellCount - 1)
+            return;
+        root.liftOriginX = x;
+        root.liftOriginY = y;
+        root.dragArmed = true;
+        root.draggingCell = cell;
+        root.dropCell = cell;
+        root.dragOffsetX = 0;
+        root.dragOffsetY = 0;
+        root.gestureLift = true;
+    }
+
+    // ── Carrying it, in veil coordinates ───────────────────────────────
+    //
+    // ONE writer for every position the gesture lift can take, whatever told
+    // us about it: the card's own hover motion (through `mapToItem`, which
+    // folds the card's Translate back in, so the result is the pointer's true
+    // veil position) and the compositor poll below. They must not disagree --
+    // two writers racing over `dragOffset` is how a carried card ends up
+    // half a screen from the pointer -- so the arithmetic lives here once.
+    //
+    // WHY THE POLL EXISTS. The hover path can only report the pointer while
+    // the pointer is INSIDE the carried card, and the card is what it is
+    // following: one motion event that leaves the card's rect -- a fast flick,
+    // or a grid opened with the pointer already in the gap between two cards --
+    // delivers nothing further to this card, and the carry froze on the spot
+    // with `dropCell` stuck where it started. Measured on a single 590 px jump:
+    // `offset=1,1 drop=1` and then fifteen further pointer positions, all still
+    // `drop=1`. The compositor knows where the pointer is regardless of what is
+    // under it, so the lift asks it directly.
+    function carryGestureTo(x, y) {
+        if (!root.gestureLift)
+            return;
+        root.dragOffsetX = x - root.liftOriginX;
+        root.dragOffsetY = y - root.liftOriginY;
+        root.dropCell = root.cellAt(x, y);
+    }
+
+    // ── A WINDOW in your hand (as opposed to a desktop) ────────────────
+    //
+    // The cards can be rearranged by hand, and so can the apps inside them.
+    // Press on a window preview and MOVE -- past `windowDragSlop` -- and that
+    // window is carried instead of the desktop: every other card rings itself
+    // as a target, and releasing over one moves the window onto that desktop
+    // and follows it there.
+    //
+    // Travel grants this one, not a hold, and that is deliberate: a hold on a
+    // card already means "pick the desktop up". A press that never moves is
+    // still a plain click-to-switch, because the press only becomes a window
+    // grab once it has travelled.
+    //
+    // The target is read back from the cell under the pointer at drop time and
+    // never remembered from an index: what the ring showed and what the drop
+    // does are the same lookup.
+    property string dragWindowAddress: ""   // "" = nothing in hand
+    property string dragWindowLabel: ""     // app name, for the chip
+    property int dragWindowFrom: -1         // desktop it is being taken from
+    property int dragWindowTo: -1           // desktop under the pointer, -1 = none
+    property real dragWindowX: 0            // pointer, in veil coordinates
+    property real dragWindowY: 0
+    readonly property bool windowDragActive: root.dragWindowAddress !== ""
+    readonly property real windowDragSlop: 6  // px of travel that grant the grab
+
+    // The window under a point INSIDE a card, or null.
+    //
+    // The same arithmetic the preview delegates are laid out with -- win.at is
+    // monitor-absolute, the card wants it work-area-relative, both scaled by
+    // card/workAreaWidth -- so the hit test cannot disagree with what is drawn
+    // under the pointer. Later windows win, because later delegates draw on top.
+    function windowAt(card, lx, ly) {
+        if (!card || card.isNewSlot)
+            return null;
+        const scale = card.width / card.workAreaWidth;
+        let hit = null;
+        for (const win of (card.windows ?? [])) {
+            const w = (win?.size?.[0] ?? 0) * scale;
+            const h = (win?.size?.[1] ?? 0) * scale;
+            const x = ((win?.at?.[0] ?? 0) + card.workAreaX) * scale;
+            const y = ((win?.at?.[1] ?? 0) + card.workAreaY) * scale;
+            if (lx >= x && lx <= x + w && ly >= y && ly <= y + h)
+                hit = win;
+        }
+        return hit;
+    }
+
+    function appLabel(win) {
+        const cls = String(win?.class ?? "");
+        if (cls.length > 0)
+            return cls;
+        return String(win?.title ?? "") || Translation.tr("window");
+    }
+
+    function pickUpWindow(win, fromId) {
+        if (!win?.address)
+            return;
+        root.dragWindowAddress = String(win.address);
+        root.dragWindowLabel = root.appLabel(win);
+        root.dragWindowFrom = fromId;
+        root.dragWindowTo = -1;
+    }
+
+    // Pointer moved while a window is in hand: the card under it is the target.
+    //
+    // The "+" slot is NOT one. Dropping an app there would have to invent a
+    // desktop and then move the window onto it -- two actions wearing one
+    // gesture -- and the slot's own click already creates desktops on demand.
+    // The desktop it came from is not a target either: that drop is a no-op,
+    // and a ring that does nothing is a lie about what the drop will do.
+    function trackWindowDrag(px, py) {
+        // Nothing in hand, no target: a cancel (Escape) ends the gesture while
+        // the pointer may still be travelling with the button down, and a card
+        // that kept naming a desktop from that press would be promising a drop
+        // that the release can no longer make.
+        if (!root.windowDragActive) {
+            root.dragWindowTo = -1;
+            return;
+        }
+        const cell = root.cellAt(px, py);
+        let target = -1;
+        if (cell >= 0 && cell !== root.cellCount - 1) {
+            const id = root.desktopOfCell(cell);
+            if (id !== root.dragWindowFrom)
+                target = id;
+        }
+        root.dragWindowTo = target;
+        root.dragWindowX = px;
+        root.dragWindowY = py;
+    }
+
+    function cancelWindowDrag() {
+        root.dragWindowAddress = "";
+        root.dragWindowLabel = "";
+        root.dragWindowFrom = -1;
+        root.dragWindowTo = -1;
+    }
+
+    // The two dispatches a drop performs, as one function so the IPC probe and
+    // the pointer path cannot drift apart.
+    //
+    // `follow = true` IS NOT ONE OF THEM, and that is measured rather than
+    // stylistic: this fork's compositor DROPS the follow flag -- a scratch
+    // window moved to desktop 1 with follow=true landed there while the view
+    // stayed on desktop 3 (2026-10-15). "Take me with it" is therefore an
+    // explicit focus, ordered after the move so the window is already on its
+    // new desktop before the view arrives at it.
+    function moveWindowTo(address, to) {
+        if (!address || !(to >= 1))
+            return false;
+        Hyprland.dispatch(`hl.dsp.window.move({ workspace = ${to}, follow = false, window = "address:${address}" })`);
+        Hyprland.dispatch(`hl.dsp.focus({ workspace = ${to} })`);
+        return true;
+    }
+
+    // The drop. Same desktop, no target, or nothing in hand = the grab is
+    // abandoned and the grid stays up: what "never mind" looks like.
+    function dropWindowDrag() {
+        const to = root.dragWindowTo;
+        const addr = root.dragWindowAddress;
+        const from = root.dragWindowFrom;
+        root.cancelWindowDrag();
+        if (to < 0 || from < 0 || to === from || addr.length === 0)
+            return;
+        if (!root.moveWindowTo(addr, to))
+            return;
+        // The grid has done its job: you asked to go where the window went.
+        GlobalStates.desktopOverviewOpen = false;
+    }
+
     function resetDrag() {
         root.draggingCell = -1;
         root.dropCell = -1;
@@ -344,6 +684,12 @@ Scope {
         root.dragOffsetY = 0;
         root.dragArmed = false;
         root.dragHeld = false;
+        // A gesture lift goes back with everything else. This is the ONE reset
+        // every ending passes through -- Escape, the close handler, a press
+        // outside the cards -- so the lift cannot outlive the grid it belongs
+        // to and be found in hand the next time the grid opens.
+        root.gestureLift = false;
+        root.liftRequested = false;
         // Whatever released after this must not act as a tap: Escape (or a
         // close) mid-drag lifts the card, it does not switch desktops.
         root.dragConsumed = true;
@@ -555,10 +901,141 @@ Scope {
                 color: Appearance.colors.colLayer0Base
             }
 
+            // ── THE WALLPAPER IS DRAWN FROM A PRE-SCALED COPY ─────────────
+            //
+            // MEASURED 2026-10-16, and this block exists for the number:
+            // SUPER+Space held the shell's UI thread for 198-232 ms on every
+            // open, and pointing `source` straight at the wallpaper was
+            // 140-170 ms of it. The wallpaper here is a 7680x4320 PNG -- 33 M
+            // pixels, ~132 MB decoded -- painted at 1707x1067. Decoded at the
+            // file's own size it also OUTLIVES nothing: the pixmap is larger
+            // than Qt's pixmap cache, so it is evicted between opens and the
+            // whole decode is paid again on the NEXT one. That is why the cost
+            // was per-open rather than once. Opening with no wallpaper at all
+            // measured 59-83 ms, and the gap between those two numbers is
+            // this surface's, not the compositor's.
+            //
+            // `sourceSize` is NOT the fix, and it was tried and measured
+            // before this: it makes Qt decode the 8K image and then scale it,
+            // and 610-768 ms per open was the result -- worse than doing
+            // nothing, because the item has no size until the surface is up,
+            // so the bounded size arrives late and re-triggers the load.
+            //
+            // So the copy is made ONCE, off the open path, by magick -- the
+            // same tool and the same generate-then-cache shape as
+            // common/widgets/ThumbnailImage.qml -- at the surface's own PIXEL
+            // size. An open then decodes 2560x1600 instead of 7680x4320, and
+            // the cache is only rebuilt when the wallpaper or the scale
+            // changes, never on a plain open. Generation starts at shell
+            // startup (Component.onCompleted, and this component is built
+            // eagerly by PanelLoader), so even the first open finds it ready.
+            //
+            // `^` with `-extent` is the same fill-and-centre-crop that
+            // `PreserveAspectCrop` performs on screen, so the copy frames the
+            // wallpaper identically to the original it stands in for.
+            //
+            // Bounded and LATched, for the reason ThumbnailImage spells out: a
+            // 1.4 GB gzip blob in ~/Pictures/Wallpapers wears a .png name, and
+            // an unbounded retry on a file magick cannot read leaves a decoder
+            // churning forever. After two failed attempts the original is used
+            // -- slower, but visible -- which is exactly the old behaviour.
+            readonly property real pixelScale: root.monitor?.scale ?? 1
+            readonly property int scaledWidth: Math.max(1, Math.ceil(root.surfaceWidth * pixelScale))
+            readonly property int scaledHeight: Math.max(1, Math.ceil(root.surfaceHeight * pixelScale))
+            readonly property string scaledPath: {
+                if (root.wallpaperSource.length === 0) return "";
+                const src = FileUtils.trimFileProtocol(root.wallpaperSource);
+                if (src.length === 0) return "";
+                const key = Qt.md5(`${src}|${scaledWidth}x${scaledHeight}`);
+                return `${FileUtils.trimFileProtocol(Directories.cache)}/media/overview-wallpaper/${key}.png`;
+            }
+            // What the Image shows: the copy once it exists, and the original
+            // meanwhile (or for good, if the copy cannot be made).
+            property string scaledSource: ""
+            property bool scaleFailed: false
+            property int scaleAttempts: 0
+            property bool generating: false
+
+            function ensureScaled() {
+                if (scaledPath.length === 0 || root.wallpaperSource.length === 0) return;
+                if (generating || scaleFailed) return;
+                if (scaledWatch.loaded) {
+                    scaledSource = scaledPath;
+                    return;
+                }
+                if (scaleAttempts >= 2) return;
+                scaleAttempts += 1;
+                generating = true;
+                scaledGeneration.running = true;
+            }
+
+            // A new wallpaper or a new scale is a new copy, and a new question
+            // for the attempt budget: the old latch must not survive it. Both
+            // inputs feed `scaledPath`, so its change covers both.
+            function resetScaled() {
+                scaledSource = "";
+                scaleFailed = false;
+                scaleAttempts = 0;
+                scaledWatch.reload();
+            }
+            onScaledPathChanged: veil.resetScaled()
+            Component.onCompleted: veil.ensureScaled()
+
+            FileView {
+                id: scaledWatch
+                path: veil.scaledPath
+                watchChanges: true
+                onLoaded: veil.ensureScaled()
+                onLoadFailed: veil.ensureScaled()   // the interesting case: absent
+                onFileChanged: {
+                    // The generator finished: use it without a reload.
+                    veil.generating = false;
+                    veil.scaledSource = veil.scaledPath;
+                }
+            }
+
+            Process {
+                id: scaledGeneration
+                command: ["bash", "-c",
+                    `mkdir -p '${veil.scaledPath.split("/").slice(0, -1).join("/")}'`
+                    + ` && [ -s '${veil.scaledPath}' ] && exit 0`
+                    + ` || magick '${FileUtils.trimFileProtocol(root.wallpaperSource)}'`
+                    + ` -resize ${veil.scaledWidth}x${veil.scaledHeight}^`
+                    + ` -gravity center -extent ${veil.scaledWidth}x${veil.scaledHeight}`
+                    + ` '${veil.scaledPath}'`
+                ]
+                onExited: (exitCode) => {
+                    veil.generating = false;
+                    // ── The exit code is the ONLY thing to trust here ────
+                    // This first checked `scaledWatch.loaded` right after
+                    // calling `reload()`, and that is a race the shell loses
+                    // every time: the reload is asynchronous, so `loaded` is
+                    // still false at that instant, the copy was declared
+                    // missing, the failure latch was set -- and the Image fell
+                    // back to the 8K original for the rest of the session.
+                    // Measured: the open stayed at 199-209 ms with a perfectly
+                    // good 2561x1601 copy sitting in the cache, unused.
+                    //
+                    // `0` means there IS a copy: the command either found one
+                    // already (`[ -s ... ]`), or magick wrote one. Anything
+                    // else is the failure the latch exists for -- and the
+                    // reload below is only to refresh the watcher's own state,
+                    // never as the test.
+                    if (exitCode === 0)
+                        veil.scaledSource = veil.scaledPath;
+                    else
+                        veil.scaleFailed = true;
+                    scaledWatch.reload();
+                }
+            }
+
             Image {
                 id: wallpaperImage
                 anchors.fill: parent
-                source: root.wallpaperSource
+                // The pre-scaled copy when there is one, the original when
+                // there is not. The original is the FALLBACK now, not the
+                // norm: it is what made opening slow.
+                source: veil.scaledSource.length > 0 ? veil.scaledSource : root.wallpaperSource
                 cache: true
                 fillMode: Image.PreserveAspectCrop
                 // Opacity, not `visible`: a not-yet-decoded wallpaper should
@@ -580,6 +1057,41 @@ Scope {
             MouseArea {
                 anchors.fill: parent
                 onClicked: GlobalStates.desktopOverviewOpen = false
+            }
+        }
+
+        // ── The window in your hand ────────────────────────────────────────
+        //
+        // A chip under the pointer naming what is being carried and, once a card
+        // is under it, which desktop it would go to. The rings say WHERE it can
+        // go; this says WHAT is going there. Veil coordinates, same frame the
+        // drop targets are hit-tested in.
+        Item {
+            id: carriedWindow
+            visible: root.windowDragActive
+            x: root.dragWindowX + 14
+            y: root.dragWindowY + 14
+            implicitWidth: carriedLabel.implicitWidth + 24
+            implicitHeight: 34
+            z: 40
+
+            Rectangle {
+                anchors.fill: parent
+                radius: height / 2
+                color: Appearance.colors.colPrimary
+                border.width: 1
+                border.color: ColorUtils.transparentize(Appearance.colors.colOnPrimary, 0.3)
+            }
+            Text {
+                id: carriedLabel
+                anchors.centerIn: parent
+                text: root.dragWindowTo >= 0
+                    ? Translation.tr("%1 → desktop %2").arg(root.dragWindowLabel).arg(root.dragWindowTo)
+                    : root.dragWindowLabel
+                color: Appearance.colors.colOnPrimary
+                font.family: Appearance.font.family.main
+                font.pixelSize: Appearance.font.pixelSize.small
+                font.weight: Font.DemiBold
             }
         }
 
@@ -867,6 +1379,41 @@ Scope {
                             }
                         }
 
+                        // ── A window is in your hand: this card can take it ──
+                        //
+                        // Every OTHER card rings itself as a target while a
+                        // window is carried, and the one under the pointer rings
+                        // harder and says which desktop it is -- so the drop is
+                        // never a guess about which card the pointer is over.
+                        //
+                        // Inside the card, not around it: the card clips its
+                        // contents, and an outward ring would be half a ring.
+                        Rectangle {
+                            anchors.fill: parent
+                            anchors.margins: 1
+                            radius: parent.radius - 1
+                            color: "transparent"
+                            visible: root.windowDragActive && !card.isNewSlot
+                                && card.desktopId !== root.dragWindowFrom
+                            border.width: card.desktopId === root.dragWindowTo ? 3 : 1.5
+                            border.color: card.desktopId === root.dragWindowTo
+                                ? Appearance.colors.colPrimary
+                                : ColorUtils.transparentize(Appearance.colors.colPrimary, 0.5)
+                            z: 5
+                            Behavior on border.width {
+                                NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+                            }
+                            Text {
+                                anchors.centerIn: parent
+                                visible: card.desktopId === root.dragWindowTo
+                                text: Translation.tr("Drop on desktop %1").arg(card.desktopId)
+                                color: Appearance.colors.colPrimary
+                                font.family: Appearance.font.family.title
+                                font.pixelSize: Appearance.font.pixelSize.large
+                                font.weight: Font.DemiBold
+                            }
+                        }
+
                         // ── Number + window count ────────────────────────────
                         Item {
                             anchors.top: parent.top
@@ -1077,8 +1624,15 @@ Scope {
                                     // figure here goes through the same 1024
                                     // step. Without it the total read "0 GB"
                                     // and the desktop's share read "0.2 / 0".
+                                    //
+                                    // And a real cost must never round to "0%":
+                                    // a small app is not nothing, and "0%" next
+                                    // to a 0.4 GB estimate is how a card gets
+                                    // read as broken.
                                     text: Translation.tr("RAM %1 · %2 / %3 GB")
-                                        .arg(Math.round(card.memFraction * 100) + "%")
+                                        .arg(card.memFraction > 0 && card.memFraction < 0.005
+                                            ? "<1%"
+                                            : Math.round(card.memFraction * 100) + "%")
                                         .arg((card.memBytes / 1073741824).toFixed(1))
                                         .arg((ResourceUsage.memoryTotal * 1024 / 1073741824).toFixed(0))
                                     color: Appearance.colors.colSubtext
@@ -1148,13 +1702,51 @@ Scope {
                             // hold poll stands down (two writers, one
                             // pointer: two chances to disagree).
                             property bool moved: false
+                            // The window under this press (null = the press is
+                            // on the card itself), and whether this press became
+                            // a window grab rather than a desktop one.
+                            property var pressWindow: null
+                            property bool windowArmed: false
 
                             onEntered: root.selectedCell = card.index
 
                             onPressed: mouse => {
+                                // ── A card already in hand: this press takes it
+                                //    over, it does not start a new grab ──────
+                                // The gesture lifts a card with no button behind
+                                // it, so its drop is a CLICK -- and a click
+                                // begins with a press. That press ADOPTS the
+                                // lift, exactly as if it had picked the card up
+                                // itself: same press point, same grant, same
+                                // release-to-commit path below. Without this the
+                                // press would clear the grant, the release
+                                // would read as a tap, and the click would
+                                // switch desktops instead of dropping the card.
+                                if (root.gestureLift) {
+                                    cardMouse.pressX = mouse.x;
+                                    cardMouse.pressY = mouse.y;
+                                    cardMouse.moved = false;
+                                    cardMouse.pressWindow = null;
+                                    cardMouse.windowArmed = false;
+                                    root.dragHeld = true;
+                                    root.dragConsumed = false;
+                                    switchDelay.stop();
+                                    holdArm.stop();
+                                    return;
+                                }
                                 cardMouse.pressX = mouse.x;
                                 cardMouse.pressY = mouse.y;
                                 cardMouse.moved = false;
+                                // Which object this press is ON, decided the
+                                // moment it lands: a press that starts on a
+                                // window is the candidate for a window grab,
+                                // and only travel settles it (onPositionChanged).
+                                cardMouse.pressWindow = root.windowAt(card, mouse.x, mouse.y);
+                                cardMouse.windowArmed = false;
+                                // A press also abandons a grab that was somehow
+                                // still in hand -- a release the grid never saw.
+                                if (root.windowDragActive)
+                                    root.cancelWindowDrag();
                                 // A drag that released outside any card left
                                 // this set; the next press starts clean.
                                 root.dragConsumed = false;
@@ -1213,7 +1805,8 @@ Scope {
                                 running: false
                                 onTriggered: {
                                     if (!cardMouse.pressed || !root.dragHeld
-                                        || card.isNewSlot || root.dragArmed)
+                                        || card.isNewSlot || root.dragArmed
+                                        || cardMouse.windowArmed || root.windowDragActive)
                                         return;
                                     root.dragArmed = true;
                                     root.draggingCell = card.index;
@@ -1227,8 +1820,22 @@ Scope {
                             // this function is INERT -- hover cannot move
                             // a card because hover never sets `armed`.
                             function track(mx, my) {
-                                if (!root.dragArmed || !root.dragHeld
-                                    || root.draggingCell !== card.index)
+                                if (!root.dragArmed || root.draggingCell !== card.index)
+                                    return;
+                                // ── A gesture lift carries with NO press ────────
+                                // Nothing is held down, so there is no press
+                                // point to be relative to: the card follows the
+                                // pointer's travel from where the pointer stood
+                                // when the grid opened, and the drop target is
+                                // read from the same point the press path uses
+                                // (mapToItem folds the card's own Translate back
+                                // in, so this is the pointer's true position).
+                                if (root.gestureLift) {
+                                    const g = card.mapToItem(veil, mx, my);
+                                    root.carryGestureTo(g.x, g.y);
+                                    return;
+                                }
+                                if (!root.dragHeld)
                                     return;
                                 // Compensated travel (see pressX note).
                                 const dx = mx - cardMouse.pressX + root.dragOffsetX;
@@ -1246,6 +1853,31 @@ Scope {
                             onPositionChanged: mouse => {
                                 if (root.dragHeld)
                                     cardMouse.moved = true;
+                                // ── A WINDOW grab is granted by TRAVEL ────────
+                                // The card's grant is a hold; the window's is
+                                // moving off a press that began on it. Travel
+                                // arrives first in practice, so the smaller
+                                // object wins the smaller gesture -- and a press
+                                // held still still picks up the desktop.
+                                if (root.dragHeld && !root.dragArmed && !cardMouse.windowArmed
+                                    && cardMouse.pressWindow !== null
+                                    && (Math.abs(mouse.x - cardMouse.pressX) > root.windowDragSlop
+                                        || Math.abs(mouse.y - cardMouse.pressY) > root.windowDragSlop)) {
+                                    cardMouse.windowArmed = true;
+                                    // Both card grants stand down: this press
+                                    // belongs to the window now, so a desktop
+                                    // reorder must not also fire from it.
+                                    holdArm.stop();
+                                    cardMouse.doubleTapPrimed = false;
+                                    root.pickUpWindow(cardMouse.pressWindow, card.desktopId);
+                                }
+                                if (cardMouse.windowArmed) {
+                                    // Veil coordinates: the frame every drop
+                                    // target here is measured in.
+                                    const p = card.mapToItem(veil, mouse.x, mouse.y);
+                                    root.trackWindowDrag(p.x, p.y);
+                                    return;
+                                }
                                 cardMouse.track(mouse.x, mouse.y);
                             }
 
@@ -1270,6 +1902,21 @@ Scope {
 
                             onReleased: {
                                 holdArm.stop();
+                                // A carried window ends here, one way or the
+                                // other: commit if a card is under the pointer,
+                                // abandon otherwise (dropWindowDrag decides).
+                                if (cardMouse.windowArmed) {
+                                    cardMouse.windowArmed = false;
+                                    cardMouse.pressWindow = null;
+                                    root.dragHeld = false;
+                                    cardMouse.moved = false;
+                                    // The release synthesizes a click; a carried
+                                    // window must not also switch desktops.
+                                    root.dragConsumed = true;
+                                    root.dropWindowDrag();
+                                    return;
+                                }
+                                cardMouse.pressWindow = null;
                                 const wasArmed = root.dragArmed;
                                 // The press is over: any grant dies with
                                 // it. THIS is the line that makes hover
@@ -1293,6 +1940,13 @@ Scope {
                                 root.dropCell = -1;
                                 root.dragOffsetX = 0;
                                 root.dragOffsetY = 0;
+                                // Dropped: whatever was in hand is no longer.
+                                // The card the gesture lifted travels this same
+                                // path (its drop click adopts the lift on the
+                                // press), so the lift ends HERE, with the insert
+                                // it caused.
+                                root.gestureLift = false;
+                                root.liftRequested = false;
                                 if (to >= 0 && to !== from)
                                     root.reorderCells(from, to);
                             }
@@ -1342,9 +1996,12 @@ Scope {
             focus: root.open
             Keys.onPressed: event => {
                 if (event.key === Qt.Key_Escape) {
-                    // Escape puts a lifted card back before it closes the
-                    // whole grid: an aborted drag must not also dismiss.
-                    if (root.draggingCell >= 0)
+                    // Escape puts a lifted card -- or a carried window -- back
+                    // before it closes the whole grid: an aborted drag must not
+                    // also dismiss.
+                    if (root.windowDragActive)
+                        root.cancelWindowDrag();
+                    else if (root.draggingCell >= 0)
                         root.resetDrag();
                     else
                         GlobalStates.desktopOverviewOpen = false;
@@ -1437,6 +2094,20 @@ Scope {
 
     Connections {
         target: GlobalStates
+        // NO entry point raises this request any more (2026-10-16, requested):
+        // SUPER+Space no longer asks for a lift, and the gesture that
+        // dispatched the grab global is deleted. The signal, this handler and
+        // that global are kept -- the IPC `desktopOverview lift` writes the
+        // same flag -- and the ordering they depend on is why the wiring stays
+        // as it is: the signal is what lets the writer and the reader stay in
+        // one place, and it has to be emitted
+        // BEFORE the open flag, and this handler runs synchronously inside that
+        // emit, so `liftRequested` is standing by the time the open handler
+        // below spends it. Write it afterwards and the lift is silently lost
+        // -- which is exactly what the gesture did until 2026-10-15.
+        function onDesktopOverviewLiftRequest() {
+            root.liftRequested = true;
+        }
         function onDesktopOverviewOpenChanged() {
             // Start the keyboard on the desktop you are actually on, so Enter
             // without touching the arrows is a no-op rather than a jump to 1.
@@ -1447,6 +2118,12 @@ Scope {
                 // mistaken for a desktop switch.
                 root.lastSeenWorkspace = root.activeId;
                 ProcessList.setActive("overview", true);
+                // The gesture asked for the desktop under the pointer. The read
+                // happens now and not at the request, because a point can only
+                // be mapped onto a card that has been laid out -- and it is the
+                // request, not the open, that says which entry point this was.
+                if (root.liftRequested)
+                    cursorProbe.running = true;
             } else {
                 // Symmetric release (this used to be one-sided: armed on open,
                 // never let go on close), so one look at the workspace grid no
@@ -1531,10 +2208,59 @@ Scope {
     // leave it stuck with no key to close it.
     GlobalShortcut {
         name: "desktopOverviewToggle"
-        description: "Toggles the desktop overview (SUPER + four-finger swipe down)"
+        description: "Toggles the desktop overview (SUPER + Tab, SUPER + Z, the bar's empty stretches)"
 
         onPressed: {
             GlobalStates.desktopOverviewOpen = !GlobalStates.desktopOverviewOpen;
+        }
+    }
+
+    // ── The GESTURE's way in: open it, with the desktop in hand ──────────
+    //
+    // This WAS the gesture's entry point: the SUPER + four-finger swipe down was
+    // the one entry point that is a POINTER action -- the cursor is parked on
+    // the desktop you were looking at when the fingers land -- so it opened the
+    // grid with that desktop lifted (see `liftRequested`); move the pointer to
+    // carry it, click to drop it, Escape to put it back.
+    //
+    // THE GESTURE IS REMOVED (2026-10-16, requested), so nothing dispatches this
+    // name any more and a lift is not reachable from input at all. It stays
+    // registered rather than deleted: it is the shell's half of the capability,
+    // the IPC `lift` below writes the same flag through `liftRequested`, and
+    // deleting it would leave no way to drive a lift even by hand.
+    //
+    // Its own name rather than a second dispatch of the toggle, because the
+    // toggle is also what SUPER+Tab, SUPER+Z and the bar's empty stretches send:
+    // a lift for those would either guess at intent or take the grid's
+    // click-to-switch away from someone who only tapped a key.
+    //
+    // It TOGGLES all the same -- a second flick still means "put it away" -- and
+    // only the opening half asks for the lift.
+    GlobalShortcut {
+        name: "desktopOverviewGrab"
+        description: "Toggles the desktop overview, lifting the desktop under the cursor (NO INPUT BOUND: the SUPER + four-finger swipe down that dispatched it was removed 2026-10-16; kept for the IPC and the check suite)"
+
+        onPressed: {
+            // A second flick still means "put it away", and a close must not
+            // arm a lift for the next open.
+            if (GlobalStates.desktopOverviewOpen) {
+                GlobalStates.desktopOverviewOpen = false;
+                return;
+            }
+            // ── THE REQUEST GOES FIRST. MEASURED, NOT ASSUMED. ───────────
+            // This assignment used to come second, and that single line
+            // order was the whole bug the gesture was reported for: the
+            // assignment BELOW emits `desktopOverviewOpenChanged`, the
+            // handler in the Connections further down runs SYNCHRONOUSLY
+            // inside that emit, and it is that handler which starts
+            // `cursorProbe` on `liftRequested`. Set afterwards, the flag
+            // was read one step too late every single time -- the grid came
+            // up plain, `gestureLift` stayed false, and the desktop under
+            // the pointer was never in hand. Traced with
+            // `hyprctl dispatch "hl.dsp.global('quickshell:desktopOverviewGrab')"`:
+            // `liftRequested=true gestureLift=false cell=-1`.
+            root.liftRequested = true;
+            GlobalStates.desktopOverviewOpen = true;
         }
     }
 
@@ -1567,6 +2293,36 @@ Scope {
         function toggle(): void {
             GlobalStates.desktopOverviewOpen = !GlobalStates.desktopOverviewOpen;
         }
+        // The GESTURE's two writes, as one call, so a check drives the shipped
+        // path instead of re-implementing it (there is no synthetic four-finger
+        // swipe here, and `hyprctl dispatch global` reaches the global itself,
+        // which is even closer to the real thing).
+        function lift(): string {
+            // Same order as the global the gesture dispatches -- the request
+            // must be standing when the open's own handler reads it -- and
+            // the same probe when the grid is somehow already up (there is
+            // no open-change emit to hang the read on then).
+            // The request is the permission to lift (`liftFrom` refuses
+            // without it), so it is raised on BOTH paths -- there is no
+            // open-change emit to raise it for us when the grid is already up.
+            root.liftRequested = true;
+            if (GlobalStates.desktopOverviewOpen)
+                cursorProbe.running = true;
+            else
+                GlobalStates.desktopOverviewOpen = true;
+            return `open=${GlobalStates.desktopOverviewOpen} liftRequested=${root.liftRequested}`;
+        }
+        // What is in hand: which desktop the gesture lifted, where it is being
+        // carried, and whether it came from the gesture or from a press. The
+        // desktop drag has no other way to be seen from a script -- the pointer
+        // is the only thing that normally knows.
+        function liftState(): string {
+            return `gestureLift=${root.gestureLift} liftRequested=${root.liftRequested}`
+                + ` cell=${root.draggingCell} drop=${root.dropCell}`
+                + ` desktop=${root.draggingCell >= 0 ? root.desktopOfCell(root.draggingCell) : -1}`
+                + ` offset=${Math.round(root.dragOffsetX)},${Math.round(root.dragOffsetY)}`
+                + ` origin=${Math.round(root.liftOriginX)},${Math.round(root.liftOriginY)}`;
+        }
         // Diagnostics: what the grid believes about the desktops, so a wrong
         // cell count or a missing window is visible from a terminal.
         function state(): string {
@@ -1594,6 +2350,14 @@ Scope {
                 `surface=${Math.round(root.surfaceWidth)}x${Math.round(root.surfaceHeight)}`,
                 `work=${Math.round(root.workWidth)}x${Math.round(root.workHeight)}@${Math.round(root.workOffsetX)},${Math.round(root.workOffsetY)}`,
                 `wallpaper=${root.wallpaperSource || "(none)"}`,
+                // WHICH file the background is drawn from, because the
+                // difference is the whole open latency: `scaled-copy` is the
+                // magick-made surface-sized PNG (fast), `original` means the
+                // copy could not be made and the full-size file is being
+                // decoded per open (slow). Without this the two are
+                // indistinguishable from outside -- the open just looks slow.
+                `wallpaperSrc=${veil.scaledSource.length > 0 ? "scaled-copy" : "original"}`,
+                `wallpaperCopy=${veil.scaledWidth}x${veil.scaledHeight}${veil.scaleFailed ? " (FAILED)" : ""}`,
                 `toplevels=${tops.length}`,
                 `firstWin=${first ? `${first.class}@${first.address} at ${first.at} size ${first.size}` : "(none)"}`,
                 `firstWinMatches=${match}`,
@@ -1611,6 +2375,55 @@ Scope {
             const plan = `${root.desktopOfCell(fromCell)}<->${root.desktopOfCell(toCell)}`;
             root.reorderCells(fromCell, toCell);
             return `reorder ${plan} busy=${root.reorderBusy}`;
+        }
+        // Move a window to a desktop exactly as a drop does (tests and
+        // scripts): the SAME function the pointer path calls, so a check
+        // exercises the real dispatches instead of a copy of them.
+        function moveWindow(address: string, to: int): string {
+            const sent = root.moveWindowTo(address, to);
+            return `move ${address} -> ${to} ${sent ? "sent" : "refused"}`;
+        }
+        // What each card is billing: the desktop, the bytes attributed to it,
+        // and the fraction of the machine that is. A script cannot read a
+        // pixel, and the first version of this arithmetic was wrong in a way
+        // nobody could see -- 359 MB reported for a browser costing 2.84 GB --
+        // so the number behind the card is readable without a screenshot.
+        function ramState(): string {
+            const parts = [];
+            for (let i = 0; i < root.cellCount; i++) {
+                const id = root.desktopOfCell(i);
+                const bytes = root.memoryFor(id);
+                parts.push(`${id}:${(bytes / 1073741824).toFixed(2)}GB`
+                    + `/${(bytes / Math.max(1073741824, ResourceUsage.memoryTotal * 1024) * 100).toFixed(1)}%`);
+            }
+            return `total=${(ResourceUsage.memoryTotal * 1024 / 1073741824).toFixed(0)}GB`
+                + ` used=${(ResourceUsage.memoryUsedPercentage * 100).toFixed(0)}%`
+                + ` ${parts.join(" ")}`;
+        }
+        // What is in your hand right now, so a script can see the drag state
+        // without a pointer (there is no synthetic-drag tool here).
+        function dragState(): string {
+            return `active=${root.windowDragActive} addr=${root.dragWindowAddress}`
+                + ` from=${root.dragWindowFrom} to=${root.dragWindowTo}`
+                + ` label=${root.dragWindowLabel}`;
+        }
+        // Put a window in your hand without a pointer, and put it down again:
+        // the two halves of the drag the release path reads. `drop` runs the
+        // REAL drop -- the same call the pointer's release makes -- so a check
+        // can drive the shipped code including the grid closing behind it,
+        // which is the half that a copied dispatch sequence would miss.
+        function carry(address: string, from: int, to: int): string {
+            root.dragWindowAddress = String(address ?? "");
+            root.dragWindowLabel = root.appLabel((HyprlandData.windowList ?? [])
+                .find(w => String(w?.address ?? "") === String(address ?? "")) ?? null);
+            root.dragWindowFrom = from;
+            root.dragWindowTo = to;
+            return `carry ${root.dragWindowAddress} from=${root.dragWindowFrom} to=${root.dragWindowTo}`;
+        }
+        function drop(): string {
+            const plan = `${root.dragWindowAddress} -> ${root.dragWindowTo}`;
+            root.dropWindowDrag();
+            return `drop ${plan} active=${root.windowDragActive} open=${GlobalStates.desktopOverviewOpen}`;
         }
     }
 }

@@ -19,6 +19,279 @@ Singleton {
         themeFileView.reload()
     }
 
+    // ── Light mode's grey ladder ───────────────────────────────────────────
+    //
+    // WHAT WAS WRONG. In light mode every role whose whole job is to be
+    // DIFFERENT from the surface around it -- the toggled chip, the selected
+    // row, the meter accent, the card, the hairline -- was coming out as a
+    // slightly paler grey than the surface it sits on, i.e. no difference at
+    // all. Measured on this machine (2026-10-15, contrast ratio against the
+    // panel each role is actually drawn on, ash template):
+    //
+    //   role                  light    dark
+    //   secondaryContainer     1.12    1.43     toggled pills, selected rows,
+    //                                           text selection, combo boxes
+    //   tertiaryContainer      1.13    1.48     the paired FAB
+    //   surfaceVariant         1.12    1.48     --
+    //   primaryContainer       1.28    1.65     notice boxes, the FAB
+    //   outlineVariant         1.79    1.65     dividers, card edges, hairlines
+    //
+    // 1.05-1.28:1 is a smudge, not a difference: a role that is supposed to
+    // MARK something is there, is drawn, and cannot be seen. `colTertiary` is
+    // the worst case, because it is not a background at all -- it is an
+    // ACCENT (the RAM meter in the performance gauges, the minute hand, the
+    // sidebar's unread dot) and in light mode it was `#DEDEDE` on a `#F0F0F0`
+    // page. Dark mode has no such problem: the same roles sit at 1.32-1.65:1
+    // there, which is exactly the separation a chip needs to read as a chip.
+    //
+    // WHAT IT IS NOW. Light mode gets the same separation dark mode has, from
+    // an explicit grey ladder instead of a lighter copy of the same washed
+    // tint. The ladder is a fixed set of steps from the page's own white down
+    // to a near-black line colour, so the tones are ORDERED rather than merely
+    // different from each other, and each contrast
+    // role lands clear of the one below it, measured on the Ash palette: the
+    // contrast chip 1.28 -> 2.50:1, the tertiary container 1.20 -> 1.86:1, the
+    // primary container 1.37 -> 1.65:1, the deepest surface container
+    // 1.30 -> 1.55:1, the outline 4.47 -> 5.04:1, and the invisible tertiary
+    // ACCENT 1.18 -> 5.04:1.
+    //
+    // WHY HERE, and not in the template files. The report was about light mode
+    // rather than about Ash: a wallpaper-derived palette (Settings > wallpaper
+    // theming) is `colors.json` too, and it is BORN light when the wallpaper
+    // says so -- so the rule belongs where every palette becomes the live
+    // theme. `applyColors` is that place: the template picker, the dark/light
+    // toggle, the wallpaper pipeline and plain startup-from-disk all land here
+    // (see the comment on `applySystemTheme` below for the same argument).
+    // Putting it in `themes/templates/*-light.json` would have fixed Ash and
+    // left the other eleven templates and every generated palette alone.
+    //
+    // ABSOLUTE, NOT RELATIVE, AND DARKER-ONLY. Each entry is a target value,
+    // not a darkening delta, and every move is `min(current, target)` -- so
+    // running this twice on an already adjusted palette lands on the same
+    // numbers, and a palette that is already darker than the target for some
+    // role keeps what it has instead of being lightened into a worse one.
+    // That matters: `applyColors` runs on every change to colors.json, not
+    // only on a real theme change.
+    //
+    // THE `on*` INK ROLES ARE DELIBERATELY NOT TOUCHED. They are not paired
+    // with their containers in this shell -- `colOnSecondaryContainer` is used
+    // as ordinary ink in ~12 places that have no container at all (the
+    // wallpaper clock's digits, the bar's workspace numbers, the config
+    // widgets' labels) where it happens to work because it is the same tone as
+    // `onSurface`. Inverting the containers to dark grey would need all of
+    // those moved to a different token; darkening the containers UNDER the
+    // existing dark ink gets the contrast without touching a single call site.
+    // Checked against the ink, not assumed: on the new Ash fills,
+    // `onSecondaryContainer` is 5.72:1 on the chip, `onPrimaryContainer`
+    // 9.63:1, `onTertiaryContainer` 7.77:1, `onSecondary` 8.45:1, and the
+    // subtext ink is 6.16:1 on the deepest container -- every one of them above
+    // the 4.5:1 body-text line, and every one of them measured rather than
+    // eyeballed. scripts/colors/check-light-ladder.py re-measures all four
+    // pairs in all twelve light palettes and fails below the line.
+    //
+    // THE THREE KEYS THAT IDENTIFY A TEMPLATE ARE NOT TOUCHED: `primary`,
+    // `surface` and `onBackground`. `scripts/colors/identify-template.py`
+    // recognises which template is active by exactly that triple, and the
+    // dark/light toggle's whole routing depends on that identification -- a
+    // ladder that moved any of the three would make the toggle forget where it
+    // is. The page (`background`/`surface`) also stays put on purpose: it is
+    // the one tone in a light theme that is not supposed to be grey.
+    //
+    // NOTHING IS FORCED TO GREY. A tone keeps its own hue and saturation and
+    // only its value moves, so a tinted palette stays tinted -- the `isGrey`
+    // gate below is what decides whether a role belongs to this ladder at all,
+    // not a desaturation pass. Ash, being monochrome, is the one palette where
+    // the ladder therefore rewrites the whole set; everywhere else it takes
+    // the pale near-neutral tones and leaves the palette's colours alone.
+    //
+    // THE LADDER ONLY MOVES (NEAR) GREY ROLES, AND ONLY DARKER. Both limits
+    // are load-bearing and both were found by running the ladder over every
+    // template light palette (12 of them) rather than over Ash alone:
+    //
+    //   * Eleven of the twelve templates are TINTED, and their containers are
+    //     not washed-out greys at all -- catppuccin's `tertiary` is olive
+    //     (#7A7814) with white ink, dracula's is #8F6793. Forcing the grey
+    //     ladder onto those does not fix a contrast problem, it deletes the
+    //     palette: the olive became grey and catppuccin's own chip ink
+    //     (#6D5E7E) fell to 1.98:1 on the grey it produced. So a role is only
+    //     touched when it is actually
+    //     grey: no more than 5% chroma (max-min of the RGB channels), which
+    //     is Ash's monochrome set (0%) and the pale panels of a tinted theme
+    //     (~3%), and far below any real accent.
+    //   * The other half of the same finding: some templates are already
+    //     DARKER than the ladder's target for a role (catppuccin's
+    //     tertiaryContainer is 4.4:1 on its page; the ladder wanted 0.70 and
+    //     would have LIGHTENED it to 1.9:1, i.e. made it worse). Every move
+    //     is therefore `min(current, target)` -- darker or unchanged, never
+    //     lighter -- and the check asserts that direction rather than the
+    //     final value.
+    //
+    // THE DARKENING HAPPENS IN HSV, NOT HSL. Measured, not preferred:
+    // catppuccin's `surfaceBright` is #FFF7FE, and moving it one step down in
+    // HSL (which keeps an off-white's saturation at 1.0, because HSL
+    // saturation is defined against the distance to white) came out #FFF1FD
+    // -- a MORE tinted surface than the one it started from, i.e. the ladder
+    // adding colour to a palette while claiming to clean it. HSV saturation
+    // for that same colour is 0.03, and moving its value down keeps the tint
+    // where it was. For the near-grey roles below the two spaces differ by at
+    // most half a step, so nothing else moves.
+    //
+    // old -> new, ash template (value, HSV):
+    //   secondaryContainer   #D6D6D6 -> #999999   the contrast chip
+    //   tertiary             #DEDEDE -> #666666   the invisible meter accent
+    //   tertiaryContainer    #DCDCDC -> #B2B2B2
+    //   primaryContainer     #CFCFCF -> #BDBDBD
+    //   surfaceContainerLow  #E9E9E9 -> #E6E6E6   the shell's own panels, one
+    //   surfaceContainer     #E2E2E2 -> #DADADA   step each, so a nested card
+    //   surfaceContainerHigh #DBDBDB -> #CFCFCF   is a visible card
+    //   surfaceContainerHighest #D4D4D4 -> #C3C3C3
+    //   surfaceVariant       #DDDDDD -> #D1D1D1
+    //   outlineVariant       #B0B0B0 -> #A3A3A3
+    //   outline              #6E6E6E -> #666666
+    //   secondary            #555555 -> #4C4C4C
+    //
+    // The structural half: the page-adjacent ladder, which has no ink of its
+    // own and is the same fix for every palette -- a panel that is 1.07:1 from
+    // the page it sits on is not a panel. Values are the target VALUE (HSV),
+    // which for a grey is the same number HSL would have called lightness.
+    readonly property var lightSurfaceLadder: ({
+        surfaceBright: 0.973,
+        surfaceContainerLowest: 0.965,
+        surfaceDim: 0.87,
+        surfaceContainerLow: 0.900,
+        surfaceContainer: 0.855,
+        surfaceContainerHigh: 0.810,
+        surfaceContainerHighest: 0.765,
+        surfaceVariant: 0.820,
+        outlineVariant: 0.640,
+        outline: 0.400,
+        inverseSurface: 0.160,
+    })
+
+    // The contrast half: roles that stand in for a control being selected,
+    // toggled or measured. These carry somebody's ink, so each one is clamped
+    // by that ink -- see `lightLadderInks`.
+    readonly property var lightContrastLadder: ({
+        secondaryContainer: 0.600,
+        tertiaryContainer: 0.700,
+        primaryContainer: 0.740,
+        secondary: 0.300,
+        tertiary: 0.400,
+    })
+
+    // Which ink each contrast role is drawn with, so the ladder can be held to
+    // it. Nothing here is assumed: scripts/colors/check-light-ladder.py
+    // measures every one of these pairs in every template and fails below
+    // 4.5:1.
+    readonly property var lightLadderInks: ({
+        secondaryContainer: "onSecondaryContainer",
+        tertiaryContainer: "onTertiaryContainer",
+        primaryContainer: "onPrimaryContainer",
+        secondary: "onSecondary",
+    })
+
+    // A role is part of the grey ladder only if it IS grey. Chroma (max-min of
+    // the RGB channels) rather than HSL saturation, because saturation lies
+    // about very light colours: a near-white lilac like #F9F1F9 has an HSL
+    // saturation of 0.33 and reads as white. 0.05 is the line: Ash's greys are
+    // 0, the pale panels of the tinted templates are around 0.03, and the
+    // palest real accent container in the set (nord's secondaryContainer,
+    // #D0E6ED) is 0.11 -- more than twice the line, so no accent can be
+    // mistaken for a grey by it.
+    function isGrey(c) {
+        return (Math.max(c.r, c.g, c.b) - Math.min(c.r, c.g, c.b)) <= 0.05;
+    }
+
+    // WCAG relative luminance, for the ink clamp below. Small, but it is the
+    // same arithmetic the check uses, so the two cannot disagree about what
+    // "readable" means.
+    function relativeLuminance(c) {
+        function channel(x) {
+            return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
+        }
+        return 0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b);
+    }
+    function contrastRatio(a, b) {
+        const la = relativeLuminance(a);
+        const lb = relativeLuminance(b);
+        return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+    }
+
+    function applyLightGreyLadder() {
+        function headroom(target, role) {
+            const ink = root.lightLadderInks[role];
+            return ink ? Appearance.m3colors[`m3${ink}`] : null;
+        }
+        // `shade` is the one place a tone is ever produced: same hue, same
+        // saturation (HSV), value moved -- and only downwards, past the check
+        // that it is actually darker than what the palette shipped with.
+        function shade(c, wanted) {
+            return Qt.hsva(c.hsvHue, c.hsvSaturation, Math.min(c.hsvValue, wanted), c.a);
+        }
+        for (const role in root.lightSurfaceLadder) {
+            const current = Appearance.m3colors[`m3${role}`];
+            // A palette file that does not carry the role at all is left
+            // alone: `undefined` in, a colour out, is worse than the honest
+            // absence. The templates this ship with all carry every one of
+            // them (asserted by scripts/colors/check-light-ladder.py, not
+            // assumed).
+            if (current === undefined)
+                continue;
+            Appearance.m3colors[`m3${role}`] = shade(Qt.color(current), root.lightSurfaceLadder[role]);
+        }
+        for (const role in root.lightContrastLadder) {
+            const current = Appearance.m3colors[`m3${role}`];
+            if (current === undefined)
+                continue;
+            const c = Qt.color(current);
+            if (!root.isGrey(c))
+                continue;
+            const wanted = root.lightContrastLadder[role];
+            const ink = headroom(wanted, role);
+            if (ink === null) {
+                Appearance.m3colors[`m3${role}`] = shade(c, wanted);
+                continue;
+            }
+            // Walk back toward the original value until the role's own ink
+            // reads on it again (see `contrastRatio`), terminating on the original
+            // value, which the palette is assumed to have been designed around
+            // -- so the fallback is "leave this one as the template author had
+            // it", not "ship a fill nobody can read".
+            const inkColor = Qt.color(ink);
+            let value = wanted;
+            for (let step = 0; step <= 20; step++) {
+                const candidate = Math.min(c.hsvValue, wanted + step * (c.hsvValue - wanted) / 20);
+                const colour = shade(c, candidate);
+                if (root.contrastRatio(colour, inkColor) >= 4.5) {
+                    value = candidate;
+                    break;
+                }
+            }
+            Appearance.m3colors[`m3${role}`] = shade(c, value);
+        }
+    }
+
+    // The live palette, as text, for scripts/colors/check-light-ladder.py and
+    // for `qs -c ii ipc call theme state`. Same shape and same reason as `volumes state` and
+    // `taskManager state`: the shell is the only thing that knows what it has
+    // ACTUALLY applied, as opposed to what is in the file on disk -- and with
+    // the light ladder in the path the two are no longer the same by
+    // construction, which is exactly what a reader needs to be able to see.
+    function paletteState() {
+        function hex(c) {
+            function part(x) {
+                const v = Math.round(Math.max(0, Math.min(1, x)) * 255);
+                return (v < 16 ? "0" : "") + v.toString(16);
+            }
+            return `#${part(c.r)}${part(c.g)}${part(c.b)}`;
+        }
+        const parts = [`mode=${Appearance.m3colors.darkmode ? "dark" : "light"}`];
+        const roles = Object.assign({}, root.lightSurfaceLadder, root.lightContrastLadder);
+        for (const role in roles)
+            parts.push(`${role}=${hex(Appearance.m3colors[`m3${role}`])}`);
+        return parts.join(" ");
+    }
+
     function applyColors(fileContent) {
         const json = JSON.parse(fileContent)
         for (const key in json) {
@@ -31,6 +304,13 @@ Singleton {
         }
         
         Appearance.m3colors.darkmode = (Appearance.m3colors.m3background.hslLightness < 0.5)
+    // Light mode's grey ladder. See `lightSurfaceLadder` / `lightContrastLadder`
+    // for why this exists and what it changes; it runs BEFORE anything is
+    // derived from the palette below (the desktop sync, the cursor, the lock
+    // screen, the terminal), so every consumer sees the adjusted tones and none
+    // of them sees the file's washed-out ones.
+        if (!Appearance.m3colors.darkmode)
+            root.applyLightGreyLadder();
         // Push the same decision out to the rest of the desktop. See
         // `applySystemTheme` for why this lives here and not on the toggle.
         root.applySystemTheme(Appearance.m3colors.darkmode);
@@ -345,6 +625,10 @@ Singleton {
 
         function toggleLightDark(): void {
             root.toggleLightDark();
+        }
+
+        function state(): string {
+            return root.paletteState();
         }
     }
 }

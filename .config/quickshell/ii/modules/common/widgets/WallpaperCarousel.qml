@@ -823,6 +823,7 @@ Item {
     // clicks/hovers while a wheel anywhere in the component turns the ring.
     MouseArea {
         anchors.fill: parent
+        acceptedButtons: Qt.NoButton
         onWheel: event => {
             const pd = event.pixelDelta;
             // Accept only what we actually own. A decided VERTICAL gesture is
@@ -1219,6 +1220,7 @@ Item {
     // of the same design. Opens the image picker.
     Rectangle {
         id: addBtn
+        z: 999
         visible: root.showAdd
         anchors.horizontalCenter: parent.horizontalCenter
         y: strip.height + root.addRowGap
@@ -1265,8 +1267,15 @@ Item {
             id: addHover
             cursorShape: Qt.PointingHandCursor
         }
-        TapHandler {
-            onTapped: root.addRequested()
+        MouseArea {
+            id: addMouseArea
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: {
+                console.log("[WallpaperCarousel] Add button clicked, emitting addRequested");
+                root.addRequested()
+            }
         }
     }
 }

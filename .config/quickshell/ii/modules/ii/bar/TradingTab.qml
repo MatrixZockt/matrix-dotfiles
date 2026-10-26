@@ -482,9 +482,9 @@ Item {
                         property bool hovered: false
 
                         width: newsColumn.width
-                        // 40 collapsed (the header row) + 78 of detail. The
+                        // 40 collapsed (the header row) + 100 of detail. The
                         // detail is laid out either way and clipped when shut.
-                        implicitHeight: eventCard.expanded ? 118 : 40
+                        implicitHeight: eventCard.expanded ? 140 : 40
                         clip: true
                         radius: Appearance.rounding.normal
                         color: eventCard.hovered
@@ -649,8 +649,14 @@ Item {
                             // ── Detail: laid out always, revealed by the
                             //    card's own height ─────────────────────
                             Item {
+                                // Named because the probe below asks THIS box
+                                // whether the block inside it fits: the
+                                // detail is `clip: true`, so a line that
+                                // outgrows the height the card gives it is
+                                // cut off with no error anywhere.
+                                objectName: "detailBox"
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: 78
+                                Layout.preferredHeight: 100
                                 clip: true
 
                                 ColumnLayout {
@@ -783,6 +789,36 @@ Item {
                                         }
                                         Item { Layout.fillWidth: true }
                                     }
+
+                                    // ── What the beat MEANS ─────────────
+                                    //
+                                    // The reading of the two figures above it,
+                                    // in the calendar's own words: an actual
+                                    // ABOVE consensus is good for the currency
+                                    // (and a miss is bad), except for the
+                                    // releases where a higher figure is the
+                                    // worse economy -- the service owns that
+                                    // list and the sentence (`_verdict`), and
+                                    // decides when it can say nothing at all,
+                                    // which is whenever there is no released
+                                    // figure or no consensus to read it
+                                    // against.
+                                    //
+                                    // The colour is this file's, because it is
+                                    // the same green/red the arrow and the
+                                    // header use: good reads as up, bad as
+                                    // down, and a figure level with consensus
+                                    // is neither.
+                                    StyledText {
+                                        visible: (eventCard.ev.verdict ?? "") !== ""
+                                        Layout.fillWidth: true
+                                        text: eventCard.ev.verdict ?? ""
+                                        font.pixelSize: Appearance.font.pixelSize.tiny
+                                        color: eventCard.ev.favourable === true ? root.upColor
+                                            : eventCard.ev.favourable === false ? root.downColor
+                                            : ColorUtils.transparentize(Appearance.colors.colOnLayer1, 0.4)
+                                        wrapMode: Text.WordWrap
+                                    }
                                 }
                             }
                         }
@@ -898,8 +934,47 @@ Item {
             const widest = rows.reduce((a, b) =>
                 a.implicitWidth >= b.implicitWidth ? a : b);
             const over = rows.filter(r => r.implicitWidth > r.width).length;
+            // ── ...and whether the block VERTICALLY fits ──────────────────
+            // The row reading above answers the horizontal question; this one
+            // is the other half. The detail block is `clip: true` and the
+            // card reveals it by height, so a line that wants more room than
+            // the card gives it is cut off silently -- the same kind of
+            // invisible failure, in the other axis. `visible: false`
+            // children contribute nothing to `implicitHeight`, so the number
+            // is the block as the card actually draws it right now, verdict
+            // line and all.
+            const boxes = [];
+            const walkBoxes = item => {
+                if (!item)
+                    return;
+                if (item.objectName === "detailBox") {
+                    boxes.push(item);
+                    return;
+                }
+                const kids = item.children ?? [];
+                for (let i = 0; i < kids.length; i++)
+                    walkBoxes(kids[i]);
+            };
+            walkBoxes(root);
+            // The TALLEST block, for the same reason the WIDEST row above:
+            // the interesting card is the one that has the most on it -- a
+            // long name, a comparison AND a verdict -- and one card's fit
+            // says nothing about the rest. The count beside it is the answer
+            // to "and does any of them clip?".
+            const tallest = boxes.reduce((a, b) =>
+                (a.children[0]?.implicitHeight ?? 0) >= (b.children[0]?.implicitHeight ?? 0) ? a : b,
+                boxes[0]);
+            const block = boxes.length > 0 ? (tallest.children[0] ?? null) : null;
+            const clipped = boxes.filter(b =>
+                (b.children[0]?.implicitHeight ?? 0) > b.height).length;
+            const fit = !block
+                ? "no detail block on screen"
+                : `have=${Math.round(tallest.height)} need=${Math.round(block.implicitHeight)}`
+                    + ` -> ${block.implicitHeight <= tallest.height
+                        ? "FITS" : "CLIPPED"}`
+                    + ` | clipping: ${clipped} of ${boxes.length}`;
             return `${rows.length} card(s); widest -> ${fmt(widest)}`
-                + ` | overflowing: ${over}`;
+                + ` | overflowing: ${over} | detail block ${fit}`;
         }
     }
 }

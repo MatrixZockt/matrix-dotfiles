@@ -1,6 +1,7 @@
 pragma Singleton
 pragma ComponentBehavior: Bound
 
+import qs
 import qs.modules.common
 import qs.modules.common.functions
 import QtQuick
@@ -53,6 +54,17 @@ Singleton {
 
     function entryIsImage(entry) {
         return !!(/^\d+\t\[\[.*binary data.*\d+x\d+.*\]\]$/.test(entry))
+    }
+
+    // cliphist stores whatever MIME the selection carried, and a FILE copied
+    // with `wl-copy --type text/uri-list` arrives as a plain line starting
+    // `file://`. That is not a text the popup offers to paste back, and the
+    // thing that put it there (the recorder, after a stop) already says what
+    // it saved -- its card is worth more than a second "Copied" flashing over
+    // it half a second later (measured 2026-10-22: the save card was replaced
+    // by this one before it could be read).
+    function entryIsFileUri(entry) {
+        return /^file:\/\//.test(String(entry ?? "").replace(/^\d+\t/, ""))
     }
 
     readonly property int previousEntryCount: readProc.buffer.length
@@ -278,10 +290,12 @@ Singleton {
                         root.announcedTail = newest
                         if (newest !== ""
                             && !own
+                            && !root.entryIsFileUri(newest)
                             && Config.options?.workSafety?.enable?.clipboard !== true) {
-                            root.showCopyToast(root.entryIsImage(newest)
+                            const isImage = root.entryIsImage(newest)
+                            root.showCopyToast(isImage
                                 ? Translation.tr("Image copied")
-                                : Translation.tr("Copied"))
+                                : Translation.tr("Copied"), isImage)
                         }
                     }
                 } else if (root.pendingChange && root.toastRetries < 8) {
@@ -406,17 +420,44 @@ Singleton {
         return out;
     }
 
-    // Surface the brief "copied" toast.
+    // Surface the brief "copied" feedback.
     //
-    // How long it stays, and how it leaves, belong to the toast itself (see
-    // modules/ii/onScreenDisplay/OnScreenDisplay.qml): ONE owner for ONE
-    // lifetime. There used to be a timer here and another in the toast, 1500 ms
-    // against 1200 ms, each with its own idea of when the card was over.
-    function showCopyToast(text) {
+    // It is the desktop's top-right signal card, and deliberately NOT a
+    // notification: a bare glyph plus one word, sized to the word, with a
+    // countdown hairline and nothing else. A copy is a one-word glance, not a
+    // message to read, answer or keep -- so it never enters the notification
+    // list, its history or its sound. GlobalStates.showSignalToast owns the
+    // label, glyph and clock; SignalToast.qml draws it.
+    //
+    // 1200ms: the toast's tuned hold. Tightened from 1500 (2026-10-19, "it
+    // should disappear slightly faster"): the card is a confirmation, not a
+    // message, and 1.2s is long enough to see it land and read the one word
+    // without it becoming something to wait out.
+    //
+    // `isImage` chooses the GLYPH, not a translated label: "Image copied" and
+    // "Copied" are strings, and guessing the kind from them is how a localized
+    // label ends up wearing the wrong icon.
+    //
+    // The direct call also removes the round trip through gdbus that the
+    // notification version needed -- the card is feedback, and it should not
+    // arrive a fifth of a second after the thing it confirms.
+    function showCopyToast(text, isImage) {
         root.lastCopiedText = text;
         root.copyToastVisible = true;
         root.copyToastSeq++;
-        // Printed because this is the one part of the toast a terminal cannot see:
+        const summary = (text ?? "").trim();
+        // Told straight to the top-right card instead of through the
+        // notification daemon. The notification route cost a DBus round trip
+        // and a GVariant quoted by hand in QML (which broke on this parser
+        // once), only for the card to be stripped back down to a glyph and a
+        // label -- and it could never be anything but the full notification
+        // width. GlobalStates owns the label, the glyph and the clock;
+        // SignalToast.qml draws it at the size the word needs.
+        GlobalStates.showSignalToast(
+            summary.length > 0 ? summary : Translation.tr("Copied"),
+            isImage ? "image" : "content_copy",
+            1200);
+        // Printed because this is the one part of the feedback a terminal cannot see:
         // whether the copy was NOTICED at all is otherwise indistinguishable from a
         // card that was noticed and failed to draw.
         print(`[cliphist] copy toast: ${text} (seq ${root.copyToastSeq})`);

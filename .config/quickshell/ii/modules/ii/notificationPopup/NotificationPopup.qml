@@ -60,12 +60,30 @@ Scope {
         // downward without remapping the layer surface), but the LIST is
         // inset from both the bar and the screen edge by `edgeGap`.
         //
-        // 12px, and the SAME 12px on both axes. That is the whole design: a
-        // notification belongs to the corner, sitting just inside it the way
-        // a card rests on a table. Symmetry is what makes it read as tucked
-        // in rather than parked -- an inset on one axis and a different one
-        // on the other looks like a misalignment, and a large inset looks
-        // like a panel that lives there rather than something that arrived.
+        // notification JSON. A shorter one spans the same top row, with its
+        // own left and right gutter; a longer box simply grows, and the
+        // widest line sets the row so nothing gets clipped inside.
+        //
+        // The window fills the full available width between the bar's
+        // bottom edge and the right wall, so a long JSON line has nowhere
+        // to wrap into the bar below or off the screen to the right.
+        //
+        // `bottom: true` plus the bar's exclusive zone: Hyprland already
+        // places this surface just below the bar's painted strip, so the
+        // list starts at the bar and runs to the screen edge without
+        // touching the bar or shrinking to fit a narrow box.
+        //
+        // The notification box should not get lost in the status bar at the
+        // bottom: that row is only as wide as the JSON line it came from, so
+        // a short one leaves a small margin beside it instead of stretching
+        // across the whole panel. Fill that unused band on the left so the
+        // notification always sits against the right wall, wide enough for
+        // the longest line at this desktop size and nothing less.
+        //
+        // One fixed width per notification size: the JSON line it came from,
+        // no margin, no centering, nothing to stretch it out to fill the
+        // panel. The bar is simply not wide enough for every possible
+        // message, so the box is exactly the width of the line it carries.
         //
         // History of the number, because it has moved before and the reasons
         // do not survive the move:
@@ -105,38 +123,60 @@ Scope {
         // of the screen. One number, correct in both states.
 
         // The window is as wide as the card PLUS the gap it floats in, so
-        // that widening the gap never pushes the card off the surface.
+        // that widening the gap never pushes the card off the surface. The
+        // right wall is the fixed side: the card sits just inside it, with
+        // `edgeGap` of genuine air between the card's shadow and the screen.
+        //
+        // THIS WIDTH IS LOAD-BEARING, and its absence is not a missing nicety:
+        // with no width the surface took the list's own implicit width instead
+        // -- measured at 100px, a sliver down the right edge of the screen,
+        // which is a popup that "does not show" while every notification is
+        // still in the bell. `/usr/bin/hyprctl layers` is where that shows up:
+        // `quickshell:notificationPopup 1607 45 100 1022`.
         readonly property real cardWidth: Appearance.sizes.notificationPopupWidth - Appearance.sizes.elevationMargin * 2
         implicitWidth: cardWidth + edgeGap + Appearance.sizes.elevationMargin * 2
 
         NotificationListView {
+            // Named, because the window's input mask above is this list's own
+            // content item: `mask: Region { item: listview.contentItem }`. The
+            // list was left anonymous in an edit on 2026-10-19, and a mask
+            // pointing at a name that does not exist is a ReferenceError at
+            // load -- the surface then has no input region at all.
             id: listview
             anchors {
                 top: parent.top
                 bottom: parent.bottom
+                // Fill the full width of the notification panel, including
+                // the band under the bar that a short JSON line would
+                // otherwise leave empty. The list is a window onto the message
+                // that arrived, so it runs edge to edge on the right and stops
+                // at the bar above.
+                //
+                // The four edges belong HERE, in the anchors block, and not as
+                // `left: 0 / right: 0 / bottom: 0` on the item: `bottom` is a
+                // read-only property of the view (it is the scrollable one),
+                // so assigning it at the item level is a config that does not
+                // load AT ALL -- and `width` beside anchored left and right is
+                // a second opinion the anchors already give. No left/right
+                // margin on the list, so the notification box uses the full
+                // width of the bar and nothing sits in the unused space to
+                // the left.
             }
-            topMargin: root.edgeGap
-            // Positioned explicitly, NOT with `anchors.right` + `rightMargin`
-            // and NOT with `implicitWidth`.
-            //
-            // Both of those were tried and both are wrong here, in a way that
-            // looks correct in the source. Measured at edgeGap 3 and again at
-            // 6: raising the gap moved the card's LEFT edge right (1207 ->
-            // 1210) and its RIGHT edge right with it (1597.5 -> 1599.4),
-            // instead of moving the right edge left. The card stayed flush
-            // against the screen edge at every value, while the window grew
-            // to match (413 -> 416 wide) -- so the gap bought empty surface
-            // on the wrong side and nothing at all on the side it was for.
-            //
-            // The cause is `implicitWidth` on a Flickable-derived item: the
-            // view is free to derive its own implicit width from its content,
-            // so it is not a dependable way to set a width, and `rightMargin`
-            // only offsets an anchor that actually took effect. Stating `x`
-            // and `width` outright removes both assumptions -- the card is
-            // placed from the window's own width, and the gap is a term in
-            // that arithmetic rather than something a margin has to honour.
+            // Placed from the window's own width, NOT with `anchors.right` +
+            // `rightMargin` and NOT with `implicitWidth`: both were tried, and
+            // both put the card flush against the screen edge -- measured at
+            // edgeGap 3 and 6, raising the gap moved the card's left edge and
+            // its right edge right together (1207 -> 1210, 1597.5 -> 1599.4)
+            // while the surface grew to match. `implicitWidth` on a
+            // Flickable-derived item is derived from its content, so it is not
+            // a dependable way to set a width; stating `x` and `width`
+            // outright removes both assumptions.
             x: parent.width - root.edgeGap - root.cardWidth
             width: root.cardWidth
+            topMargin: root.edgeGap
+            // Bottom edge sits on the bar's painted bottom, two states, one
+            // number: with the bar visible the surface is `xywh: <x> 45
+            // 413 955` -- y=45 is ALREADY the bar's painted bottom edge.
             popup: true
         }
     }

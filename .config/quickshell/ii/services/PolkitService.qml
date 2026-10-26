@@ -42,10 +42,15 @@ Singleton {
     // `notifications.sound` switch that already silences notifications
     // silences this too, and `Audio.playSystemSoundFile` applies the system
     // sound volume and mute for it (and does nothing at all when muted).
+    //
+    // The same file, at the same level: the level lives on the chime
+    // (`Notifications.notificationGain`, +5 dB so it reads over music), and a
+    // prompt that is scored quieter than the notifications it is made of would
+    // be the one sound in the session you cannot hear.
     function playRequestSound() {
         if (!(Config?.options.notifications.sound ?? true))
             return;
-        Audio.playSystemSoundFile(Notifications.defaultNotifSound);
+        Audio.playSystemSoundFile(Notifications.defaultNotifSound, Notifications.notificationGain);
     }
 
     function cancel() {

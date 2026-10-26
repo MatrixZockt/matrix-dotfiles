@@ -70,20 +70,12 @@ Scope {
         GlobalStates.wallpaperSelectorOpen = !GlobalStates.wallpaperSelectorOpen
     }
 
-    // Publish the explorer's presence to the popup group (PopupApps.setYield):
-    // the popups are separate Quickshell processes, so the flag FILE is the
-    // only channel between them. While the explorer is up, every popup drops
-    // from Overlay to Top so this surface -- same Overlay layer, later
-    // mapper wins otherwise -- rises above the veil and stays clickable.
-    // Every open/close path funnels through GlobalStates.wallpaperSelectorOpen,
-    // so watching it here covers the toggle, Escape, focus-grab dismissal and
-    // selection alike.
-    Connections {
-        target: GlobalStates
-        function onWallpaperSelectorOpenChanged() {
-            PopupApps.setYield(GlobalStates.wallpaperSelectorOpen);
-        }
-    }
+    // The explorer used to publish its presence so the file dialog would drop
+    // to the Top layer and leave it above. Both halves are gone: the dialog now
+    // keeps the Overlay layer for its whole life, because a layer surface that
+    // CHANGES layer while mapped is faded out by the compositor under a
+    // fullscreen window (measured on Hyprland 0.56.2) -- and a file dialog that
+    // can turn invisible is worse than an explorer it happens to cover.
 
     IpcHandler {
         target: "wallpaperSelector"

@@ -166,7 +166,16 @@ EOF
 set_wallpaper_path() {
     local path="$1"
     if [ -f "$SHELL_CONFIG_FILE" ]; then
-        jq --arg path "$path" '.background.wallpaperPath = $path' "$SHELL_CONFIG_FILE" > "$SHELL_CONFIG_FILE.tmp" && mv "$SHELL_CONFIG_FILE.tmp" "$SHELL_CONFIG_FILE"
+        # A picture just became the wallpaper, so the live clock wallpaper
+        # (modules/ii/background/ClockWallpaper.qml) must step aside. The shell
+        # also clears the flag in memory before it calls this script, but this
+        # process rewrites the whole file from what it read a moment earlier --
+        # so when the two raced, the loser used to be the flag and the black
+        # clock stayed on top of the picture that had just been picked. Setting
+        # it in the SAME jq pass as the path makes the written file agree with
+        # the switch no matter who wins.
+        jq --arg path "$path" '.background.wallpaperPath = $path
+            | .background.clockWallpaper.enable = false' "$SHELL_CONFIG_FILE" > "$SHELL_CONFIG_FILE.tmp" && mv "$SHELL_CONFIG_FILE.tmp" "$SHELL_CONFIG_FILE"
     fi
 }
 

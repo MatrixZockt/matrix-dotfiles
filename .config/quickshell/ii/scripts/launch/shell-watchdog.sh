@@ -116,6 +116,96 @@ sweepStrayNetworkMonitors() {
     return 0
 }
 
+# ── Stray `udevadm monitor` sweep ─────────────────────────────────────────
+#
+# The shell's Volumes service (services/Volumes.qml) watches the hotplug bus
+# with `udevadm monitor`, started as a `Process` -- a DIRECT CHILD of `qs`.
+# Nothing tells that child when its owner is gone, and the QML-level restart
+# (onExited) only ever runs while the shell is ALIVE, so a shell that is killed
+# rather than exited leaves the monitor behind for good. One per restart, and
+# this machine restarts its shell a lot while its config is being worked on:
+# measured 2026-10-14, 25 of them, the oldest from 09:48, each still holding a
+# netlink socket to the hotplug group.
+#
+# WHY THE PARENT IS THE TEST, and not "did my shell start it". A live monitor
+# is a direct child of `qs -c ii`. A stray has been reparented -- observed at
+# pid 1 and at the systemd USER manager (`/usr/lib/systemd/systemd --user`),
+# never at the shell. So the test is the parent's own argv: anything started by
+# a human, from a terminal, has a SHELL as its parent and is left strictly
+# alone, while anything owned by an init process belongs to a shell that is
+# already gone. `pgrep -x udevadm` matches the process NAME, so this loop
+# cannot see the watchdog itself or a `pgrep -f` about it.
+#
+# IT RUNS ON ITS OWN LOOP, and that is the correction this needed. The obvious
+# place for it -- the top of the main loop below -- is NOT a timer: that loop
+# BLOCKS. `env ... bash "$LAUNCH"` leaves the shell as this script's child, so
+# the shell's lifetime IS one iteration of the loop, and everything at the top
+# of it runs once per shell exit (which is also why guard 2, the Razer check,
+# only gets a look in then). Measured while the shell was up: zero CPU ticks in
+# twelve seconds, and a `/proc` wchan of `do_wait`.
+#
+# So the sweep gets a loop that is not blocked by the shell. Fifteen seconds is
+# well inside "a background process that is not wanted" -- one `pgrep` and a
+# read of a few `/proc` files -- while still being quick enough that a stray is
+# gone by the time anybody looks.
+sweepStrayUdevMonitors() {
+    local killed=0
+    for p in $(pgrep -x udevadm 2>/dev/null); do
+        # Only this shell's watcher, never some other udevadm call.
+        #
+        # Matched as a SUBSTRING, not for equality, and that is not laziness:
+        # the shell spawns `udevadm` through PATH, so argv[0] here is
+        # "/usr/bin/udevadm" and an exact comparison against "udevadm ..."
+        # matched nothing at all -- the first cut of this sweep reaped zero
+        # processes and left all 22 in place, which is exactly the kind of
+        # silence the log line at the end is there to make visible.
+        local cmd; cmd=$(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null)
+        case "$cmd" in
+            *"udevadm monitor --udev --subsystem-match=block --subsystem-match=usb"*) ;;
+            *) continue ;;
+        esac
+        local pp; pp=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+        [ -z "$pp" ] && continue
+        local pcmd; pcmd=$(tr '\0' ' ' <"/proc/$pp/cmdline" 2>/dev/null)
+        case "$pcmd" in
+            # Owned by a live shell: the shell reaps it (and onExited restarts
+            # it) itself. Not ours to touch.
+            *"qs -c ii"*) continue ;;
+            # Reparented to an init: its shell is gone, and the socket with it.
+            *systemd*) kill -9 "$p" 2>/dev/null && killed=$((killed + 1)) ;;
+        esac
+    done
+    [ "$killed" -gt 0 ] && log "swept $killed stray udevadm monitor(s)"
+    return 0
+}
+
+# ── Guard 0a: strays from a shell that is already gone ───────────────────
+# Started once, off the main loop, so it keeps working while the shell is up --
+# which is when the file manager's own copies of the shell's watchers are left
+# behind, and when the main loop is blocked. Same process group, so stopping
+# the service stops this too.
+#
+# THE NETWORK SWEEP BELONGS HERE TOO, and its absence here was a real leak.
+#
+# It used to run only in the relaunch branch of the main loop, which fires
+# when THIS watchdog finds the shell dead. A restart the watchdog did not
+# perform -- reload-shell.sh, reset-shell.sh, the keybind that re-execs the
+# shell -- never enters that branch, so the monitor its shell leaves behind
+# was never swept: one orphan per such restart, reparented to init, holding
+# an 11 MB D-Bus connection to nobody. Measured 2026-10-16: 16 `nmcli
+# monitor` processes live at once, uptimes stepping 2411/1916/1893/.../775 s
+# -- one per shell restart in the preceding forty minutes, exactly the
+# restarts done while the config was being worked on. Their wrappers carry
+# the marker below and are spared, so running this every 15 s neither touches
+# the live shell's own watcher nor fights the pre/post-launch sweeps.
+(
+    while true; do
+        sweepStrayUdevMonitors
+        sweepStrayNetworkMonitors
+        sleep 15
+    done
+) &
+
 while true; do
     # Reset to the ordinary cadence each pass; the relaunch branch below
     # lengthens it only when the shell is failing to come up.
@@ -206,6 +296,7 @@ while true; do
         # yet and cannot be mistaken for a stray. Anything still running at
         # this point belongs to a shell that is already gone.
         sweepStrayNetworkMonitors
+        sweepStrayUdevMonitors
         env $SESSION_ENV bash "$LAUNCH" >>/tmp/shell-watchdog.log 2>&1 || true
         # ...and again AFTER it, because the pre-launch sweep alone loses a
         # race. A dying shell takes its wrapper down with it, and the kernel

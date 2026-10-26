@@ -40,6 +40,24 @@ MouseArea { // Notification group area
     // hinge on which one this is.
     property bool popup: false
 
+    // ── A signal wearing the notification card ─────────────────────────
+    //
+    // The clipboard's "Copied"/"Image copied" card (services/Cliphist.qml)
+    // is the only sender that sets the `x-ii-signal` hint. It borrows this
+    // card for its size, material and corner and nothing else, so every
+    // affordance that makes a notification a notification is stripped while
+    // `isSignal` is true: the "now" timestamp, the expand chevron, the
+    // delete button, the click-to-open and the drag-to-dismiss. It is still
+    // the same rectangle -- same width, same fill, same rounding, same
+    // shadow, same corner -- which is the whole request (2026-10-19): look
+    // like a notification, do not BE one.
+    readonly property bool isSignal: root.notifications.length > 0
+        && root.notifications.every(n => n?.isSignal === true)
+    // Which bare glyph a signal wears (see NotificationAppIcon.bareIcon).
+    // Read from the sender's hint, not from the summary: the summary is a
+    // translated sentence and has no reliable word for the kind in it.
+    readonly property string signalKind: root.notifications[0]?.signalKind ?? ""
+
     // Is the pointer over the app-name button?
     //
     // Owned by the CARD rather than left inside the header because someone
@@ -73,6 +91,21 @@ MouseArea { // Notification group area
     readonly property bool isExpanded: root.shownExpanded
     property real padding: 10
 
+    // How long a popup card lives, and how long its status line takes to run
+    // out: the SAME number, taken from the service's own timer for the
+    // notification (armed with `popupIntervalFor` at arrival), so the line is
+    // a fair reading of the time left. The service timer and the line start
+    // within a frame of each other, so the card disappears as the line hits
+    // zero -- and if the timer was cancelled by a hover, the line's own
+    // onFinished times the card out instead.
+    readonly property real popupLifetimeMs: {
+        const ns = root.notifications;
+        if (!ns || ns.length === 0)
+            return Config?.options?.notifications?.timeout ?? 7000;
+        return Math.max(...ns.map(n => n.timer?.interval
+            ?? Notifications.popupIntervalFor(n.notification?.expireTimeout ?? -1)));
+    }
+
     // ── The delete gutter ───────────────────────────────────────────────────
     //
     // Delete lives OUTSIDE the card, on its left, in a strip the card is
@@ -86,7 +119,10 @@ MouseArea { // Notification group area
     property bool anyTruncated: false
 
     function hasMoreToShow() {
-        return root.popup || root.multipleNotifications || root.anyTruncated;
+        // A signal has nothing behind it, ever. `root.popup` used to make
+        // every corner card claim more to show, which is why the copy card
+        // grew a chevron that opened nothing.
+        return !root.isSignal && (root.popup || root.multipleNotifications || root.anyTruncated);
     }
     implicitHeight: background.implicitHeight
 
@@ -192,37 +228,33 @@ MouseArea { // Notification group area
 
     // ── The popup's drop-in, tuned ───────────────────────────────────────
     //
-    // SLOWER AND SOFTER than the rest of the shell's motion, on purpose. This
-    // is the one animation the user is looking straight at, in the corner of
-    // their eye, with nothing else moving -- so it is the one that can afford
-    // to be unhurried. A 350ms `elementMoveFast` here read as a flick: the
-    // card was essentially in place before the eye finished travelling to it.
+    // A POP, NOT A FALL. It was 520ms of a full card-height travel, then 260ms
+    // of the same -- and even that read as a long slide, because the card
+    // starts ENTIRELY above the surface and is clipped by it, so the first
+    // ~100ms only showed a sliver creeping down (measured 2026-10-19).
     //
-    // 520ms, and matched to the fade-and-scale running alongside it on
-    // `elementMove`'s 500ms. The two are one gesture, so they have to share a
-    // clock: a drop that outran its own fade leaves the card visibly hanging
-    // in mid-air while it is still becoming opaque.
-    readonly property real dropDuration: 520
+    // 140ms over a SHORT fixed travel instead: the card is already mostly in
+    // place on the first frame, and the bounce does the work. The travel is
+    // capped at 24px (and floored at 12) so a tall card does not fall further
+    // than a short one -- distance is what made it feel slow, not just time.
+    //
+    // The fade/scale run on the SAME clock (see StyledListView's `addDuration`,
+    // which the popup sets), so nothing is still becoming opaque after the card
+    // has landed. The travel stays far inside the list's 3px spacing, so two
+    // arrivals cannot collide during the shoot-past.
+    readonly property real dropDuration: 140
 
-    // The curve. `elementMoveFast` was expressive but very front-loaded
-    // ([0.42, 1.67, ...]) -- most of the distance covered early, which is
-    // exactly the "too quick" quality. This one starts gently, spends most of
-    // its time in the middle of the travel where the movement is easy to
-    // follow, and the 1.28 first control point carries it just PAST its
-    // resting line before it comes back. That small overshoot is what turns
-    // an arrival into a landing: the card is dropped, it hits, it settles.
-    //
-    // The overshoot is held to about 3% of the travel. The popup list spaces
-    // its cards by 3px, and a card that dipped much further than that would
-    // briefly overlap the one below it during the settle -- a collision that
-    // only shows up when two notifications arrive together, which is exactly
-    // when the eye is on them.
+    // The curve: gone in a blink, past the resting line, back. The 1.75
+    // control point gives a much harder bounce than 1.42 did -- the card
+    // visibly overshoots and snaps back, which is the "jumpy" half of the
+    // request. The 0.42 return keeps the correction to one beat so it reads as
+    // a spring, not a wobble.
     //
     // Deliberately hand-written rather than one of the shell's shared curves.
     // `expressiveDefaultSpatial` has no overshoot at all (it parks flat), and
     // Material's multi-segment `emphasized` cannot be expressed as the single
     // cubic that `Easing.BezierSpline` takes.
-    readonly property list<real> dropCurve: [0.34, 1.18, 0.66, 1.0]
+    readonly property list<real> dropCurve: [0.15, 1.75, 0.42, 1.0]
 
     SequentialAnimation {
         id: dropIn
@@ -246,9 +278,23 @@ MouseArea { // Notification group area
         // is a card that has not resolved its height for any reason.
         Qt.callLater(() => {
             if (!root.popup) return;
-            dropTranslate.y = -(Math.max(background.implicitHeight, 40) + 10);
+            // NOT the card's own height. Travel distance is half of why the
+            // drop felt slow: a tall card fell further and so took visibly
+            // longer even on the same clock. A short fixed hop reads as a pop,
+            // and the curve's overshoot supplies the rest of the energy.
+            dropTranslate.y = -Math.min(24, Math.max(12, background.implicitHeight * 0.3));
             dropIn.restart();
         });
+    }
+
+    // (Re)started after layout, not at declaration: a popup delegate is
+    // created -- or RECYCLED onto another notification by the view -- and
+    // the line's `from` needs the card's real width, which exists only after
+    // the first layout pass. One callLater, so init and recycling take the
+    // same path.
+    onNotificationGroupChanged: {
+        if (root.popup)
+            Qt.callLater(() => { if (root.popup) popupLineAnim.restart(); });
     }
 
     Component.onCompleted: {
@@ -258,13 +304,24 @@ MouseArea { // Notification group area
 
     hoverEnabled: true
     onContainsMouseChanged: {
-        if (!root.popup) return;
-        if (root.containsMouse) root.notifications.forEach(notif => {
-            Notifications.cancelTimeout(notif.notificationId);
-        });
-        else root.notifications.forEach(notif => {
-            Notifications.timeoutNotification(notif.notificationId);
-        });
+        // A signal is not read, so hovering it must not hold it on screen:
+        // the countdown is the whole contract, and pausing it on the pointer
+        // would turn a glance into something to stand over.
+        if (!root.popup || root.isSignal) return;
+        if (root.containsMouse) {
+            // The line waits with the notification while it is being read:
+            // paused on entry, resumed on exit (a no-op where the timeout
+            // below destroys the card in the same breath).
+            popupLineAnim.pause();
+            root.notifications.forEach(notif => {
+                Notifications.cancelTimeout(notif.notificationId);
+            });
+        } else {
+            popupLineAnim.resume();
+            root.notifications.forEach(notif => {
+                Notifications.timeoutNotification(notif.notificationId);
+            });
+        }
     }
 
     SequentialAnimation { // Drag finish animation
@@ -319,6 +376,9 @@ MouseArea { // Notification group area
     DragManager { // Drag manager
         id: dragManager
         anchors.fill: parent
+        // Nothing to grab on a signal: no drag-to-dismiss and no click-to-
+        // open, because it names no app and holds nothing to throw away.
+        enabled: !root.isSignal
         interactive: !root.shownExpanded
         automaticallyReset: false
         acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
@@ -499,6 +559,43 @@ MouseArea { // Notification group area
             }
         }
 
+        // The popup's status line, embedded in the card: a hairline along
+        // its bottom edge that runs out over the notification's own popup
+        // interval, and when it is gone the card closes -- which is what the
+        // line promises the reader. Sidebar copies do NOT draw it
+        // (`visible: root.popup`): a history row has no deadline to show.
+        // EDGE TO EDGE -- full card width, 2px -- and `background` clips, so
+        // the card's own rounding crops the ends of the line.
+        Rectangle {
+            id: popupStatusLine
+            visible: root.popup
+            height: 2
+            radius: 1
+            color: Appearance.colors.colPrimary
+            anchors.left: parent.left
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: 4
+            width: 0
+        }
+
+        NumberAnimation {
+            id: popupLineAnim
+            target: popupStatusLine
+            property: "width"
+            from: background.width
+            to: 0
+            duration: root.popupLifetimeMs
+            easing.type: Easing.Linear
+            onFinished: {
+                // Line out = card closed. Idempotent alongside the service's
+                // own timer (timeoutNotification guards a missing id), and it
+                // never fires mid-hover: the animation pauses on entry.
+                if (root.popup && !root.containsMouse)
+                    root.notifications.forEach(n =>
+                        Notifications.timeoutNotification(n.notificationId));
+            }
+        }
+
         RowLayout { // Left column for icon, right column for content
             id: row
             anchors.top: parent.top
@@ -510,6 +607,11 @@ MouseArea { // Notification group area
             NotificationAppIcon { // Icons
                 Layout.alignment: Qt.AlignTop
                 Layout.fillWidth: false
+                // A copy confirmation wears the verb and no disc; a real
+                // notification keeps its app icon on the card's usual shape.
+                bareIcon: root.isSignal
+                    ? (root.signalKind === "image" ? "image" : "content_copy")
+                    : ""
                 image: root?.multipleNotifications ? "" : notificationGroup?.notifications[0]?.image ?? ""
                 appIcon: root.notificationGroup?.appIcon
                 summary: root.notificationGroup?.notifications[root.notificationCount - 1]?.summary
@@ -707,6 +809,11 @@ MouseArea { // Notification group area
                                 // documented to do).
                                 anchors.fill: appNamePlate
                                 hoverEnabled: true
+                                // A signal's title is a LABEL, not a button: no
+                                // hover plate, no pointing hand, no "click to
+                                // open" tooltip. The disabled hit area is what
+                                // turns all three off at once.
+                                enabled: !root.isSignal
                                 acceptedButtons: Qt.NoButton
                                 propagateComposedEvents: true
                                 cursorShape: Qt.PointingHandCursor
@@ -747,6 +854,10 @@ MouseArea { // Notification group area
                             text: NotificationUtils.getFriendlyNotifTimeString(notificationGroup?.time)
                             font.pixelSize: topRow.fontSize
                             color: Appearance.colors.colSubtext
+                            // No clock on a signal: "Copied" happened just now
+                            // and saying "now" beside it is notification
+                            // chrome, not information.
+                            visible: !root.isSignal
                         }
                     }
                     NotificationGroupExpandButton {
@@ -780,6 +891,11 @@ MouseArea { // Notification group area
                     id: notificationsColumn
                     implicitHeight: contentHeight
                     Layout.fillWidth: true
+                    // A signal has no body row at all: the message IS the
+                    // title ("Copied"), and drawing the item row beneath it
+                    // would leave an empty strip and -- with the delete button
+                    // stripped -- a dead band of card with nothing in it.
+                    visible: !root.isSignal
                     spacing: root.shownExpanded ? 5 : 3
                     // clip: true
                     interactive: false

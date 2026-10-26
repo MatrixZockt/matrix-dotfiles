@@ -599,8 +599,9 @@ Timer {
     }
 
     // 1.0 until the user actually moves the row: an untouched row is the
-    // neutral factor, and what the sound actually plays at is then decided by
-    // the overall volume -- see playSystemSoundFile, which multiplies the two.
+    // neutral factor, and the sound plays at it -- the sink applies its own
+    // volume to the stream afterwards, as it does to music. See
+    // playSystemSoundFile, which also accepts an optional per-sound gain.
     function systemSoundVolume(): real {
         const entry = root.systemSoundEntry();
         if (!entry || entry.remembered !== true)
@@ -634,22 +635,61 @@ Timer {
     // the same scale a music player sits at 100% on. So these sounds at row
     // 100% are as loud as music at 100%, and the sink governs both.
     //
+    // ONE OPTIONAL SECOND FACTOR, and it is not the sink coming back in. A
+    // caller may hand a sound a GAIN, which multiplies the row -- but only
+    // DOWNWARD: this player takes 0-1.0 and clamps, so a gain above 1 is not a
+    // way to make one sound louder than the row (see the clamp note in the
+    // body). Making a sound louder than music is the SAMPLE's job, and both
+    // sounds that needed it now carry their level in the file
+    // (assets/sounds/notification.oga is the chime at -0.9 dBFS peak). The
+    // row still scales gains in every direction -- a row at zero or muted
+    // spawns nothing at all -- and the sink is applied once, by the sink.
+    // Measured in the log line below as `row x gain`, so the identity is
+    // checkable from a terminal rather than from ears.
+    //
     // Returns false without spawning anything when the row is muted or when
     // either factor is zero: a slider at zero means "do not play this", and
     // honouring that by spawning a silent player is both slower and wrong -- the
     // notification still costs a process spawn and a PipeWire client on the wire.
-    function playSystemSoundFile(file: string): bool {
+    // The gain has NO default value, and that is not an oversight: QML's JS
+    // engine does not support default arguments on an annotated function
+    // ("Type annotations are not supported (yet)"), and a config with one fails
+    // to load -- the whole desktop, over a parameter that is meant to be
+    // optional. An omitted argument arrives as `undefined` instead, which the
+    // NaN test below turns back into 1.0, so callers that do not care about it
+    // can simply leave it off.
+    function playSystemSoundFile(file: string, gain: real): bool {
         const path = String(file ?? "").trim();
         if (path.length === 0)
             return false;
         const row = root.systemSoundVolume();
-        const volume = row;
+        // ── The factor cannot exceed 1.0, and pretending otherwise cost the
+        // notifications their whole boost ────────────────────────────────────
+        //
+        // `pw-play --volume` takes 0-1.0 and CLAMPS anything above it; measured
+        // 2026-10-26, `--volume 1.8` produces a stream at 65536 / 100 %. The
+        // chime used to ask for 1.8 and the drive click for 1.5, so both played
+        // at exactly the mixer row while the comments promised +5.1 / +3.5 dB
+        // -- which is precisely "music too loud, notification sounds too
+        // quiet": music is a full-scale master at 100 %, and a soft 311 ms
+        // drop at -5.9 dBFS does not survive under it.
+        //
+        // paplay CAN go above unity, but it cannot carry the mixer mark (its
+        // PULSE_PROP application.name is overwritten, measured the same day),
+        // and an unmarked stream would appear in the volume mixer as a
+        // flickering "paplay" row -- the bug isSystemSoundNode exists to
+        // prevent. So the level lives in the SAMPLE instead
+        // (assets/sounds/notification.oga is the chime at +4.9 dB), and the
+        // factor is clamped here so no caller can silently believe in a boost
+        // that the player throws away.
+        const factor = (isNaN(gain) || gain <= 0) ? 1.0 : Math.min(1, gain);
+        const volume = row * factor;
         if (root.systemSoundMuted() || volume <= 0.001) {
-            print(`[mixer] preview silent: muted=${root.systemSoundMuted()} row=${row}`);
+            print(`[mixer] preview silent: muted=${root.systemSoundMuted()} row=${row} gain=${factor}`);
             return false;
         }
         const level = volume.toFixed(3);
-        print(`[mixer] preview playing ${path} at ${level} (row ${row}, sink applies its own)`);
+        print(`[mixer] preview playing ${path} at ${level} (row ${row} x ${factor}, sink applies its own)`);
         // The mark the mixer filters on (see isSystemSoundNode). Set on the
         // pw-* players, which take `--properties`; the fallbacks cannot be
         // marked, but they only run on a machine with no PipeWire tooling at

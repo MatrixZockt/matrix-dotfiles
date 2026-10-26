@@ -22,7 +22,33 @@ Scope {
         visible: true
         property bool open: GlobalStates.sidebarRightOpen
         // 0..1 spring driving the whole motion.
-        property real t: open ? 1 : 0
+        //
+        // NOT a plain `open ? 1 : 0` binding, and that is the whole of the
+        // transition bug, mirrored from SidebarLeft.qml where it was measured:
+        // `t` used to rest at EXACTLY 1 in the same binding evaluation as the
+        // flag, so the card was told its final position before the entrance
+        // ran. The surface mapped at its resting geometry, the stretch ran
+        // against a target that never moved, and the exit -- which starts at 1
+        // and runs to 0 -- was the only half that actually travelled.
+        //
+        // So `t` rests at a value of its own (0 closed, restT open) and is
+        // driven from `onOpenChanged` below. Writing it in the change handler
+        // rather than binding it leaves the flag true first and the position a
+        // moment behind it, so the Behavior has a real distance to travel. The
+        // handler -- not a function each caller must remember to call -- means
+        // every existing `GlobalStates.sidebarRightOpen = ...` (the edge strip,
+        // the bar button, the shortcuts, the IPC) drives both halves correctly
+        // with no change to those files.
+        //
+        // `t` is moved in this ONE handler rather than in a second
+        // `onOpenChanged`: two handlers for one signal is a duplicate-signal
+        // load failure in QML, and this one already runs on every change.
+        readonly property real restT: 1
+        property real t: 0
+        // The card's live position for `state()`, so the entrance is
+        // measurable rather than guessed at: 490 closed (off-screen right),
+        // 10 at rest.
+        readonly property real cardX: sidebarContentLoader.x
         Behavior on t {
             // Asymmetric, chosen by direction, and deliberately the same pair
             // SidebarLeft.qml uses so the two sidebars cannot drift apart:
@@ -99,6 +125,13 @@ Scope {
         }
 
         onOpenChanged: {
+            // The position, first: `t` rests at its own value (0 closed,
+            // restT open) and moves here rather than being bound to `open`,
+            // because a binding puts it at its destination in the same
+            // evaluation as the flag -- the instant snap being fixed. Written
+            // in the change handler, the flag is true first and the card a
+            // moment behind it, so the Behavior has real distance to travel.
+            t = open ? restT : 0;
             if (open) {
                 GlobalFocusGrab.addDismissable(panelWindow);
                 // Armed from the live hover state, not forced to false. Opened
@@ -261,7 +294,23 @@ Scope {
             anchors {
                 fill: parent
                 margins: Appearance.sizes.hyprlandGapsOut
+                // The DISTANCE travelled by the entrance/exit, driven by the one
+                // stretch value `t` (see the driver above). At rest (t = 1) this
+                // is exactly the old constant elevationMargin, so the resting
+                // geometry -- and with it every position the hover arithmetic in
+                // `pointerOnCard` is measured against -- is unchanged.
+                //
+                // Closed (t = 0) it pushes the card's left edge to the window's
+                // own left edge, i.e. fully off-screen to the right, so the
+                // entrance has real distance to cover and the card ARRIVES at
+                // its position. That was the whole of "it shifts slightly then
+                // teleports": the old value was constant, so the card never
+                // moved at all -- only the scale (0.82 -> 1.0, anchored at the
+                // card's own RIGHT edge, which is off-screen) and the opacity
+                // changed. A scale whose origin sits outside the window is
+                // invisible for most of its travel, then arrives all at once.
                 leftMargin: Appearance.sizes.elevationMargin
+                    + (1 - panelWindow.t) * sidebarWidth
             }
             width: sidebarWidth - Appearance.sizes.hyprlandGapsOut - Appearance.sizes.elevationMargin
             height: parent.height - Appearance.sizes.hyprlandGapsOut * 2
@@ -301,6 +350,7 @@ Scope {
             // `onCard` and `cardLeft` are the pointer-out close's own inputs --
             // see the same note in SidebarLeft.qml.
             return `open=${GlobalStates.sidebarRightOpen} t=${panelWindow.t.toFixed(2)}`
+                + ` cardX=${panelWindow.cardX.toFixed(0)}`
                 + ` mask=${panelWindow.mask.width.toFixed(0)}x${panelWindow.mask.height.toFixed(0)}@${panelWindow.mask.x.toFixed(0)}`
                 + ` window=${panelWindow.width.toFixed(0)}x${panelWindow.height.toFixed(0)}`
                 // The pointer-out close's two magnitudes, read off the live

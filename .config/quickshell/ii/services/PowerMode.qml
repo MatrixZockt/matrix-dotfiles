@@ -120,6 +120,18 @@ Singleton {
     // parse it with the same function, because a second copy of either is a
     // second chance for the two to disagree about what the hardware said.
     //
+    // The panel's own mode rides in the same command (the last field, below),
+    // and for the same reason: a mode moves the refresh rate the screen is
+    // driven at -- 60 Hz on power-saver against the 240 Hz this panel is built
+    // for -- and the notice reports that as a row. Its "before" only exists
+    // for as long as the converge takes to reach the compositor (~400-1000 ms
+    // measured), so it has to be caught in the same t=0 read as the caps.
+    //
+    // Its source is the COMPOSITOR, not a spec sheet: the mode the panel is
+    // actually being driven at right now, which is the only thing that can
+    // tell "60 Hz because the mode says so" from "60 Hz because something
+    // else left it there".
+    //
     // enforced.power.limit is the field that answers on this card; power.limit
     // answers [N/A] here, which is what once made the graphics row read the
     // same in every mode. `systemctl is-active` is read FIRST and echoed in its
@@ -135,7 +147,8 @@ Singleton {
         "p=$(ls -d /sys/class/powercap/intel-rapl:[0-9] 2>/dev/null | head -1); " +
         "cat $p/constraint_0_power_limit_uw 2>/dev/null; echo ---; " +
         "cat $p/constraint_1_power_limit_uw 2>/dev/null; echo ---; " +
-        "cat /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null"]
+        "cat /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null; echo ---; " +
+        "hyprctl monitors -j 2>/dev/null"]
 
     function parseCaps(raw) {
         // One line per field, `---` between them (see capsCommand). Nothing is
@@ -150,6 +163,11 @@ Singleton {
             const m = String(text ?? "").match(/\d+/);
             return m ? Math.round(parseInt(m[0]) / 1000000) : 0;
         };
+        // Line 6 (the last field): the compositor's monitor list. Parsed before
+        // the object literal below so a broken read yields zeros rather than
+        // throwing out of the whole parse -- a card with no display row is a
+        // smaller failure than a card with no rows at all.
+        const display = root.parseDisplay(parts[5]);
         return {
             "capKnown": nums.length > 0,
             "capW": nums.length > 0 ? parseFloat(nums[0]) : 0,
@@ -158,7 +176,40 @@ Singleton {
             "pl1W": watts(parts[2]),
             "pl2W": watts(parts[3]),
             // no_turbo is the INVERSE of the question the notice asks.
-            "turbo": parts[4] === "1" ? "off" : (parts[4] === "0" ? "on" : "")
+            "turbo": parts[4] === "1" ? "off" : (parts[4] === "0" ? "on" : ""),
+            "displayW": display.width,
+            "displayH": display.height,
+            "displayHz": display.hz
+        };
+    }
+
+    // ── The panel's mode, from the compositor's own monitor list ───────────
+    //
+    // The INTERNAL panel is the `eDP-*` connector, and it is matched by that
+    // prefix rather than by name because the name is not stable across boots:
+    // this machine's card numbering follows GPU probe order, so the panel is
+    // card1-eDP-1 on one boot and card2-eDP-2 on the next (the same trap
+    // custom/general.lua's monitor rule documents). A machine with no eDP at
+    // all -- an external-only desktop -- falls back to the first monitor, which
+    // is the one the notices of this shell are drawn on.
+    //
+    // A failed or unparseable read yields zeros, and the notice prints "—"
+    // rather than inventing a mode. `hyprctl` answers "Couldn't connect" as its
+    // stdout when the IPC socket is gone (see HyprlandData's note on that
+    // failure), which is exactly the case JSON.parse would throw on.
+    function parseDisplay(raw) {
+        let monitor = null;
+        try {
+            const list = JSON.parse(String(raw ?? "").trim() || "[]");
+            if (Array.isArray(list))
+                monitor = list.find(m => String(m.name ?? "").startsWith("eDP")) ?? list[0] ?? null;
+        } catch (error) {
+            monitor = null;
+        }
+        return {
+            "width": monitor?.width ?? 0,
+            "height": monitor?.height ?? 0,
+            "hz": monitor?.refreshRate ?? 0
         };
     }
 

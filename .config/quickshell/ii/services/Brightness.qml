@@ -357,26 +357,21 @@ Singleton {
         BrightnessMonitor {}
     }
 
-    // ── Anti-flashbang: DELETED ──────────────────────────────────────────
+    // ── Anti-flashbang: NOT HERE ─────────────────────────────────────────
     //
-    // There was a second anti-flashbang mechanism here -- a per-monitor
-    // `Variants` scope that listened to Hyprland events, ran
+    // Two earlier versions of this feature lived in this file and are gone:
+    // a per-monitor `Variants` scope that measured the screen with grim +
+    // ImageMagick on every Hyprland event (~750 ms of CPU per event, and the
+    // reaction landed after the flash), and then a layer-shell veil driven by
+    // a Python daemon, which could not cover the gap between a window appearing
+    // and the veil being raised.
     //
-    //     grim -o <monitor> - | magick png:- -colorspace Gray -format "%[fx:mean*100]"
-    //
-    // to measure the screen's average lightness, fed it through a fitted
-    // exponential curve (`brightnessMultiplierForLightness`) and scaled the
-    // panel's physical backlight by the result. Removed at the user's request:
-    // measured on this machine it cost ~750ms of CPU per event (grim capture +
-    // PNG encode + ImageMagick decode on a 2560x1600 panel) to darken a screen
-    // that had already flashed -- the reaction arrived after the flash, and it
-    // was the most expensive thing the shell did.
-    //
-    // Deliberately NOT left as a disabled feature: a mechanism nobody wants, at
-    // that cost, is better absent than one switch away from being re-enabled.
-    // The other half of the feature -- the Hyprland screen_shader service and
-    // its two GLSL files, plus both quick-toggle models -- is deleted with it.
-    // Nothing here is reachable any more, and nothing elsewhere refers to it.
+    // The feature now lives in the compositor, where it cannot be late:
+    // services/HyprlandAntiFlashbangShader.qml loads a screen_shader that dims
+    // each frame in proportion to its own average brightness. Nothing here is
+    // reachable any more, and nothing in this file touches the backlight for
+    // it -- which also means keying brightness up and down by hand is never
+    // fighting a running filter.
 
     // External trigger points
 

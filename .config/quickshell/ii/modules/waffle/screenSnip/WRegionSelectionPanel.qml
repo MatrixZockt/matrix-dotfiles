@@ -7,6 +7,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import Quickshell.Hyprland
+import qs
 import qs.services
 import qs.modules.common
 import qs.modules.common.functions
@@ -345,7 +346,9 @@ PanelWindow {
         WToolbarIconButton {
             icon.name: "colorize"
             onClicked: {
-                Quickshell.execDetached(["bash", "-c", "sleep 0.2; hyprpicker -a"]);
+                // The shell's own picker (hyprpicker was never installed).
+                // Its 200ms pre-grab delay covers this panel closing first.
+                GlobalStates.colorPickerOpen = true;
                 root.closed();
             }
             WToolTip {

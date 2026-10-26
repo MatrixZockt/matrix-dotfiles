@@ -92,8 +92,14 @@ ColumnLayout {
             // say they are idle, which is the truth.
             const clockIsFor = root.gpuClockCardPci();
             const gpuPci = (SystemFacts.gpus.find(entry => entry.name === gpu) ?? {}).pci ?? "";
-            const hasClock = HardwareStats.gpuClockMhz > 0
-                && (clockIsFor === "" || gpuPci === "" || clockIsFor === gpuPci);
+            const owns = clockIsFor === "" || gpuPci === "" || clockIsFor === gpuPci;
+            const hasClock = HardwareStats.gpuClockMhz > 0 && owns;
+            // The same card's busy fraction, when its driver PUBLISHES one in
+            // percent (amdgpu). Nothing is inferred for a driver that does not
+            // -- i915's RC6 counter read a permanent 100% on this laptop and is
+            // gone from HardwareStats, so an Intel row here leads with its
+            // clock, which is a fact.
+            const hasLoad = owns && HardwareStats.gpuLoad >= 0;
             list.push({
                 key: "gpu:" + gpu,
                 // `developer_board` is the chip-and-traces glyph. (There is no
@@ -102,13 +108,17 @@ ColumnLayout {
                 // render as an oversized "VIDEOCARD" and clip its own number.)
                 icon: "developer_board",
                 name: Translation.tr("Graphics"),
-                headline: hasClock ? HardwareStats.gpuClockMhz.toFixed(0) + " MHz" : Translation.tr("idle"),
-                caption: hasClock
-                    ? (HardwareStats.gpuClockMaxMhz > 0 ? Translation.tr("of %1 MHz").arg(HardwareStats.gpuClockMaxMhz.toFixed(0)) : Translation.tr("clock"))
-                    : Translation.tr("no processes"),
+                headline: hasLoad
+                    ? (HardwareStats.gpuLoad * 100).toFixed(0) + "%"
+                    : (hasClock ? HardwareStats.gpuClockMhz.toFixed(0) + " MHz" : Translation.tr("idle")),
+                caption: hasLoad
+                    ? (hasClock ? Translation.tr("busy · %1 MHz").arg(HardwareStats.gpuClockMhz.toFixed(0)) : Translation.tr("busy"))
+                    : (hasClock
+                        ? (HardwareStats.gpuClockMaxMhz > 0 ? Translation.tr("of %1 MHz").arg(HardwareStats.gpuClockMaxMhz.toFixed(0)) : Translation.tr("clock"))
+                        : Translation.tr("no processes")),
                 detail: gpu,
                 spec: root.gpuSpec(gpu),
-                history: hasClock ? HardwareStats.gpuHistory : []
+                history: hasLoad ? HardwareStats.gpuLoadHistory : (hasClock ? HardwareStats.gpuHistory : [])
             });
         }
 

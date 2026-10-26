@@ -2,9 +2,12 @@
 //
 // This was how the Files popup became a real window: the morph spawned this
 // empty Window at the screen rect and pushed it fullscreen (same contract as
-// SettingsWindowHost). It is retired because the file manager IS an ordinary
-// window now -- filemanager.qml is a plain `Window`, so there is nothing to
-// morph INTO: it opens attached, tiles, and takes SUPER + F like any other app.
+// SettingsWindowHost). It is doubly retired: the file manager became an ordinary
+// window (filemanager.qml was a plain `Window`, so there was nothing to morph
+// INTO), and then went back to being a bar-style POPUP -- today it is a layer
+// surface with a card on a scrim, which cannot be a morph target at all. See
+// filemanager.qml's header for the two measured failures of the window form that
+// sent it back.
 // Nothing references this file. It is left in the tree rather than deleted
 // because it is the only written-down version of the pid-guarded fullscreen
 // assertion (focus by pid, then fullscreen, retried to win the race with the

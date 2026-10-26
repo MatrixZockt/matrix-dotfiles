@@ -65,6 +65,11 @@ Singleton {
         case "usb": return Translation.tr("USB stick");
         case "ssd": return Translation.tr("Solid-state drive");
         case "hdd": return Translation.tr("Hard disk");
+        // The two kinds the USB census below reports: a device that speaks MTP
+        // is a phone (or a camera, and it is mounted the same way), everything
+        // else on a pluggable port is simply a thing that was plugged in.
+        case "phone": return Translation.tr("Phone or camera");
+        case "usbdev": return Translation.tr("USB device");
         default: return Translation.tr("Drive");
         }
     }
@@ -135,6 +140,13 @@ Singleton {
     // the click was easy to miss exactly when a drive went in. Peaking just
     // under full scale makes it read above music and above the other chimes.
     //
+    // AND IT PLAYS ABOVE THE ROW (REQUESTED 2026-10-14: "slightly louder than
+    // now so it's over the music"). -1 dBFS is the sample's ceiling -- there is
+    // nowhere left to raise the file, and limiting its decay would change the
+    // click into something else -- so the second half of the answer is a
+    // playback gain, `deviceSoundGain` below. The sample and the gain are one
+    // decision made in two places, which is why they are described together.
+    //
     // shipped as assets/sounds/device-insert.wav. It was synthesised here
     // first (scripts/system/make-device-sounds.py still holds that recipe) and
     // then replaced, because the sound wanted was one specific recording --
@@ -166,9 +178,45 @@ Singleton {
     // actually asked for the click (and that a muted mixer asks for nothing).
     property int chimed: 0
     property int silent: 0
+    // ── How far above a chime the click plays ────────────────────────────
+    //
+    // REQUESTED (2026-10-14): "slightly louder than now so it's over the
+    // music". The sample has no headroom left to give. Measured on the shipped
+    // pair: the attack sits at -1.00 dBFS (29203) and the useful part of the
+    // click is its first 30 ms, while the remaining 170 ms decays from -28 to
+    // -44 dBFS -- a crest factor of 23.6 dB, which is exactly why a 200 ms
+    // transient at full scale still reads as quiet beside music at the same
+    // mixer setting (music carries about 10 dB of crest). Raising the FILE is
+    // not available: -1 dBFS is deliberate headroom and 0 dBFS is clipping.
+    //
+    // So the boost is a playback factor, and a named one rather than a nudge to
+    // the System Sounds row. The row is the control for every system sound and
+    // it stays the control: at 0 or muted this spawns nothing at all, and the
+    // sink still applies its own volume as it does to music. What the row is
+    // NOT is the right place to solve this one sound's problem -- a chime that
+    // plays over silence does not need to beat anything, while this click has
+    // to be heard WHILE music is playing, with a hand still on the stick.
+    //
+    // +3.5 dB (1.5x) is "slightly": about a third of the way to the point
+    // where a click stops being an announcement and becomes painful, and small
+    // enough that the sink at 100% with the row at 100% is the only corner of
+    // the volume range where the attack can touch the ceiling.
+    // ── 1.0, not 1.5: the factor never worked ───────────────────────────────
+    //
+    // This used to be 1.5 (+3.5 dB) on the argument above -- and it was a
+    // no-op: `pw-play --volume` clamps at 1.0 (measured 2026-10-26; a 1.5
+    // stream comes up at 65536 / 100 %), so the click has always played at
+    // exactly the mixer row. The sample is already peak-normalised at
+    // -1.0 dBFS, which is the ceiling for a file, and a stream cannot go
+    // above 100 % through this player (see Audio.playSystemSoundFile for why
+    // paplay is not an option: it cannot carry the mixer mark). So the honest
+    // value is 1.0, and what was really needed -- the click being audible over
+    // music -- came from the music side: MusicPlayer's start volume is no
+    // longer 80 % of a full-scale master.
+    readonly property real deviceSoundGain: 1.0
     function playDeviceSound(inserted: bool): bool {
         const path = inserted ? root.insertSoundPath : root.removeSoundPath;
-        const played = Audio.playSystemSoundFile(path);
+        const played = Audio.playSystemSoundFile(path, root.deviceSoundGain);
         if (played)
             root.chimed++;
         else
@@ -236,8 +284,12 @@ Singleton {
                 hotplugDebounce.restart();
                 // The phone half: only a USB event can mean one arrived, and
                 // "(usb)" is how udevadm spells the subsystem it came from.
-                if (event.indexOf("(usb)") !== -1)
+                if (event.indexOf("(usb)") !== -1) {
+                    // Both halves: the notice about what arrived, and the phone
+                    // mount, which needs its own longer grace period.
+                    usbScanDebounce.restart();
                     mtpScanDebounce.restart();
+                }
             }
         }
         // A watcher that is dead would leave only the slow census behind, and
@@ -499,8 +551,35 @@ Singleton {
     // for the phone" note covers.
     readonly property string mtpRoot: (Quickshell.env("XDG_RUNTIME_DIR") ?? "/tmp") + "/mtp"
     readonly property string mtpScanScript: Quickshell.shellPath("scripts/system/mtp-devices.sh")
+    // Readable phones only: a mount point that lists something. See
+    // mtpRefusing below for the mounts that are up and answering nothing.
     property var mtpMounted: ({})
+    // Mounts that are UP and REFUSING (the phone was locked, or its "allow
+    // access to phone data" prompt was still unanswered, when the session was
+    // opened): directory to the entry count the scan saw, so 0 is a live empty
+    // directory and -1 is a session that did not answer at all. These are the
+    // case this whole block used to get wrong -- a phone mounted at plug time
+    // by the shell is not evidence that the phone is open, and treating it as
+    // open left an empty folder on screen for the rest of the session with
+    // nothing ever asking again.
+    property var mtpRefusing: ({})
     property var mtpAutoTried: ({})
+    // Attempts made per mount point since it was plugged in, and the ones the
+    // SHELL opened (whether or not the phone has answered yet). Both are
+    // forgotten when the device leaves the bus: a replug is a new complaint,
+    // not a remembered one. mtpOpened is what makes "auto mounted" mean
+    // something: a phone that starts answering after the attempt is still this
+    // shell's doing, and it is confirmed on whichever later scan sees it.
+    property var mtpRepairs: ({})
+    property var mtpOpened: ({})
+    // Six attempts, four seconds apart: the hand that plugs a phone in unlocks
+    // it and taps the phone's own prompt within a few seconds, and a refused
+    // session only yields to a FRESH one, so the retry is the whole mechanism.
+    // Bounded because a device that refuses for a minute is not going to start
+    // answering on the tenth ask, and a loop with no cap is how a hotplug
+    // handler turns into a background process.
+    readonly property int mtpRepairLimit: 6
+    readonly property int mtpRepairSpacing: 4000
     property int mtpAutoMounts: 0
     property int mtpScans: 0
     // Its label and its directory: the SAME rule the file manager uses
@@ -529,15 +608,43 @@ Singleton {
             onStreamFinished: root.autoMountPhones(this.text)
         }
     }
+    // One attempt at a fresh session for a mount point.
+    //
+    // It is the only thing that can help, and the take-down half is not
+    // optional: an AFT session that was refused storages answers "nothing" for
+    // its whole life, so mounting on top of it changes nothing. `fusermount -u`
+    // normally takes its process with it, and `pkill` is there for when it does
+    // not -- a leftover holder keeps the phone's single MTP interface claimed,
+    // and a mount that cannot claim it comes up as another empty directory
+    // (measured on this machine: libusb_claim_interface() reports device is
+    // busy, and aft-mtp-mount still exits 0).
+    function mtpMountCommand(dir) {
+        const d = root.shq(dir);
+        return `mkdir -p ${d}`
+            + `; fusermount3 -u ${d} >/dev/null 2>&1 || fusermount -u ${d} >/dev/null 2>&1 || umount ${d} >/dev/null 2>&1`
+            + `; pkill -x -f ${root.shq("aft-mtp-mount " + dir)} >/dev/null 2>&1`
+            + `; aft-mtp-mount ${d} >/dev/null 2>&1 || { echo "phone mount failed: ${dir}"; fail=1; }`;
+    }
     function autoMountPhones(text) {
         root.mtpScans++;
-        const mounted = {};
+        const readable = {};
+        const refusing = {};
         const devices = [];
         for (const raw of String(text ?? "").split("\n")) {
             const line = raw.trim();
             if (line.indexOf("mounts|") === 0) {
-                const dir = line.slice(7).trim();
-                if (dir.length > 0) mounted[dir] = true;
+                const parts = line.split("|");
+                const dir = String(parts[1] ?? "").trim();
+                if (dir.length === 0) continue;
+                // The third field is how many entries the mount LISTS (see
+                // scripts/system/mtp-devices.sh): >0 readable, 0 refused,
+                // -1 did not answer. Missing on purpose is not possible -- an
+                // older script without the field reads as unreadable, which
+                // errs towards asking again rather than towards showing an
+                // empty folder.
+                const entries = Number(String(parts[2] ?? "-1"));
+                if (entries > 0) readable[dir] = true;
+                else refusing[dir] = Number.isFinite(entries) ? entries : -1;
                 continue;
             }
             if (line.indexOf("dev|") !== 0) continue;
@@ -545,21 +652,49 @@ Singleton {
             if (f.length < 6) continue;
             devices.push({ name: f[1], manufacturer: f[4], product: f[5] });
         }
-        root.mtpMounted = mounted;
+        root.mtpMounted = readable;
+        root.mtpRefusing = refusing;
         // Same once-per-plug rule as the drives: a phone that is not there any
-        // more forgets that it was tried, a phone that is mounted is left
+        // more forgets that it was tried, a phone that is readable is left
         // alone, and a phone the user ejected stays ejected until it is
-        // replugged.
+        // replugged. The one thing that renews the budget on its own is a
+        // mount that is REFUSING: that is not a phone in use, it is a phone
+        // whose permission arrived after the session did.
         const tried = {};
+        const repairs = {};
+        const opened = {};
         const cmds = [];
         for (const d of devices) {
             const dir = root.mtpMountPointOf(d);
-            if (mounted[dir] || root.mtpAutoTried[dir]) { tried[dir] = true; continue; }
+            const made = Number(root.mtpRepairs[dir] ?? 0);
+            const ours = root.mtpOpened[dir] === true;
+            if (readable[dir]) {
+                tried[dir] = true;
+                // Counted here and not on the mounter's exit status: exit 0 is
+                // what an empty tree looks like too. "Automounted" means the
+                // phone ended up READABLE.
+                if (ours) root.mtpAutoMounts++;
+                continue;
+            }
             tried[dir] = true;
-            cmds.push(`mkdir -p ${root.shq(dir)} && aft-mtp-mount ${root.shq(dir)}`
-                + ` || { echo "phone mount failed: ${dir}"; fail=1; }`);
+            const refusingHere = Object.prototype.hasOwnProperty.call(refusing, dir);
+            const act = !root.mtpAutoTried[dir]
+                || (refusingHere && made < root.mtpRepairLimit);
+            if (act) {
+                repairs[dir] = made + 1;
+                opened[dir] = true;
+                cmds.push(root.mtpMountCommand(dir));
+            } else if (made > 0 || ours) {
+                // Still not readable and no longer asking: remembered as tried
+                // so the budget is not renewed by a scan that changes nothing,
+                // and remembered as ours so a late unlock still counts.
+                repairs[dir] = made;
+                opened[dir] = true;
+            }
         }
         root.mtpAutoTried = tried;
+        root.mtpRepairs = repairs;
+        root.mtpOpened = opened;
         if (cmds.length === 0) return;
         mtpMountProc.script = "fail=0\n" + cmds.join("\n") + "\nexit $fail";
         mtpMountProc.running = false;
@@ -573,15 +708,162 @@ Singleton {
             splitMarker: "\n"
             onRead: line => console.log(`[volumes] ${String(line ?? "")}`)
         }
-        onExited: (exitCode, exitStatus) => {
-            if (exitCode === 0) root.mtpAutoMounts++;
-        }
+        // Look again after the attempt, whatever it printed: the question
+        // "did the phone become readable?" is answered by a scan, and a phone
+        // unlocked while the mount was being made answers on the NEXT session,
+        // not on this one. mtpRepairTimer decides whether another attempt is
+        // owed.
+        onExited: (exitCode, exitStatus) => mtpRepairTimer.restart()
     }
     Timer {
         // The phone's grace period after a USB event, for the reason above.
         id: mtpScanDebounce
         interval: 1500
         onTriggered: root.scanMtp()
+    }
+    Timer {
+        // The retry, at the mount block's own cadence. Spaced rather than
+        // immediate because every attempt is a fresh MTP session: asking again
+        // in the same second asks the same unanswered question.
+        id: mtpRepairTimer
+        interval: root.mtpRepairSpacing
+        onTriggered: root.scanMtp()
+    }
+
+    // ── The other half: the things that are not drives ──────────────────
+    //
+    // REQUESTED (2026-10-14): "I get no notification when plugging something in
+    // and out of the pc like a usb key." The census above answers that for
+    // storage and for nothing else, because lsblk only knows block devices --
+    // which is the exact shape of the report: a stick was announced and a
+    // phone (or a pad, or a headset dongle) was not, while from the outside
+    // both are the same gesture on the same port. Found on this machine while
+    // fixing it, and it is the published case: a Samsung phone on bus 1
+    // (`1-12`, `removable`) giving no sign of itself anywhere in the session.
+    //
+    // So this is the second census, over sysfs rather than lsblk
+    // (scripts/system/usb-devices.sh), and it announces the devices the drive
+    // census cannot see -- same notification, same click, because a device
+    // going in is one gesture whether it is a stick or a phone.
+    //
+    // WHAT KEEPS IT QUIET, since "every USB device" on a laptop is every
+    // internal part it has:
+    //   * `removable` ONLY -- the firmware's own answer about the PORT, read
+    //     from sysfs. Measured on this machine 2026-10-14: the camera (1-8),
+    //     the keyboard (1-10) and the Bluetooth (1-14) all read `fixed`, and
+    //     the phone on a cable read `removable`. A port the firmware cannot
+    //     classify reads `unknown` and is left alone rather than guessed at,
+    //     which is what keeps a resume (when the whole bus re-enumerates) from
+    //     producing a notice about hardware nobody moved;
+    //   * hubs (class 09) are skipped: the thing plugged into the hub is the
+    //     gesture, the hub is the splitter;
+    //   * mass storage is skipped HERE by construction -- the drive census
+    //     announces it with the label, filesystem and size a person recognises,
+    //     and one plug gets one notice, not two;
+    //   * the first scan is a census (`usbPrimed`), the same rule as the drive
+    //     side: whatever was already plugged in when the shell started is not
+    //     news.
+    readonly property string usbScanScript: Quickshell.shellPath("scripts/system/usb-devices.sh")
+    // sysfs device name ("1-12") -> record. The drive side keeps a row per
+    // device because its notice is built from partitions; here the product name
+    // is the whole of it, so a record holds exactly what a notice needs.
+    property var usbKnown: ({})
+    // The drive side calls its first poll a census; this is the same flag for
+    // the same reason, and it is separate because the two arrive at different
+    // times -- the phone is up in a second, a card whose partition table the
+    // kernel has not read yet is not.
+    property bool usbPrimed: false
+    property int usbScans: 0
+    function usbKind(rec) {
+        return rec.mtp ? "phone" : "usbdev";
+    }
+    // One line about a device: what it calls itself, and who made it. Both, when
+    // they are different -- "SAMSUNG_Android · SAMSUNG" is how a person
+    // recognises the thing on the end of the cable, where the sysfs name `1-12`
+    // is not.
+    function usbDescribe(rec) {
+        const parts = [];
+        const product = String(rec?.product ?? "").trim();
+        const maker = String(rec?.manufacturer ?? "").trim();
+        if (product.length > 0) parts.push(product);
+        if (maker.length > 0 && maker !== product) parts.push(maker);
+        if (parts.length === 0) parts.push(String(rec?.name ?? ""));
+        return parts.join(" · ");
+    }
+    function scanUsb() {
+        usbScanProc.running = false;
+        usbScanProc.running = true;
+    }
+    Process {
+        id: usbScanProc
+        command: ["bash", root.usbScanScript]
+        stdout: StdioCollector {
+            onStreamFinished: root.consumeUsb(this.text)
+        }
+    }
+    function consumeUsb(text) {
+        root.usbScans++;
+        const now = {};
+        for (const raw of String(text ?? "").split("\n")) {
+            const line = raw.trim();
+            if (line.indexOf("dev|") !== 0) continue;
+            const f = line.split("|");
+            if (f.length < 8) continue;
+            const rec = {
+                name: f[1],
+                product: f[2],
+                manufacturer: f[3],
+                removable: f[4],
+                deviceClass: f[5],
+                massStorage: f[6] === "1",
+                mtp: f[7] === "1"
+            };
+            // A pluggable port, and not the drive census's business.
+            if (rec.removable !== "removable") continue;
+            if (rec.massStorage) continue;
+            now[rec.name] = rec;
+        }
+        if (root.usbPrimed)
+            root.diffUsb(root.usbKnown, now);
+        root.usbKnown = now;
+        root.usbPrimed = true;
+    }
+    // Same shape as the drive diff above, and for the same reason: what is
+    // present now but was not is an insertion, what was and is not is a
+    // removal, and everything present in both is nothing at all.
+    function diffUsb(before, after) {
+        for (const name in after) {
+            if (name in before) continue;
+            root.announce(root.usbKind(after[name]), true, root.usbDescribe(after[name]));
+        }
+        for (const name in before) {
+            if (name in after) continue;
+            root.announce(root.usbKind(before[name]), false, root.usbDescribe(before[name]));
+        }
+    }
+    Timer {
+        // Longer than the block debounce (one insertion arrives there as a disk
+        // and each of its partitions) because a USB device has more to publish
+        // before it settles -- a phone brings up five interfaces, and a notice
+        // fired between the device and its first interface names a device that
+        // is not finished existing. Shorter than the MTP grace period, so the
+        // notice about a phone arrives before the mount is attempted.
+        id: usbScanDebounce
+        interval: 700
+        onTriggered: root.scanUsb()
+    }
+    // The census at startup, and deliberately not `triggeredOnStart` on a
+    // repeating timer: this one asks once, because the udev stream is what
+    // answers from then on and a census every few seconds would be a process
+    // spawn per tick to answer a question that only changes when a cable moves.
+    // The USB census at startup, and the PHONE half with it: the MTP scan used
+    // to run only on a hotplug event, so a shell that started with a phone
+    // already on the bus (a reload, a relogin, a phone plugged in before the
+    // session) never looked at it. The census is the precedent -- a device that
+    // is there now is read now.
+    Component.onCompleted: {
+        root.scanUsb();
+        root.scanMtp();
     }
 
     // ── Reachable by hand ───────────────────────────────────────────────
@@ -591,17 +873,27 @@ Singleton {
     // notification path, and `poll` just asks again. `automountNow` drives the
     // automount pass by hand, for the same reason and for the same class of
     // question: whether "plugged in" really means "mounted", which no keypress
-    // can otherwise ask.
+    // can otherwise ask. The USB census has the same quartet -- `usbForget`,
+    // `usbPhantom`, `usbScan` and the `usb=` field of `state` -- because a
+    // phone cannot be plugged in from a script any more than a stick can.
     function stateLine() {
         const rows = [];
         for (const p in root.known)
             rows.push(`${p}:${root.known[p].type}:${root.known[p].kind}:${root.known[p].hasFs ? "fs" : "raw"}`);
+        // The USB census is reported by NAME and kind, not by count: a check
+        // (and a person reading `state`) has to be able to name the device it
+        // is about to drop, and the sysfs name is the handle both use.
+        const usbRows = [];
+        for (const n in root.usbKnown)
+            usbRows.push(`${n}:${root.usbKind(root.usbKnown[n])}:${String(root.usbKnown[n].product ?? "").replace(/\s+/g, "_")}`);
         return `primed=${root.primed} poll=${root.pollCount} noticed=${root.noticed}`
             + ` chimed=${root.chimed} silent=${root.silent}`
             + ` hotplug=${hotplugWatch.running ? "on" : "off"}/${root.hotplugEvents}`
             + ` devices=${rows.length ? rows.join(",") : "-"}`
             + ` automounted=${root.autoMounts} automountFailures=${root.autoMountFailures}`
             + ` mtpScans=${root.mtpScans} mtpAutoMounted=${root.mtpAutoMounts}`
+            + ` mtpRefusing=${Object.keys(root.mtpRefusing).length}`
+            + ` usbPrimed=${root.usbPrimed} usbScans=${root.usbScans} usb=${usbRows.length ? usbRows.join(",") : "-"}`
             + ` autoCmd="${root.autoMountCommand}" autoSaid="${root.autoMountNote}"`
             + ` last="${root.lastEvent}"`;
     }
@@ -613,6 +905,39 @@ Singleton {
         root.scanMtp();
         return `automount: ${eligible} device(s) considered, command="${root.autoMountCommand}"`
             + ` | phones: ${root.mtpScans} scans, ${root.mtpAutoMounts} mounted`;
+    }
+    // The other direction of the same problem, and it is the reason `phantom`
+    // exists below on the drive side: an unplug cannot be staged either. The
+    // record is planted in the census, so the next scan finds it gone and fires
+    // the ordinary "removed" notice, click and all.
+    function usbPhantom(name, kind, product) {
+        const n = String(name ?? "").trim();
+        const next = Object.assign({}, root.usbKnown);
+        next[n] = {
+            name: n,
+            product: String(product ?? ""),
+            manufacturer: "",
+            removable: "removable",
+            deviceClass: "00",
+            massStorage: false,
+            mtp: kind === "phone"
+        };
+        root.usbKnown = next;
+        return `planted usb ${n}: the next scan will report it removed`;
+    }
+    // The USB half of `forget`, and with the same limit stated there: there is
+    // no way to unplug a phone from a script either, so the check suite drops a
+    // device this census can see and the next scan reports it INSERTED -- the
+    // real notice, the real click and the real popup, driven by hand. It is the
+    // only way to exercise that path without hardware in the port.
+    function usbForget(name) {
+        const n = String(name ?? "").trim();
+        if (!(n in root.usbKnown))
+            return `unknown usb device: ${n} (known: ${Object.keys(root.usbKnown).join(", ") || "none"})`;
+        const next = Object.assign({}, root.usbKnown);
+        delete next[n];
+        root.usbKnown = next;
+        return `forgot usb ${n}: the next scan will report it inserted`;
     }
     function forget(path) {
         const p = String(path ?? "");

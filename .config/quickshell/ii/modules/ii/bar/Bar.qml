@@ -22,8 +22,9 @@ Scope {
     property var gapAsker: null
 
     // ── "Fills the screen" ──────────────────────────────────────────────
-    // Set by the compositor config (custom/keybinds.lua) over the
-    // `quickshell:barCover` target, below.
+    // Reachable over the `barCover` IPC target below. NOTHING SETS IT
+    // routinely any more -- see the note further down -- so treat it as the
+    // manual/diagnostic door into this state.
     //
     // TRUE fullscreen needs no help: the client renders over the bar, so the
     // bar is already invisible. But the state this desktop actually wants is
@@ -35,11 +36,20 @@ Scope {
     // the four-finger swipe were reported as doing.
     //
     // The compositor cannot release that zone by itself -- the reservation is
-    // the shell's own layer-shell surface -- so it says so and the bar gives
-    // the strip up: exclusiveZone drops to 0, the maximized window expands
-    // into it, the bar slides out the way it does under fullscreen, and the
-    // app is never told it is fullscreen. Both halves of the request are in
-    // this one flag, so the two can never disagree. The state itself lives in
+    // the shell's own layer-shell surface -- so it used to say so over the
+    // `barCover` IPC below and the bar gave the strip up.
+    //
+    // IT NO LONGER SAYS SO (2026-10-14), and the flag is dormant. Two reasons,
+    // both measured: the request spawned a whole `qs` process on every cover
+    // toggle (89ms wall, 78% of a core, twice per cycle -- CPU burned under the
+    // very transition it was meant to serve), and the strip had stopped
+    // answering to it anyway -- the zone now follows auto-hide alone (see
+    // `exclusiveZone` far below, where the two gates that used to sit on it are
+    // recorded as removed). What the bar actually needs is below, and it
+    // derives it from its own window list: `fullscreenOnMonitor` for the
+    // internal-fullscreen cover, `coverByGeometry` for the float+pin one. Both
+    // verified with the request never sent. The handler is kept callable, and
+    // the flag's job is unchanged for a manual caller. The state itself lives in
     // GlobalStates (see there) -- `pragma ComponentBehavior: Bound` means a
     // property on this Scope is NOT reachable from inside the per-monitor
     // component that draws the bar.
@@ -49,10 +59,11 @@ Scope {
         target: "barCover"
         // Both arguments are declared as strings because that is all a
         // Quickshell IPC boundary can carry (a QVariant is refused outright),
-        // and the compositor sends exactly that: `ipc call barCover cover
-        // true 0x…`. The flag is read permissively anyway -- a bar stuck
-        // yielded because a boolean did not coerce is the worst possible
-        // failure for this feature.
+        // and a caller sends exactly that:
+        // `ipc call barCover onCover true 0x…` (the full name -- this build
+        // does not strip the `on` prefix). The flag is read permissively
+        // anyway -- a bar stuck yielded because a boolean did not coerce is
+        // the worst possible failure for this feature.
         function onCover(on: string, address: string) {
             GlobalStates.barCoverRequested = on === "true" || on === "1"
             GlobalStates.barCoverAddress = GlobalStates.barCoverRequested ? String(address ?? "") : ""
@@ -2592,9 +2603,10 @@ Scope {
                         function swipeOpt(name: string, on: string): string {
                             return barContent.swipeOpt(name, on);
                         }
-                        // The sound icon's two-finger tap. Same hover gate as
-                        // the gesture, so a probe run says whether the pointer
-                        // is on the icon before it decides anything:
+                        // The sound icon's one-finger tap (silence, or put the
+                        // level back). Same hover gate as the gesture, so a
+                        // probe run says whether the pointer is on the icon
+                        // before it decides anything:
                         //   qs -c ii ipc call bar soundTap
                         function soundTapProbe(): string {
                             return barContent.soundTapProbe();
@@ -2975,8 +2987,8 @@ Scope {
                 proxy.swipeDiagReset();
         }
 
-        // The sound icon's two-finger tap, from outside the shell: it silences,
-        // or puts the previous level back, exactly as the gesture does -- the
+        // The sound icon's one-finger tap, from outside the shell: it silences,
+        // or puts the previous level back, exactly as the click does -- the
         // pointer has to be over the icon either way, which is reported rather
         // than assumed.
         //   qs -c ii ipc call bar soundTap

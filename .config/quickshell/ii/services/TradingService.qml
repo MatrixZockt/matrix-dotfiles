@@ -146,6 +146,54 @@ Singleton {
     property bool showLow: false
     property bool showGrey: false
 
+    // ── ...and the filter is REMEMBERED ─────────────────────────────────
+    //
+    // "Survives the card being rebuilt" is not the same as "survives": the
+    // choice used to live only in this object, so it outlived the card and
+    // nothing else -- close the shell, or log back in, and the filter was
+    // back to its defaults, which reads as the tab forgetting what you asked
+    // for. It is written to the shell's own state file instead
+    // (modules/common/Persistent.qml -> states.json), the same place the
+    // sidebar's tab and the music app's settings live, and read back on
+    // load.
+    //
+    // TWO FUNCTIONS AND A GUARD, rather than binding the four properties to
+    // the state file. A binding would be shorter, and it would be wrong:
+    // QML DROPS a binding the first time something assigns the property, and
+    // these four are assigned from three directions -- the header's toggles,
+    // the IPC `folders` call, and this loader -- so the first toggle would
+    // quietly detach the filter from the file it is supposed to be saved in.
+    // The guard is what keeps the load from echoing back as a write.
+    property bool _hydratingFilter: false
+
+    function loadFolderFilter(): void {
+        const t = Persistent.states.trading;
+        root._hydratingFilter = true;
+        root.showHigh = t.folderHigh;
+        root.showMedium = t.folderMedium;
+        root.showLow = t.folderLow;
+        root.showGrey = t.folderGrey;
+        root._hydratingFilter = false;
+    }
+
+    function saveFolderFilter(): void {
+        if (root._hydratingFilter)
+            return;
+        const t = Persistent.states.trading;
+        t.folderHigh = root.showHigh;
+        t.folderMedium = root.showMedium;
+        t.folderLow = root.showLow;
+        t.folderGrey = root.showGrey;
+    }
+
+    // One handler per property, because QML has no "any of these changed":
+    // every path that can move the filter lands in exactly one of them, the
+    // toggles and the IPC call included.
+    onShowHighChanged: root.saveFolderFilter()
+    onShowMediumChanged: root.saveFolderFilter()
+    onShowLowChanged: root.saveFolderFilter()
+    onShowGreyChanged: root.saveFolderFilter()
+
     /**
      * The four folder colours, in the market's own order, as the header's
      * toggles read them: `key` is the impact bucket an event carries, `label`
@@ -388,6 +436,91 @@ Singleton {
         return "";
     }
 
+    /**
+     * How the released figure landed against its CONSENSUS -- "above",
+     * "below", "inline", or "" when the pair cannot be quantified.
+     *
+     * `_bias` above is actual against the PREVIOUS reading ("did this
+     * indicator go up?"); this is actual against the FORECAST ("did it come
+     * in hotter than the market expected?"). They are two different
+     * questions and the card needs both: the arrow beside the figure answers
+     * the first, the verdict sentence below answers the second.
+     */
+    function _beat(act, fc) {
+        const a = root._num(act), f = root._num(fc);
+        if (!isFinite(a) || !isFinite(f))
+            return "";
+        if (a > f) return "above";
+        if (a < f) return "below";
+        return "inline";
+    }
+
+    /**
+     * The releases for which a HIGHER figure is BAD for the currency.
+     *
+     * "Actual above forecast is good for the currency" is the rule for most
+     * of a calendar -- a hotter GDP, CPI, retail sales or rate decision is
+     * money moving IN -- which is why the exceptions are what has to be
+     * listed rather than the rule. An unemployment series is the clear one:
+     * more people out of work is a worse economy for that money, so a
+     * figure ABOVE consensus is bearish and one BELOW is bullish, the
+     * mirror image of everything around it in the list.
+     *
+     * Matched on the title rather than on an indicator id, because neither
+     * feed carries one -- so the test is on the WORDS the feeds use, which
+     * is also why the words are whole enough to be unambiguous: "unemployed
+     * persons" still matches, while "employment change" (a hotter jobs
+     * number, which IS good) does not, since the substring has to be
+     * `unemployment`.
+     */
+    readonly property var invertedReleases: [
+        "unemployment", "jobless claims", "claimant count"
+    ]
+
+    /** Whether a higher reading of this release is BAD for its currency. */
+    function _inverts(name) {
+        const s = String(name ?? "").toLowerCase();
+        for (const w of root.invertedReleases) {
+            if (s.indexOf(w) >= 0)
+                return true;
+        }
+        return false;
+    }
+
+    /**
+     * How the beat reads for the CURRENCY: true (good for it), false (bad),
+     * or null when there is nothing to read -- no released figure, no
+     * consensus, or the two exactly level.
+     */
+    function _favourable(name, beat) {
+        if (beat !== "above" && beat !== "below")
+            return null;
+        const higher = beat === "above";
+        return root._inverts(name) ? !higher : higher;
+    }
+
+    /**
+     * The sentence the card prints when a release is opened: what the beat
+     * means for that currency, in the calendar's own reading.
+     *
+     * Kept here beside `_detail` rather than in the view, because it is a
+     * READ of the numbers and not a label on them -- the two feeds hand over
+     * an actual and a consensus, and "is that good for the USD" is the
+     * question the card exists to answer. The view only decides the COLOUR
+     * (good / bad / neither), which is its own business.
+     */
+    function _verdict(currency, name, beat) {
+        if (beat === "")
+            return "";
+        if (beat === "inline")
+            return "Actual in line with forecast — no surprise for "
+                + (currency === "—" ? "the currency" : currency) + ".";
+        const higher = beat === "above";
+        return `Actual ${higher ? "greater than" : "lower than"} forecast — `
+            + `${root._favourable(name, beat) ? "good" : "bad"} for `
+            + (currency === "—" ? "the currency" : currency) + ".";
+    }
+
     /** A row's detail line: only the facts the feed actually carries. */
     function _detail(currency, fc, pv) {
         const bits = [];
@@ -520,6 +653,7 @@ Singleton {
             // and the direction is read off the two only where both are
             // numbers.
             const act = root._actualFor(cur, at, name);
+            const beat = root._beat(act, fc);
             out.push({
                 // Stable identity: release instant + title. The same event
                 // on a refetch is the same id, which is what lets a refresh
@@ -538,6 +672,14 @@ Singleton {
                 // "up" / "down" / "" -- actual against previous, empty
                 // until a figure exists and can be compared.
                 bias: root._bias(act, pv),
+                // How the release landed against CONSENSUS, and what that
+                // means for its currency -- the sentence the card prints
+                // when the row is opened (see `_beat` / `_verdict`). Empty
+                // until both a figure and a consensus exist, so a row that
+                // has not printed says nothing rather than guessing.
+                beat: beat,
+                favourable: root._favourable(name, beat),
+                verdict: root._verdict(cur, name, beat),
                 cmp: null,                      // filled in below
                 detail: root._detail(cur, fc, pv),
             });
@@ -867,7 +1009,22 @@ Singleton {
         onTriggered: root.refresh()
     }
 
-    Component.onCompleted: root.reseed()
+    // The stored filter arrives with the state file, which is read
+    // asynchronously -- so it is taken here if it is already in, and from
+    // `ready` if it is not. Both paths run `loadFolderFilter`, which is
+    // idempotent (it only ever writes what the file already holds).
+    Component.onCompleted: {
+        root.reseed();
+        if (Persistent.ready)
+            root.loadFolderFilter();
+    }
+    Connections {
+        target: Persistent
+        function onReadyChanged() {
+            if (Persistent.ready)
+                root.loadFolderFilter();
+        }
+    }
 
     // ── IPC: `qs -c ii ipc call trading …` ─────────────────────────────
     // "Is the tab telling the truth?" is a data question, and `state`
@@ -982,6 +1139,8 @@ Singleton {
                 + ` [${((root.eventStates[e.id]) ?? {}).state ?? "?"}]`
                 + ` fc=${e.forecast} pv=${e.previous} act=${e.actual}`
                 + (e.bias ? ` ${e.bias === "up" ? "▲" : "▼"}` : "")
+                + (e.beat ? ` beat=${e.beat}/${e.favourable === null ? "-" : (e.favourable ? "good" : "bad")}` : "")
+                + (e.verdict ? ` [${e.verdict}]` : "")
                 + (e.cmp ? ` ‹ ${e.cmp.time} fc=${e.cmp.forecast} act=${e.cmp.actual}` : ""));
             // `range` is the whole reason it is printed: bars is 56 at
             // every timeframe, so the high/low of those 56 candles is what

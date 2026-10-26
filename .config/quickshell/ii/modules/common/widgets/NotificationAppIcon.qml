@@ -13,6 +13,12 @@ MaterialShape { // App icon
     property var urgency: NotificationUrgency.Normal
     property bool isUrgent: urgency === NotificationUrgency.Critical
     property var image: ""
+    // A BARE glyph for a signal (the clipboard's "copied" card): no app icon,
+    // no image, and no filled shape behind it. A notification's icon is a
+    // picture of WHO sent it and sits on a coloured disc; a copy confirmation
+    // is not from an app and has nothing to identify, so it wears the verb --
+    // `content_copy` for text, `image` for an image -- directly on the card.
+    property string bareIcon: ""
     property real materialIconScale: 0.57
     property real appIconScale: 0.8
     property real smallAppIconScale: 0.49
@@ -27,10 +33,24 @@ MaterialShape { // App icon
     ]
     shape: isUrgent ? urgentShapes[Math.floor(Math.random() * urgentShapes.length)] : MaterialShape.Shape.Circle
 
-    color: isUrgent ? Appearance.colors.colPrimaryContainer : Appearance.colors.colSecondaryContainer
+    color: root.bareIcon !== "" ? "transparent"
+        : (isUrgent ? Appearance.colors.colPrimaryContainer : Appearance.colors.colSecondaryContainer)
+    Loader {
+        id: bareIconLoader
+        active: root.bareIcon !== ""
+        anchors.fill: parent
+        sourceComponent: MaterialSymbol {
+            anchors.fill: parent
+            text: root.bareIcon
+            color: Appearance.colors.colOnLayer1
+            iconSize: root.implicitSize * 0.62
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+        }
+    }
     Loader {
         id: materialSymbolLoader
-        active: root.appIcon == "" && root.image == ""
+        active: root.bareIcon === "" && root.appIcon == "" && root.image == ""
         anchors.fill: parent
         sourceComponent: MaterialSymbol {
             text: {
@@ -48,7 +68,7 @@ MaterialShape { // App icon
     }
     Loader {
         id: appIconLoader
-        active: root.image == "" && root.appIcon != ""
+        active: root.bareIcon === "" && root.image == "" && root.appIcon != ""
         anchors.centerIn: parent
         sourceComponent: IconImage {
             id: appIconImage
@@ -59,7 +79,7 @@ MaterialShape { // App icon
     }
     Loader {
         id: notifImageLoader
-        active: root.image != ""
+        active: root.bareIcon === "" && root.image != ""
         anchors.fill: parent
         sourceComponent: Item {
             anchors.fill: parent

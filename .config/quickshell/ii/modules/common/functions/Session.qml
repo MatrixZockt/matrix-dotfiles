@@ -3,8 +3,9 @@ import Quickshell
 // Imports are spelled out rather than assumed to be injected into every file's
 // scope: a missing name only fails when the function that uses it is first
 // called, and the functions here are reached for at the end of a day -- log
-// out, shut down -- which is a bad moment to discover one. (`import qs`, the
-// config root, was here for sleep()'s in-process lock; see suspend() below.)
+// out, shut down -- which is a bad moment to discover one. `import qs` is here
+// for lock(): the lock state lives in GlobalStates, at the config root.
+import qs
 import qs.services
 import qs.modules.common
 
@@ -26,8 +27,14 @@ Singleton {
     // password prompt. It was removed once on the theory that logging out is
     // strictly more useful for the same key; in practice that threw away the
     // session, so SUPER+L now locks and Log out (below) is the session-ender.
+    //
+    // It used to spawn `hyprlock`, which retired with the separate locker: the
+    // lock is this shell's own surface now (modules/common/panels/lock/
+    // LockScreen.qml), so the session menu, the start menu and SUPER+L all
+    // raise THE SAME lock, on the same picture, instead of the session menu
+    // throwing the old hyprlock screen over the top of it.
     function lock() {
-        Quickshell.execDetached(["hyprlock"]);
+        GlobalStates.screenLocked = true;
     }
 
     // Sleep: screen off, machine asleep, and every app, window and setting

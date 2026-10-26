@@ -147,14 +147,64 @@ Scope {
 
         if (item.kind === "window") {
             // Fullscreen-first, always: picking an app from the switcher gives
-            // you that app fullscreen. This works from anywhere -- the switcher
-            // is no longer a fullscreen-only panel, so ALT+Tab on a tiled
-            // desktop now focuses the app AND takes it fullscreen. A window
-            // that is already fullscreen is left alone, never toggled off.
-            const targetFullscreen = (item.fullscreen ?? 0) >= 2;
+            // you that app filling the screen. This works from anywhere -- the
+            // switcher is no longer a fullscreen-only panel, so ALT+Tab on a
+            // tiled desktop focuses the app AND fills the screen with it. A
+            // window that is already expanded is left alone, never toggled off.
+            //
+            // HOW it fills the screen is the FOUR-FINGER SWIPE UP's way, not
+            // Hyprland's `fullscreen` (REQUESTED 2026-10-16: "using ALT and TAB
+            // to change the fullscreen desktop app, it acts as an actual
+            // fullscreen command which is not the same as 4 finger swipe up
+            // gesture. do it the same"). The real thing TELLS THE CLIENT it is
+            // fullscreen, which in a browser is F11 -- tabs, address bar and
+            // bookmarks all disappear and the window that comes back is not the
+            // window that went out -- and it skips the cover the swipe uses, so
+            // the two ways of saying "make this app fill the screen" produced
+            // different windows. This enters the same state the swipe enters.
+            //
+            // The work belongs to custom/cover.lua (cover.enter: the window
+            // covers the monitor, the app is told nothing, the bar takes itself
+            // out of the way), and it is reached through `hyprctl eval` -- the
+            // established way this shell runs config-side Lua; FilesWindowHost,
+            // CompactMedia and InputService all do it. The payload repeats the
+            // checks custom/general.lua's swipe body makes before it covers
+            // anything, and adds the address test that this commit needs and the
+            // swipe does not: the eval arrives after the focus dispatch, so it
+            // verifies it is looking at the window that was PICKED before it
+            // touches anything. A window that is already expanded, or already
+            // covered, is left exactly as it is.
+            //
+            // "Expanded" and not "fullscreen": the test is `> 0`, so a window
+            // the user MAXIMIZED (fullscreen == 1, SUPER+D or SUPER+ALT+D) is
+            // already expanded too and is only focused. That is the reading the
+            // swipe's own body makes -- its first test is `fullscreen ~= 0`, so
+            // a maximized window takes the "come back out" branch rather than
+            // being covered -- and it is the right one for a SWITCH gesture:
+            // filling a maximized window edge-to-edge would replace its
+            // maximize, and the way back out would then leave it tiled instead
+            // of maximized. On this build 1 = maximized, 2 = fullscreen.
+            const targetExpanded = (item.fullscreen ?? 0) > 0;
             Hyprland.dispatch(`hl.dsp.focus({ window = "address:${item.address}" })`);
-            if (!targetFullscreen)
-                Hyprland.dispatch(`hl.dsp.window.fullscreen({ mode = "fullscreen", action = "toggle" })`);
+            if (!targetExpanded)
+                Quickshell.execDetached(["hyprctl", "eval", `
+local want = "${item.address}"
+local w = hl.get_active_window()
+if not w then return end
+local got = w.address
+if got == nil then return end
+-- Through variables, not through the literals: Lua does not allow a method
+-- call on a string LITERAL ("x":lower() is a syntax error -- caught here by
+-- running the payload by hand before trusting it), and this comparison has to
+-- survive both spellings of an address.
+want = tostring(want):lower():gsub("^0x", "")
+got = tostring(got):lower():gsub("^0x", "")
+if got ~= want then return end
+if (w.fullscreen or 0) ~= 0 then return end
+local cover = require("custom.cover")
+if cover.owns(w) then return end
+require("custom.popup").rememberSlot(w)
+cover.enter(w)`]);
         } else if (item.kind === "desktop") {
             Hyprland.dispatch(`hl.dsp.focus({ workspace = ${item.id} })`);
         } else if (item.kind === "new") {

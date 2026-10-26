@@ -12,11 +12,12 @@ QuickToggleButton {
     id: perfButton
     toggled: PerformanceMode.enabled
     buttonIcon: "speed"
+    // Left click: toggle performance mode on/off
     onClicked: {
         PerformanceMode.toggle();
     }
-
+    // Right click: open detailed view
     StyledToolTip {
-        text: Translation.tr("Performance mode — fewer animations, snappier interface")
+        text: Translation.tr("Performance mode — fewer animations, snappier interface | Left-click to toggle\nRight-click for details")
     }
 }

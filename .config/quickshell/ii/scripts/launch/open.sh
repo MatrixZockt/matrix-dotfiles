@@ -22,6 +22,11 @@
 # Arguments are two separate strings, never one shell line, so neither the label
 # nor the command needs quoting by the caller -- which is the whole reason this
 # is a script and not a `bash -c` built inside the shell's QML.
+#
+#   open.sh <label> <command> [tray-allowed]
+#
+# The optional third word says the caller has ALREADY taken the tray permission
+# (see the allow call below): a third process that exists only to save a fourth.
 set -u
 
 label="${1:-}"
@@ -39,7 +44,22 @@ shell="${II_SHELL_NAME:-ii}"
 # straight back. A launch from THIS launcher is the user letting it out, so
 # say so before the window exists -- `allow` matches this command against
 # the registry's own launch string and is a no-op for every other app.
-qs -c "$shell" ipc call trayapps allow "$command" >/dev/null 2>&1 || true
+# ── The tray permission, unless the caller already took it ───────────────
+#
+# This call is the same code the shell itself runs, reached by starting a whole
+# Qt client first. Measured on this machine: 34-43ms of wall time, on every
+# single launch, serialized BEFORE the app is exec'd -- the largest single piece
+# of what the launcher adds to an app's startup (spawn -> window: 186ms through
+# here against 126ms for the same binary started directly).
+#
+# The shell knows the command when the user clicks it, so it takes the
+# permission itself (microseconds, in-process) and passes `tray-allowed` as the
+# third argument, which is what this test looks for. The call stays for every
+# other caller -- a hand-run open.sh, a script, a notification action -- so
+# nothing outside the shell changes behaviour.
+if [ "${3:-}" != "tray-allowed" ]; then
+    qs -c "$shell" ipc call trayapps allow "$command" >/dev/null 2>&1 || true
+fi
 
 # The command is a shell line on purpose: entries in the launcher are shell
 # lines (`kitty -1 --hold=yes fish -i -c 'passwd'`), and re-splitting them here
@@ -122,7 +142,10 @@ program_is_being_updated() {
 start_program() {
     # Truncated per attempt, so what the card quotes is from THIS launch.
     : >"$errlog" 2>/dev/null || true
-    env II_OPENED_BY_II=1 bash -c "$command" 2>>"$errlog" &
+    # The variable is set INLINE rather than through `env`: an assignment before
+    # a background command is exported to it anyway, and the `env` process was
+    # one more exec on the critical path (measured ~5ms) for nothing.
+    II_OPENED_BY_II=1 bash -c "$command" 2>>"$errlog" &
     child=$!
     start_renewer
     announce_child

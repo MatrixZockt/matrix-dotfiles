@@ -210,10 +210,73 @@ Singleton {
     /// sweep. Roughly a fifth of the pad: the same "carried it far enough"
     /// feel as a window's own dismiss distance.
     readonly property real dismissRatio: 0.15
-    /// ...or a short-but-fast flick: this far past, at this speed (pad
-    /// sweeps per second), counts as "thrown away" even if it did not travel.
-    readonly property real flickRatio: 0.05
-    readonly property real flickSpeed: 0.7
+    /// ...or a short, sharp flick: this far past -- 3% of the pad, a couple of
+    /// millimetres -- at this speed (pad sweeps per second), counts as "thrown
+    /// away" even though it never travelled a fifth of the pad.
+    ///
+    /// WHY LOWER THAN 0.05 / 0.7 (2026-10-23). A deliberate four-finger flick
+    /// is SHORT: measured gestures of this kind land around 0.05-0.09 of a pad
+    /// over 120-180 ms, and the old gate compared that against 0.7 sweeps per
+    /// second measured across the WHOLE contact -- including the moment the
+    /// fingers land, when nothing has moved yet. A fast flick therefore arrived
+    /// at roughly 0.4-0.5 and was refused, so the only way to dismiss a popup
+    /// was to drag a fifth of the pad. That is the "only a long swipe works"
+    /// report. 0.3 is comfortably under a real flick and still far above a slow
+    /// accidental drag (a 0.05 drag over half a second is 0.1, a 0.08 drag over
+    /// 400 ms is 0.2) -- a gesture that fails this gate had no throw in it.
+    readonly property real flickRatio: 0.03
+    readonly property real flickSpeed: 0.3
+
+    /// The stretch of the gesture that decides whether it was a FLICK: the last
+    /// 160 ms of samples, speed measured across those. Averaging over the whole
+    /// contact instead punishes exactly the gesture people make -- slow to get
+    /// going, fast at the end -- and rewards the one they do not (fast, then
+    /// held still). 160 ms is long enough to smooth a single jittery evdev
+    /// delta and short enough to still describe the release.
+    readonly property int flickWindowMs: 160
+    property var flickSamples: []
+
+    // ── The pad's REAL finger count, published for the compositor ──────────
+    //
+    // The four-finger swipe DOWN is the compositor's close-window drag, and it
+    // needs to know one thing this file is the only witness to: are there
+    // actually four fingers on the pad? This touchpad reports four-finger
+    // swipes with no four fingers on it (palm and grip noise under libinput's
+    // gesture detection, measured: 100-272px at 900-3100px/s), and judging
+    // those as intent closed windows at random. The evdev reader below sees the
+    // real contacts, so the state is published where custom/general.lua's
+    // gesture callbacks can read it -- the same runtime-file handshake the
+    // desktop overview and the bar already use.
+    //
+    //   $XDG_RUNTIME_DIR/ii-touchpad-fingers.json
+    //   {"fingers":4,"active":true,"ts":<epoch seconds>}
+    //
+    // Rewritten on every tracker report (throttled; the tracker stream is
+    // ~100Hz) and by its 2s idle heartbeat, so a live shell keeps it fresh. A
+    // missing or stale file reads as "no fingers" on the other side, which is
+    // the safe direction: the conservative distance rule then decides.
+    readonly property string fingersStatePath:
+        `${Quickshell.env("XDG_RUNTIME_DIR") || "/tmp"}/ii-touchpad-fingers.json`
+    property double fingersPublishedAt: 0
+
+    Process {
+        id: fingersWriter
+    }
+
+    /// `force` is for transitions (landing, lifting): those must reach the file
+    /// even if the throttle window has not passed yet.
+    function publishFingers(force) {
+        const now = Date.now();
+        if (!force && now - root.fingersPublishedAt < 80)
+            return;
+        root.fingersPublishedAt = now;
+        const on = root.active && root.fingers >= 4;
+        const ts = (now / 1000).toFixed(3);
+        fingersWriter.command = ["sh", "-c",
+            `printf '{"fingers":${root.fingers},"active":${on},"ts":${ts}}' > '${root.fingersStatePath}'`];
+        fingersWriter.running = false;
+        fingersWriter.running = true;
+    }
 
     signal dragStarted()
     // Every tracked gesture's motion, as it happens. The bar's two-finger
@@ -244,7 +307,11 @@ Singleton {
     // the swipe went somewhere (a desktop moved) or hit a dead edge (shake).
     signal horizontalSwipeEnded(real travel)
     // A multi-finger TAP (rest, don't swipe): the tracker judged the contact
-    // short and still. `fingers` is the count at the START of the gesture --
+    // short, still, AND made of fingers that LANDED TOGETHER -- a finger
+    // already resting on the pad beside two tapping ones is not a tap, and no
+    // tap event is emitted for it (see TAP_COINCIDENCE_MS and
+    // scripts/input/touchpad-tap-test.py in the detector). `fingers` is the
+    // count at the START of the gesture --
     // the count the user meant -- because by emit time the fingers have
     // lifted and the live slots are gone. Routing lives in shell.qml:
     //   3 fingers -> play/pause of the active MPRIS player, falling back
@@ -277,19 +344,22 @@ Singleton {
             // exists somewhere", which is the distinction this whole check
             // exists to make.
             //
-            // `lastBeat` is NOT set here, and that is deliberate. The tracker
-            // only writes a heartbeat when its poll TIMES OUT -- when there
-            // have been no events for two seconds -- so a hand that keeps
-            // moving starves the heartbeat completely. Judging liveness on the
-            // heartbeat alone therefore restarted a healthy tracker in the
-            // middle of a long scroll: "silent for 19s" while the gesture
-            // frames were streaming past, which kills the very gesture the
-            // check was meant to protect.
+            // `lastBeat` is the liveness clock. The tracker writes a beat every
+            // 2 seconds ON ITS OWN CLOCK (script: HEARTBEAT_S), never on
+            // "nothing happened", so it cannot be starved by a hand that keeps
+            // a contact on the pad. It used to be written only when the reader's
+            // poll timed out, and this check therefore executed a healthy reader
+            // every half minute while a hand rested on the touchpad -- see the
+            // note on the restart below.
             root.lastBeat = Date.now();
             if (!root.announced) {
                 root.announced = true;
                 console.log(`[touchpad] tracker alive on ${root.note}`);
             }
+            // The idle heartbeat is the keepalive for the compositor's copy of
+            // the contact state: replaced every 2s, it cannot go stale while
+            // this file is running.
+            root.publishFingers(true);
             return;
         }
         if (!report || typeof report.phase !== "string") return;
@@ -323,8 +393,11 @@ Singleton {
             root.dragSession = (report.start ?? root.fingers) === 4;
             root.dragOffset = 0;
             root.dragStartedAt = Date.now();
-            if (root.dragSession)
+            root.flickSamples = [];
+            if (root.dragSession) {
+                root.noteFlickSample();
                 root.dragStarted();
+            }
             break;
         case "tap":
             // The tracker judged the contact a TAP (short, still): a
@@ -345,6 +418,7 @@ Singleton {
             root.moved(report.dy ?? 0, root.xpos, root.ypos,
                 report.fingers ?? root.fingers, report.start ?? root.fingers);
             if (root.dragSession) {
+                root.noteFlickSample();
                 // Downward only: this is a dismiss gesture, and a card that
                 // flew up under an upward swipe would read as a bug.
                 root.dragOffset = Math.max(0, root.total) * root.travelScale;
@@ -353,6 +427,14 @@ Singleton {
             break;
         case "end":
             root.active = false;
+            // The release carries the gesture's final travel, which the last
+            // `update` may predate: a short fast flick puts most of its
+            // distance in exactly those last few milliseconds. Without this a
+            // 0.05 flick could be judged on 0.03 of movement and, with the
+            // verdict taken on release speed, on a stale last sample.
+            root.total = report.total ?? root.total;
+            if (root.dragSession)
+                root.noteFlickSample();
             root.gestureEnded(report.start ?? root.fingers);
             // Announce a real four-finger horizontal swipe BEFORE the drag
             // teardown: the shake detector only needs the ended gesture's
@@ -390,6 +472,33 @@ Singleton {
             root.finishDrag(false);
             break;
         }
+        // After the state machine has run, never before it: `active` and
+        // `fingers` are what the compositor reads, and a publish that raced
+        // ahead of the transition would describe the previous gesture.
+        root.publishFingers(report.phase === "begin" || report.phase === "end"
+            || report.phase === "tap" || report.phase === "cancel");
+    }
+
+    /// Add the current travel to the flick window, dropping samples that have
+    /// aged out of it. Called once per update and once at release, so the last
+    /// delta the tracker sends is not lost to the verdict.
+    function noteFlickSample() {
+        const now = Date.now();
+        root.flickSamples.push({ t: now, total: root.total });
+        while (root.flickSamples.length > 2
+            && now - root.flickSamples[0].t > root.flickWindowMs)
+            root.flickSamples.shift();
+    }
+
+    /// How fast the fingers were moving at the moment they lifted, in pad
+    /// sweeps per second. Zero when the window holds only the landing point,
+    /// which is the honest answer: nothing moved.
+    function releaseSpeed() {
+        const s = root.flickSamples;
+        if (s.length < 2) return 0;
+        const first = s[0];
+        const last = s[s.length - 1];
+        return (last.total - first.total) / (Math.max(1, last.t - first.t) / 1000);
     }
 
     function finishDrag(natural) {
@@ -402,9 +511,19 @@ Singleton {
             return;
         }
         const elapsed = Math.max(1, Date.now() - root.dragStartedAt);
-        const speed = root.total / (elapsed / 1000);
+        const average = root.total / (elapsed / 1000);
+        // The release speed is the one that describes a flick; the average is
+        // kept as the fallback for a gesture whose window never got a second
+        // sample (a flick so short only the release reached us).
+        const release = root.releaseSpeed();
+        const speed = Math.max(average, release);
         const dismissed = root.total >= root.dismissRatio
             || (root.total >= root.flickRatio && speed >= root.flickSpeed);
+        // One line per verdict, with the numbers behind it. Whether a flick
+        // closed something is otherwise invisible from the outside, and the
+        // difference between "too far" and "too slow" is the whole question
+        // when a gesture is reported as not working.
+        console.log(`[swipe] dismiss total=${root.total.toFixed(3)} avg=${average.toFixed(2)} release=${release.toFixed(2)} ${dismissed ? "close" : "snap back"}`);
         root.dragEnded(root.dragOffset, dismissed);
     }
 

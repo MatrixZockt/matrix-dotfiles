@@ -47,6 +47,18 @@
 #        because they are two writers of one rule and either could otherwise
 #        undo the other.
 #
+#     3. THE CLOCK POLICY (EPP), which nothing on this machine used to set
+#        per mode: the profile moved EPP, but the boost toggle did not touch
+#        it at all, and power-saver plus boost-on fought over the machine's
+#        speed. The rule is one line: power-saver -> power (always, the mode
+#        was picked to be cool); otherwise profile == performance OR the
+#        shell's boost toggle (performanceMode) -> performance; else the
+#        profile's own PPD value. It drives energy_performance_preference
+#        through razer-cc-elevate's narrow `epp` op -- never the governor:
+#        pinning scaling_governor to performance locks EPP and makes every
+#        power-profiles-daemon profile switch fail with EBUSY (measured
+#        2026-10-18, see apply_epp).
+#
 # WHY IT DOES NOT FLAP
 #   * The profile is only written on an AC transition, never every tick, so a
 #     profile picked by hand stays picked until the wall socket actually
@@ -133,6 +145,16 @@ declare -A REFRESH_FOR=(
     ["performance"]="preferred"
 )
 
+# profile -> the EPP power-profiles-daemon itself picks for it. Our rule in
+# converge() only ever overrides UPWARD (to performance) when speed is asked
+# for; every other case lands on exactly the value PPD just wrote, which the
+# no-op check in apply_epp turns into no pkexec at all.
+declare -A EPP_FOR=(
+    ["power-saver"]="power"
+    ["balanced"]="balance_performance"
+    ["performance"]="performance"
+)
+
 # The machine's own package limits, for the modes that mean "vendor limits".
 #
 # They come from battery.powerDefaults once the Command Center has captured
@@ -158,12 +180,20 @@ DRY_RUN=0
 STATUS_ONLY=0
 CONVERGE_NOW=0
 REFRESH_ONLY=0
+# --boost=0|1 (with --converge): use this boost-toggle value instead of reading
+# the config file. The shell's config write is DEBOUNCED, so the UI hands
+# scripts/performance/apply.sh the value explicitly and a backgrounded
+# converge can read the file before the write lands -- stale reads are
+# otherwise guaranteed on every toggle.
+BOOST_OVERRIDE=""
 for arg in "$@"; do
     case "$arg" in
         --dry-run)   DRY_RUN=1 ;;
         --status)    STATUS_ONLY=1 ;;
         --converge)  CONVERGE_NOW=1 ;;
         --refresh)   REFRESH_ONLY=1 ;;
+        --boost=0|--boost=1) BOOST_OVERRIDE="${arg#--boost=}" ;;
+        --boost=*)   echo "--boost must be --boost=0 or --boost=1" >&2; exit 2 ;;
         # The help is the header comment, up to the first line of code, rather
         # than a fixed `sed -n '2,60p'`. That range was 60 for as long as the
         # header happened to be shorter than 61 lines, and adding the --refresh
@@ -228,6 +258,25 @@ except Exception:
 PY
 }
 
+ii_read_perfmode() {
+    # The shell's boost toggle: top-level `performanceMode` in the same config
+    # the fan mode comes from. Echoes 1/0; a missing file or key reads as off,
+    # which is the same default Config.qml holds. An explicit --boost= from the
+    # caller wins over the file (see BOOST_OVERRIDE: the file write is
+    # debounced and may not have landed when apply.sh hands us the value).
+    if [ -n "$BOOST_OVERRIDE" ]; then
+        echo "$BOOST_OVERRIDE"
+        return
+    fi
+    python3 - "$II_CONFIG" <<'PY' 2>/dev/null
+import json, sys
+try:
+    print("1" if json.load(open(sys.argv[1])).get("performanceMode") else "0")
+except Exception:
+    print("0")
+PY
+}
+
 ii_write_fanmode() {
     # Read-modify-write of one key, atomically, so a crash cannot leave the
     # app's config truncated. The app writes this file too and does not share
@@ -279,6 +328,41 @@ apply_cap() {
         && return 0
     log "WARNING cap did not stick: wanted ${pl1}/${pl2}, hardware reads $after"
     return 1
+}
+
+apply_epp() {
+    # $1 = performance|balance_performance|power. Same shape as apply_cap:
+    # no-op when already in force (the 5 s tick never spawns pkexec for a
+    # settled machine), dry-run aware, verified by reading the hardware back.
+    #
+    # EPP and not the governor: this writes the exact knob PPD writes, while
+    # scaling_governor stays at powersave so PPD can keep writing it. A
+    # governor pinned to performance makes intel_pstate lock EPP and every
+    # PPD profile switch abort with EBUSY (measured 2026-10-18: 2/2 failed
+    # while pinned, all succeeded before and after).
+    local want="$1" cur
+    cur="$(readfile /sys/devices/system/cpu/cpufreq/policy0/energy_performance_preference)"
+    if [ "$cur" = "$want" ]; then
+        log "EPP already $want"
+        return 0
+    fi
+    if [ "$DRY_RUN" = 1 ]; then
+        log "DRY-RUN would set EPP $want (currently: ${cur:-unknown})"
+        return 0
+    fi
+    local out
+    if ! out="$(pkexec "$ELEVATE" epp "$want" 2>&1)"; then
+        log "EPP failed: ${out:-no output} (left at: ${cur:-unknown})"
+        return 1
+    fi
+    local after
+    after="$(readfile /sys/devices/system/cpu/cpufreq/policy0/energy_performance_preference)"
+    if [ "$after" != "$want" ]; then
+        log "WARNING EPP did not stick: wanted $want, hardware reads $after"
+        return 1
+    fi
+    log "EPP ${cur:-?} -> $want"
+    return 0
 }
 
 hypr_signature() {
@@ -406,6 +490,36 @@ converge() {
     fi
 
     apply_cap "$pl1" "$pl2" "$turbo"
+
+    # The governor follows the profile OR the shell's boost toggle: either
+    # one asking for speed is enough to get it, and neither being on is what
+    # hands the clock policy back to powersave (and to PPD's EPP). The boost
+    # toggle also converges directly from scripts/performance/apply.sh, so a
+    # flip lands now instead of waiting for the profile poll.
+    #
+    # Power-saver wins outright, even over the boost toggle: "reverted to
+    # power save when in power save mode" is the rule the mode was picked for
+    # (on battery the OR above would otherwise pin performance and burn the
+    # pack with the machine asking to be cool). Speed needs both: no eco
+    # profile, and either the performance profile or boost on.
+    # The clock policy follows the profile OR the shell's boost toggle,
+    # through EPP (see apply_epp for why it is never the governor). The boost
+    # toggle also converges directly from scripts/performance/apply.sh, so a
+    # flip lands now instead of waiting for the profile poll.
+    #
+    # Power-saver wins outright, even over the boost toggle: "reverted to
+    # power save when in power save mode" is the rule the mode was picked for
+    # (on battery the OR below would otherwise run performance and burn the
+    # pack while the machine is asking to be cool). Speed otherwise needs
+    # either the performance profile or boost on; plain balanced with boost
+    # off lands on PPD's own balance_performance.
+    local epp="${EPP_FOR[$profile]:-balance_performance}"
+    if [ "$profile" != "power-saver" ]; then
+        [ "$profile" = "performance" ] && epp="performance"
+        [ "$(ii_read_perfmode)" = "1" ] && epp="performance"
+    fi
+    apply_epp "$epp"
+
     apply_refresh "${REFRESH_FOR[$profile]:-preferred}"
 }
 
@@ -419,6 +533,8 @@ if [ "$STATUS_ONLY" = 1 ]; then
     echo "fan mode (config) : $(ii_read_fanmode)"
     echo "vendor defaults   : $(ii_read_power_defaults)"
     echo "CPU cap (live)    : $(live_cap)"
+    echo "CPU EPP             : $(readfile /sys/devices/system/cpu/cpufreq/policy0/energy_performance_preference)  (boost toggle: $(ii_read_perfmode))"
+    echo "CPU governor        : $(readfile /sys/devices/system/cpu/cpufreq/policy0/scaling_governor)  (left to PPD: pinning it locks EPP)"
     echo "panel             : $(panel_refresh)"
     echo "expected refresh  : ${REFRESH_FOR[$profile]:-preferred}"
     echo "expected fan mode : ${FANMODE_FOR[$profile]:-quiet}"

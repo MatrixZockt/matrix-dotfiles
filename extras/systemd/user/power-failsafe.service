@@ -1,5 +1,5 @@
 [Unit]
-Description=ii power failsafe - watches kernel PSI for sustained stalls, flips CPU/GPU to performance so lag cannot persist
+Description=ii power failsafe - when the CPU is pegged (>=90% busy) AND lagging (PSI cpu >=20% OR the fastest core below 80% of its base clock), raise Performance; this is the ONLY thing that switches the power mode on its own
 # There is no graphical-session.target on this setup (it is inactive), so the
 # anchor is default.target: the daemon is cheap while idle (one awk every 5s)
 # and starting it early is harmless.
@@ -7,6 +7,19 @@ After=default.target
 
 [Service]
 Type=simple
+# WHY THIS IS ON (2026-10-26, owner's rule): the CPU being pegged to 100%
+# AND lagging is the one and only condition allowed to move the power mode
+# by itself -- and it has to actually MOVE it. This daemon shipped in
+# alarm-only mode, so with the machine sitting on the 20 W eco cap nothing
+# ever lifted it: the watchdog logged the lag, notified about it, and left
+# the machine to crawl. That is the "it is still lagging" report.
+#
+# The strictness lives in the ladder inside the script (3 consecutive
+# samples of peg AND stall, cooldown, and a stand-down only after sustained
+# calm), not in refusing to act. Everything that is not the CPU being pegged
+# -- memory, io, the GPU -- is still ignored outright, and a machine that is
+# merely busy at full clock is still left alone.
+Environment=FAILSAFE_ESCALATE=1
 ExecStart=%h/.local/bin/power-failsafe
 Restart=on-failure
 RestartSec=10

@@ -1,73 +1,122 @@
 #!/usr/bin/env bash
 # power-failsafe -- anti-lag watchdog for this laptop.
 #
-# WHAT IT WATCHES
-#   /proc/pressure/{cpu,memory,io} -- the kernel's own PSI counters, which
-#   measure "tasks that wanted to run and could not" (cpu/mem) and "tasks
-#   stuck waiting on the disk" (io). This is the machine reporting its own
-#   pain, not a guess from load average.
+# WHAT IT WATCHES -- THE CPU, AND NOTHING ELSE (2026-10-26, requested)
+#   Two facts, both read fresh every sample:
 #
-#   ...AND THE DISCRETE GPU. A CUDA, encode or 3D job keeps the CPU almost
-#   idle, so PSI stays near zero while the card works -- measured 2026-10-17
-#   with four 4K NVENC streams: PSI 0-2 %, GPU pinned at P0 2445 MHz, and the
-#   enforced ceiling still the eco 55 W with nvidia-powerd stopped, because
-#   the profile was power-saver. GPU draw now counts as pressure at the
-#   threshold: the ladder below fires for it like it does for a stalled CPU,
-#   and -- the half that was actually broken -- the calm counter cannot stand
-#   the boost back down while the card is still working.
+#     1. CPU UTILISATION, from /proc/stat's aggregate "cpu " line, as the
+#        delta between two samples: how much of the machine was actually
+#        busy, not how much was queued.
+#     2. CPU LAG. This is normally /proc/pressure/cpu "some avg10" -- the
+#        share of time some task wanted a core and could not get one -- but
+#        PSI alone is NOT a usable lag signal on a POWER-CAPPED machine, and
+#        that is not a theory: measured 2026-10-26 at 17:20:41 the machine
+#        was at 94.4% busy with all cores at 727-900 MHz under the 20 W cap,
+#        and PSI read 10-12%. Every thread got scheduled; they simply ran at
+#        a third of their speed, so nothing queued and PSI stayed quiet while
+#        the desktop visibly lagged. A clock check is what sees that.
 #
-#   Draw, not utilization: measured on the same card, a 720p30 encode (what a
-#   video player looks like) reports util 0 % and 7.8 W at P8, while four
-#   4K120 streams report util 25-31 % and 25-37 W at P0. The encoder owns the
-#   card either way, so util says nothing; and "a client is attached" would
-#   raise the whole machine to Performance for the length of every video. So
-#   the signal is GPU_WATTS of draw, with an attached client in P0 as the
-#   fallback for a bursty job that idles between kernel launches.
+#   So "lagging" is now the OR of two hardware facts:
 #
-# WHAT IT DOES WHEN THE MACHINE HURTS
-#   1. powerprofilesctl set performance   (CPU side: governor, EPP, limits)
-#   2. systemctl start nvidia-powerd       (GPU side: Dynamic Boost raises
-#      the dGPU ceiling 55 -> 115 W, measured +44% prompt processing)
-#   3. notify-send                         (a real notification)
-#   4. qs -c ii ipc call failsafe alert …  (bar blink + corner card)
+#       tasks stalling    PSI cpu some avg10 >= CPU_LAG (default 20%), OR
+#       cores throttled   fastest core at <= CLOCK_LINE (default 1200 MHz)
+#
+#   and Performance is raised only when the CPU is pegged AND one of those
+#   holds, for CONSECUTIVE samples. A machine that is merely busy at full
+#   clock -- compiling, encoding, a game -- without a stall and without being
+#   throttled is not the case this exists for, and neither is anything that
+#   is not the CPU.
+#
+#   CPU_BUSY is 90%, not 98%. Measured with real work (not a `yes` burn): a
+#   vitest run plus the Android emulator on this 32-thread chip peaked at
+#   94.4% -- a handful of idle helper threads is enough to keep the aggregate
+#   off 98 -- so a 98% line is a threshold that silently never fires.
+#
+# WHAT IT USED TO WATCH, AND WHY THAT WAS WRONG
+#   It fired on /proc/pressure memory and io too (mem >= 30 %, io >= 50 %),
+#   and on the discrete GPU being busy at all -- any draw over ~15 W or a
+#   client in P0. On THIS machine that meant firing for things that are not
+#   the CPU being pegged:
+#
+#     * io sits at 11-17 % for hours at idle (Brave reading tabs, the shell
+#       writing state), so against a 12 % line the watchdog was permanently
+#       in pain: 43 raises and 41 stand-downs in six hours, each pair
+#       flipping the profile through power-autoswitch (two pkexec calls) and
+#       firing a critical notification;
+#     * four 4K NVENC streams keep the CPU idle and the GPU at P0, so a
+#       video export raised the CPU and kept it raised while the card -- not
+#       the CPU -- was the thing doing the work.
+#
+#   The owner's rule now: the CPU spiked to 100 % and started lagging, or
+#   nothing. Everything else is left alone, including the GPU.
+#
+# WHAT IT DOES WHEN THE CPU IS PEGGED AND LAGGING -- ALARM ONLY BY DEFAULT
+#   Nothing is switched, raised or unlocked. It logs the offenders and says so
+#   on screen:
+#     1. journal line naming the trigger and the top processes
+#     2. notify-send   (a real notification)
+#     3. qs -c ii ipc call failsafe flash …  (bar blink + corner card)
+#
+#   The power escalation this used to do -- performance profile, 120/160 W cap,
+#   turbo, GPU Dynamic Boost -- is still there behind FAILSAFE_ESCALATE=1, but
+#   it is OFF by default on purpose (2026-10-26, owner's rule): a 100% CPU
+#   event is a thing to NAME and REMOVE, not a thing to power through. Raising
+#   the ceiling turns a spike into heat, fan noise and battery drain and leaves
+#   the actual cause untouched; the cause here was a leftover vitest run and a
+#   headless emulator, which no amount of watts fixes.
 #
 # WHY IT CANNOT FIRE ON A BURST -- the fail-safe ladder, all of which must
 # hold before it touches anything:
 #
-#   * The pressure must exceed ITS OWN RESOURCE'S line for CONSECUTIVE
-#     samples (default 3 x 5 s = 15 s of sustained stall), not one bad 10 s
-#     window. nvidia-smi, browser spells, a compiler warming up -- all of
-#     those spike one sample and are forgotten.
+#   * BOTH conditions must exceed their line for CONSECUTIVE samples
+#     (default 3 x 5 s = 15 s of sustained peg AND stall), not one bad
+#     window. A short compile, a page load, a browser spell -- none of them
+#     last that long at 98 % with a stall on top.
 #   * A minimum COOLDOWN between actions, so a flapping machine cannot get
 #     profile flips every 15 s.
-#   * Once switched, it does not switch back. Returning to power-saver is
-#     the user's call; the daemon never downgrades on its own.
 #   * Every decision is logged to the journal (systemd user service), so
 #     "why did it fire" is always answerable.
+# The two lines, calibrated on this machine (32 hardware threads, measured
+# 2026-10-26 with `yes` burns while sampling both numbers):
 #
-# ── ONE LINE PER RESOURCE, NOT ONE FOR ALL THREE ──────────────────────────
+#     one thread per core (32) -> busy 98-99 %, lag  2-4 %   (pegged, NO lag)
+#     two per core       (64)  -> busy 99-100 %, lag  9-14 %  (queueing starts)
+#     four per core      (128) -> busy 99-100 %, lag 14-31 %  (real stalling)
+#     idle                     -> busy 1-3 %,   lag  0-2 %
 #
-# A single threshold cannot describe this machine. MEASURED 2026-10-25, at
-# idle with nothing stalling: cpu some avg10 = 0.00, memory some avg10 = 0.00,
-# io some avg10 = 11.9-17.2 and holding there for hours (Brave reading tabs,
-# the shell writing its state, journal traffic). Against a 12 % line the
-# watchdog was therefore in permanent pain: 43 raises and 41 stand-downs in
-# six hours, each pair flipping the profile through power-autoswitch (two
-# pkexec calls) and firing a critical notification. That flapping is what the
-# user sees, not a stall -- because there was never a stall.
+# So 100 % busy on its own is NOT lag -- a compile filling every core stalls
+# nobody -- and the lag line has to sit above the one-thread-per-core case by
+# enough that only genuine oversubscription trips it. 20 % is inside the 4x
+# band and well clear of the 1x band.
+CPU_BUSY=${CPU_BUSY:-90}        # overall CPU utilisation that counts as pegged
+CPU_LAG=${CPU_LAG:-20}          # PSI cpu "some avg10" that counts as lagging
+# THE THROTTLE LINE IS DERIVED FROM THE CHIP, NOT HARD-CODED (2026-10-26).
 #
-# So each resource is measured against what that resource looks like here:
-#   cpu 30 -- a core is genuinely oversubscribed (heavy build, VM, game)
-#   mem 30 -- reclaim is fighting something
-#   io  50 -- a real disk stall, not a browser read
+# It was 1200 MHz, calibrated on the 20 W eco cap where the fastest core sat
+# at 727-900. Measured again the same evening at 98.1% busy on the balanced
+# cap: fastest core 1400 MHz, PSI 3.5% -- so BOTH lag signals read "fine" and
+# the rescue could not fire at any load. 1400 MHz on an i9-14900HX (base
+# 2200, turbo 5800) is the machine being held back, but it is not below a
+# number that was picked for a different cap.
 #
-# THRESHOLD still overrides all three at once, for a machine that has not been
-# measured yet.
-CPU_PAIN=${CPU_PAIN:-${THRESHOLD:-30}}  # PSI cpu "some avg10" that counts as pain
-MEM_PAIN=${MEM_PAIN:-${THRESHOLD:-30}}  # PSI memory "some avg10"
-IO_PAIN=${IO_PAIN:-${THRESHOLD:-50}}    # PSI io "some avg10"
-GPU_WATTS=${GPU_WATTS:-15}      # dGPU draw that counts as work (playback sits at ~8 W)
-CONSECUTIVE=${CONSECUTIVE:-3}   # samples it must persist (x INTERVAL)
+# So the line is a fraction of /sys/.../policy0/base_frequency -- "the
+# fastest core cannot even reach CLOCK_PCT of its base clock" is throttling
+# on any profile, and it re-calibrates itself when the cap changes. 80% of
+# 2200 = 1760 MHz here. An explicit CLOCK_LINE in the environment still wins.
+CLOCK_PCT=${CLOCK_PCT:-80}      # fastest core below this % of base clock = throttled
+CLOCK_LINE=${CLOCK_LINE:-}
+if [ -z "$CLOCK_LINE" ]; then
+    _base=$(cat /sys/devices/system/cpu/cpufreq/policy0/base_frequency 2>/dev/null)
+    case "$_base" in
+        ''|*[!0-9]*) CLOCK_LINE=1200 ;;
+        *) CLOCK_LINE=$(( _base / 1000 * CLOCK_PCT / 100 )) ;;
+    esac
+    unset _base
+fi
+# 2026-10-26 17:20:41, the incident all of this comes from: 94.4% busy, PSI
+# 10.3%, 727-900 MHz, profile power-saver (20 W PL1, turbo off) while the AC
+# was plugged in. Nothing queued -- everything just ran at ~800 MHz.
+CONSECUTIVE=${CONSECUTIVE:-3}   # samples BOTH must persist (x INTERVAL)
 INTERVAL=${INTERVAL:-5}         # seconds between samples
 COOLDOWN=${COOLDOWN:-300}       # min seconds between actions
 RESTORE_QUIET=${RESTORE_QUIET:-90}  # calm seconds before backing out of performance
@@ -107,8 +156,14 @@ blink() {
     # popped the crash dialog). The shell check filters zombies: a Z-state
     # process still matches a plain pgrep. The shell must be alive AND not a
     # zombie for the blink to be worth attempting.
+    # The shell process is named `qs` on this build (`qs -c ii`), NOT
+    # `quickshell`. The guard only looked for the long name, so it never found
+    # the running shell and every blink was skipped with "shell not alive" --
+    # a notification this daemon printed while the desktop it wanted to warn
+    # was plainly on screen. Both names are accepted, because either could be
+    # the launcher's choice after an update.
     local alive=0 pid stat
-    for pid in $(pgrep -x quickshell); do
+    for pid in $(pgrep -x qs; pgrep -x quickshell); do
         stat=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')
         # Zombies start with Z; anything else (S, R, S<, SNl, ...) is live.
         [ -n "$stat" ] && [ "${stat:0:1}" != "Z" ] && alive=1
@@ -130,48 +185,107 @@ psi_some() {
     awk -F'[= ]' '$1 == "some" { for (i = 1; i <= NF; i++) if ($i == "avg10") { print $(i+1); exit } }' "/proc/pressure/$1" 2>/dev/null | cut -d. -f1
 }
 
-# Echo "<resource> <percent> <points over its own line>": the resource that
-# is furthest past ITS line, not the largest raw number. io sitting at 14 of
-# its 50 is not pain; cpu sitting at 31 of its 30 is.
-peak_pain() {
-    local c m i oc om oi
-    c=$(psi_some cpu); m=$(psi_some memory); i=$(psi_some io)
-    c=${c:-0}; m=${m:-0}; i=${i:-0}
-    oc=$((c - CPU_PAIN)); om=$((m - MEM_PAIN)); oi=$((i - IO_PAIN))
-    if [ "$oc" -ge "$om" ] && [ "$oc" -ge "$oi" ]; then
-        printf 'cpu %s %s\n' "$c" "$oc"
-    elif [ "$om" -ge "$oi" ]; then
-        printf 'memory %s %s\n' "$m" "$om"
-    else
-        printf 'io %s %s\n' "$i" "$oi"
-    fi
+# ── CPU utilisation, from two /proc/stat samples ────────────────────────────
+# /proc/stat's first line is the aggregate:
+#   cpu  user nice system idle iowait irq softirq steal guest guest_nice
+# "busy" is the total minus idle AND iowait: time spent waiting on a disk is
+# not the CPU being pegged (and io is no longer a trigger of its own, so
+# counting it as busy would smuggle it back in).
+cpu_sample() {
+    awk '/^cpu / { idle = $5 + $6; total = 0; for (i = 2; i <= NF; i++) total += $i; printf "%d %d\n", idle, total }' /proc/stat
 }
 
-# 1 when the discrete GPU is doing work, 0 when it is parked.
+read -r cpu_prev_idle cpu_prev_total < <(cpu_sample)
+read -r cpu_prev_idle cpu_prev_total <<<"${cpu_prev_idle:-0} ${cpu_prev_total:-0}"
+
+# THE SAMPLE STATE MUST NOT LIVE IN A SUBSHELL (fixed 2026-10-26).
 #
-# A parked card, a suspended card, a missing nvidia-smi and a driver that
-# answers "N/A" all read as 0 -- never as pressure.
-gpu_busy() {
-    local line ps pw
-    # timeout: nvidia-smi blocks forever against a wedged driver (Xid, a stuck
-    # reset), and this runs in the sampling loop -- a hang there would stop the
-    # whole ladder, including the CPU half that has nothing to do with the GPU.
-    line=$(timeout 3 nvidia-smi --query-gpu=pstate,power.draw --format=csv,noheader,nounits 2>/dev/null)
-    [ -n "$line" ] || { echo 0; return; }
-    ps=$(printf '%s' "$line" | cut -d, -f1 | tr -d ' ')
-    pw=$(printf '%s' "$line" | cut -d, -f2 | tr -d ' ')
-    case "${pw:-}" in ''|*[!0-9.]*) echo 0; return ;; esac
-    # Any draw above the playback floor is work, whatever state the card is in.
-    awk -v p="$pw" -v t="$GPU_WATTS" 'BEGIN { exit !(p + 0 >= t + 0) }' \
-        && { echo 1; return; }
-    # Below it, only a real client in P0 counts: a bursty job can idle between
-    # kernel launches, but with no client attached the driver parks in P8.
-    if [ "$ps" = "P0" ] \
-        && [ -n "$(timeout 3 nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | head -1)" ]; then
-        echo 1
-        return
-    fi
-    echo 0
+# This used to be `busy=$(cpu_busy)` with cpu_busy echoing its result. A
+# command substitution runs the function in a SUBSHELL, so the two globals it
+# assigned (cpu_prev_idle / cpu_prev_total) were thrown away every sample and
+# the window never advanced: every reading was "busy since the daemon
+# STARTED", not "busy in the last INTERVAL". On a daemon that had been up for
+# hours that number only ever fell towards the machine's idle average -- so
+# `busy -ge 90` was false during a genuine 100% spike and the whole watchdog
+# was dead code. Proven by running it by hand under a 31-thread burn: 98% busy
+# logged within 2 s of start (window = its whole life, all load), while the
+# systemd instance logging the same burn stayed silent.
+#
+# So the function now sets CPU_BUSY_NOW in the CURRENT shell and is called
+# without $(...). Same numbers, real window.
+cpu_busy_now() {
+    local idle total di dt
+    read -r idle total < <(cpu_sample)
+    di=$((idle - cpu_prev_idle))
+    dt=$((total - cpu_prev_total))
+    cpu_prev_idle=$idle
+    cpu_prev_total=$total
+    CPU_BUSY_NOW=0
+    [ "$dt" -gt 0 ] || return
+    # Guard against a counter reset / a shorter window than one tick.
+    [ "$di" -ge 0 ] && [ "$di" -le "$dt" ] || return
+    CPU_BUSY_NOW=$(( (100 * (dt - di)) / dt ))
+}
+
+top_offenders() {
+    # Whose fault it is, measured over the last second -- NOT `ps -o pcpu`,
+    # whose number is an average over the process's whole lifetime. On this
+    # machine that average belongs to whatever has been running longest (the
+    # Android emulator at ~53 %, the shell at ~31 %), so an alarm built on it
+    # named the wrong processes while the actual spike -- five vitest workers
+    # at ~95 % -- never appeared. Two /proc snapshots, one second apart.
+    local n=${1:-5}
+    python3 - "$n" <<'PY' 2>/dev/null
+import glob, os, sys, time
+
+def snap():
+    d = {}
+    for p in glob.glob("/proc/[0-9]*"):
+        try:
+            raw = open(p + "/stat", "rb").read().decode("utf-8", "replace")
+        except OSError:
+            continue
+        e = raw.rfind(")")
+        if e < 0:
+            continue
+        f = raw[e + 2:].split()
+        try:
+            d[p.rsplit("/", 1)[1]] = (raw[raw.find("(") + 1:e], int(f[11]) + int(f[12]))
+        except (IndexError, ValueError):
+            continue
+    return d
+
+a = snap()
+t0 = time.time()
+time.sleep(1.0)
+b = snap()
+elapsed = max(time.time() - t0, 0.001)
+hz = os.sysconf("SC_CLK_TCK")
+rows = []
+for pid, (name, ticks) in b.items():
+    if pid in a:
+        pct = 100.0 * (ticks - a[pid][1]) / hz / elapsed
+        if pct >= 5:
+            rows.append((pct, name, pid))
+rows.sort(reverse=True)
+print("; ".join(f"{n} {p:.0f}% (pid {i})" for p, n, i in rows[:int(sys.argv[1])]) or "nothing above 5%")
+PY
+}
+
+cur_freq_mhz() {
+    # The FASTEST core, because "the machine is throttled" must not be
+    # claimed just because one parked core sits low. Every policy is read;
+    # unreadable cpufreq means "unknown", which is reported as a high number
+    # so the decision falls back to PSI instead of guessing "throttled".
+    local f max=0 v
+    for f in /sys/devices/system/cpu/cpufreq/policy*/scaling_cur_freq; do
+        [ -r "$f" ] || continue
+        v=$(cat "$f" 2>/dev/null) || continue
+        case "$v" in ''|*[!0-9]*) continue ;; esac
+        v=$((v / 1000))
+        [ "$v" -gt "$max" ] && max=$v
+    done
+    [ "$max" -gt 0 ] && echo "$max" || echo 99999
 }
 
 desired_mode() {
@@ -195,32 +309,74 @@ PY
 
 apply_performance() {
     # $1 = the streak length that fired (for the notification's "for how long")
-    # $2 = the resource that hurt, $3 = its value (log + notification)
-    local streak=$1 res=${2:-psi} value=${3:-?}
+    # $2 = busy % at the moment it fired, $3 = the reason sentence
+    local streak=$1 busy=${2:-?} lag=${3:-?}
     # The user's setting wins. If the config already says performance, there is
     # nothing here to raise: the profile is theirs and the boost is on, so
     # engaging would only mean standing down later -- which is exactly the "it
     # jumped back to power saving" this used to cause.
     if [ "$(desired_mode)" = "performance" ]; then
-        log "pressure sustained (${res} ${value}%, ${streak} samples), but the user's mode is already performance — no action"
+        log "cpu pegged (${busy}% busy, ${lag}% lag, ${streak} samples), but the user's mode is already performance — no action"
         last_action=$(date +%s)
         return 0
     fi
-    # Already raised and still holding: a long GPU or compile job now stays
-    # above the threshold for its whole run, so without this the ladder would
-    # re-fire every COOLDOWN, re-notifying each time about a boost that is
-    # already on. Nothing to do is the correct answer here.
+    # Already raised and still holding: a long compile stays pegged for its
+    # whole run, so without this the ladder would re-fire every COOLDOWN,
+    # re-notifying each time about a boost that is already on. Nothing to do
+    # is the correct answer here.
     if [ "${engaged:-0}" = "1" ] \
         && [ "$(powerprofilesctl get 2>/dev/null)" = "performance" ] \
         && systemctl is-active --quiet nvidia-powerd.service; then
-        log "still under load (${res} ${value}%, ${streak} samples), boost already on — holding"
+        log "still pegged (${busy}% busy, ${lag}% lag, ${streak} samples), boost already on — holding"
         last_action=$(date +%s)
         return 0
     fi
-    log "pressure sustained (${res} ${value}%, ${streak} samples): acting"
+    log "cpu pegged (${busy}% busy, ${lag}, ${streak} samples): reporting"
+
+    # Default: name the spike, change nothing about the hardware. See the
+    # header -- escalation is opt-in, so a heavy build never turns into a
+    # 120/160 W, fans-up, turbo-on event behind the owner's back.
+    if [ "${FAILSAFE_ESCALATE:-0}" != "1" ]; then
+        local top
+        top=$(top_offenders 5)
+        log "alarm only, no hardware change (set FAILSAFE_ESCALATE=1 to escalate). top: ${top:-unknown}"
+        notify -i "speed" "CPU pegged and lagging" \
+            "${busy}% busy -- ${lag}. Top: ${top:-unknown}"
+        blink fire "CPU pegged — ${busy}% busy, ${lag}"
+        # Remember we reported it so the same spike does not re-notify every
+        # COOLDOWN while it lasts, and stay un-engaged so stand_down never
+        # tries to undo a change we did not make.
+        engaged=0
+        quiet_since=0
+        last_action=$(date +%s)
+        return 0
+    fi
+    # DRY-RUN exists so the trigger can be PROVEN on a real spike without
+    # touching the machine: engaging normally converges the CPU cap through
+    # pkexec, which can raise an authentication dialog in the middle of
+    # whatever the owner is doing. With FAILSAFE_DRY_RUN=1 the decision and
+    # its reason are logged and nothing is written.
+    if [ "${FAILSAFE_DRY_RUN:-0}" = "1" ]; then
+        log "DRY-RUN would set the CPU to performance and enable GPU Dynamic Boost"
+        engaged=1
+        engaged_at=$(date +%s)
+        quiet_since=0
+        last_action=$(date +%s)
+        return 0
+    fi
     powerprofilesctl set performance 2>/dev/null \
         && log "cpu profile -> performance" \
         || log "WARN: powerprofilesctl set performance failed"
+
+    # Converge the CAP now instead of waiting for power-autoswitch's next 5 s
+    # poll. Measured 2026-10-26: without this the profile was performance at
+    # 17:28:56 but the package limit was still 20/30 W with turbo off until
+    # 17:29:00 -- five seconds of the spike spent in the cap this rescue exists
+    # to lift. Same call the shell's power-mode switch makes, so the cap keeps
+    # exactly one writer and one policy table.
+    if [ -x "$HOME/.local/bin/power-autoswitch" ]; then
+        "$HOME/.local/bin/power-autoswitch" --converge 2>&1 | sed 's/^/[converge] /' >&2 || true
+    fi
     if systemctl is-active --quiet nvidia-powerd.service; then
         log "gpu dynamic boost already active"
     else
@@ -232,14 +388,14 @@ apply_performance() {
     engaged_at=$(date +%s)
     quiet_since=0
     notify -i "local_fire_department" "Performance mode engaged" \
-        "${res} pressure ${value}% for ${streak}x${INTERVAL}s. Switched CPU to Performance and enabled GPU Dynamic Boost."
-    blink fire "Power failsafe: machine was stalling — switched to Performance"
+        "CPU pegged at ${busy}% for ${streak}x${INTERVAL}s -- ${lag}. Switched CPU to Performance and enabled GPU Dynamic Boost."
+    blink fire "Power failsafe: CPU pegged and lagging — switched to Performance"
     last_action=$(date +%s)
 }
 
 stand_down() {
     # Back out of OUR OWN performance engagement: sustained calm (every one
-    # of the last RESTORE_QUIET seconds below threshold), profile still on
+    # of the last RESTORE_QUIET seconds below both lines), profile still on
     # performance (do not fight a user who has already moved it), Dynamic
     # Boost off (it idles at ~5-8 W but it is not ours to keep raising).
     log "calm for ${RESTORE_QUIET}s: standing down"
@@ -256,6 +412,13 @@ stand_down() {
         eco)         target=power-saver ;;
         *)           target=balanced ;;
     esac
+    if [ "${FAILSAFE_DRY_RUN:-0}" = "1" ]; then
+        log "DRY-RUN would stand down to ${target} and stop GPU Dynamic Boost"
+        engaged=0
+        quiet_since=0
+        last_action=0
+        return 0
+    fi
     if [ "$target" = "performance" ]; then
         log "user mode is performance — leaving the profile and the boost as they are"
         engaged=0
@@ -263,7 +426,7 @@ stand_down() {
         last_action=0
         notify -i "local_fire_department" "Performance mode is yours" \
             "Machine has been quiet for ${RESTORE_QUIET}s. Leaving the CPU profile and the GPU boost exactly as your Performance mode set them."
-        blink green "Failsafe: machine calm — Performance mode is yours"
+        blink green "Failsafe: CPU calm — Performance mode is yours"
         return
     fi
     if [ "$(powerprofilesctl get 2>/dev/null)" != "$target" ]; then
@@ -288,42 +451,52 @@ stand_down() {
     # at t=95, pressure at t=100 -> 200 s of lag with no action). Reset it.
     last_action=0
     notify -i "check_circle" "Performance no longer needed" \
-        "Machine has been quiet for ${RESTORE_QUIET}s. Back to ${mode}."
-    blink green "Failsafe: machine calm — back to ${mode}"
+        "CPU has been calm for ${RESTORE_QUIET}s. Back to ${mode}."
+    blink green "Failsafe: CPU calm — back to ${mode}"
 }
 
-log "watching PSI: fires after ${CONSECUTIVE} samples past their resource line (cpu ${CPU_PAIN}%, memory ${MEM_PAIN}%, io ${IO_PAIN}%), interval ${INTERVAL}s, cooldown ${COOLDOWN}s"
-log "auto-restore: ${RESTORE_QUIET}s of sustained calm while profile is still performance -> back to power-saver"
+log "watching the CPU only: fires after ${CONSECUTIVE} samples at >=${CPU_BUSY}% busy AND (>=${CPU_LAG}% PSI lag OR <=${CLOCK_LINE} MHz), interval ${INTERVAL}s, cooldown ${COOLDOWN}s"
+log "ignoring memory, io and GPU: they are not the CPU being pegged"
+if [ "${FAILSAFE_ESCALATE:-0}" = "1" ]; then
+    log "action: ESCALATE (opt-in) -- performance profile + GPU Dynamic Boost; auto-restore after ${RESTORE_QUIET}s calm"
+else
+    log "action: ALARM ONLY -- log, notify and blink; no profile, cap, turbo or GPU change (FAILSAFE_ESCALATE=1 opts in)"
+fi
 
 while true; do
-    read -r res p over < <(peak_pain)
-    g=$(gpu_busy)
-    # A busy dGPU is pressure too, even with the CPU calm. Raised past every
-    # line rather than a separate branch, so the streak and the calm counter
-    # are fed by one number and cannot disagree: a GPU job that is still
-    # running keeps the boost up, and stops it from standing down ninety
-    # seconds in.
-    if [ "$g" = "1" ]; then
-        gpu=1
-        res=gpu; p=100; over=1
-    else
-        gpu=0
+    cpu_busy_now
+    busy="$CPU_BUSY_NOW"
+    lag=$(psi_some cpu)
+    lag=${lag:-0}
+
+    freq=$(cur_freq_mhz)
+    # Pegged AND (stalling OR throttled). See the header: PSI cannot see lag on
+    # a power-capped chip, because a slower core still schedules everyone --
+    # the desktop crawls while the kernel honestly reports no queueing.
+    hot=0
+    if [ "$busy" -ge "$CPU_BUSY" ]; then
+        if [ "$lag" -ge "$CPU_LAG" ]; then
+            hot=1; why="tasks stalling (${lag}% PSI)"
+        elif [ "$freq" -le "$CLOCK_LINE" ]; then
+            hot=1; why="cores throttled (${freq} MHz, line ${CLOCK_LINE})"
+        fi
     fi
-    if [ "$over" -ge 0 ]; then
+
+    if [ "$hot" = "1" ]; then
         count=$((count + 1))
-        log "pressure ${res}=${p}% gpu-busy=${gpu} (${count}/${CONSECUTIVE})"
+        log "cpu pegged ${busy}% busy, ${why} (${count}/${CONSECUTIVE})"
         if [ "$count" -ge "$CONSECUTIVE" ]; then
             now=$(date +%s)
             if [ $((now - last_action)) -ge "$COOLDOWN" ]; then
-                apply_performance "$count" "$res" "$p"
+                apply_performance "$count" "$busy" "$why"
             else
-                log "still stalling, but cooling down ($((COOLDOWN - (now - last_action)))s left) — no action"
+                log "still pegged, but cooling down ($((COOLDOWN - (now - last_action)))s left) — no action"
             fi
             count=0
         fi
     else
-        # A single quiet sample resets the streak: bursts must be consecutive.
-        [ "$count" -gt 0 ] && log "pressure cleared (${res}=${p}%, gpu-busy=${gpu}), streak reset"
+        # One calm sample resets the streak: bursts must be consecutive.
+        [ "$count" -gt 0 ] && log "no longer pegged (${busy}% busy, ${lag}% lag, ${freq} MHz), streak reset"
         count=0
         # ── Auto-restore: stand down after sustained calm ──
         if [ "$engaged" = "1" ]; then

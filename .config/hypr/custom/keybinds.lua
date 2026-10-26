@@ -88,11 +88,20 @@ hl.bind("SUPER + ALT + F", hl.dsp.window.fullscreen_state({ internal = 0, client
     { description = "Window: Fullscreen spoof" })
 
 -- SUPER+P pinned a window (an always-on-top floating window -- the one thing
--- this house rule forbids). Rebinding to a no-op is deliberate: the base config
--- owns the key, so leaving it unbound would just let THEIR pin bind fire.
+-- this house rule forbids). The base config owns the key, so it has to be
+-- REBOUND rather than merely unbound: leaving it unbound would just let THEIR
+-- pin bind fire.
+--
+-- The key is the WHOLE-SCREEN SNIP now (2026-10-14, requested): the plain
+-- version of SUPER+S, with no region asked for. The pin stays retired and the
+-- no-op this used to be is gone -- a key that does nothing is a key that reads
+-- as broken, and this one has a screenshot to offer. See
+-- RegionSelector.screenshotFullScreen(): same grim + clipboard path, no region
+-- surface, and nothing left on disk (screenSnip.savePath is empty, so the copy
+-- lives in the clipboard until the next one replaces it).
 hl.unbind("SUPER + P")
-hl.bind("SUPER + P", function() end,
-    { description = "Window: Pin (retired -- nothing floats)" })
+hl.bind("SUPER + P", hl.dsp.global("quickshell:regionScreenshotFull"),
+    { description = "Utilities: Whole-screen snip (copy to clipboard)" })
 
 -- ── No mouse dragging. The window binds for the mouse are REMOVED. ─────────
 --
@@ -204,19 +213,15 @@ do
     end
 end
 
--- SUPER+Q: close the focused window, or park it to the tray if it is a
--- close-to-tray app (config.json's tray.closeToTray). The base config's
--- plain hl.dsp.window.close() for SUPER+Q is replaced here so WhatsApp and
--- any other tray-registered app minimise to the tray instead of quitting.
+-- SUPER+Q: close the focused window. It used to park close-to-tray apps into
+-- `special:tray` first (config.json's tray.closeToTray), and that is what made
+-- a Thunderbird compose window vanish instead of closing -- see the note in
+-- custom/general.lua at the close-drag's finish, where the same branch was
+-- removed on 2026-10-22. One gesture, one verb: it closes.
 hl.unbind("SUPER + Q")
 hl.bind("SUPER + Q", function()
-    local win = hl.get_active_window()
-    if not win then return end
-    -- Park to tray when the class is in config.json's tray.closeToTray;
-    -- otherwise fall through to a normal close, exactly like the base bind.
-    if smartClose(win.address) then return end
     hl.dispatch(hl.dsp.window.close())
-end, { description = "Window: Close / minimise to tray" })
+end, { description = "Window: Close" })
 
 -- Panel brightness keys. These go through the resolver
 -- (scripts/system/brightness-device.sh) rather than plain `brightnessctl`,
@@ -241,7 +246,11 @@ hl.bind("XF86MonBrightnessDown",
     hl.dsp.exec_cmd("bash $HOME/.config/quickshell/ii/scripts/system/brightness-device.sh step -5"),
     { locked = true, repeating = true, description = "Utilities: Brightness down (panel)" })
 
--- Razer Command Center: SUPER + C.
+-- Razer Command Center: SUPER + SHIFT + C.
+--
+-- (Moved from SUPER + C on 2026-10-24: the shell's colour picker took that
+-- key. SUPER + SHIFT + C is free -- its old bind ran hyprpicker, which is
+-- not installed.)
 --
 -- The app now starts resident and in the BACKGROUND (the unit passes
 -- --background), so at login it is running and enforcing the saved lighting,
@@ -255,10 +264,19 @@ hl.bind("XF86MonBrightnessDown",
 -- window is presented. No second process, and no risk of two copies fighting
 -- over the hardware -- which is what would happen if this pointed at the
 -- service instead.
-hl.unbind("SUPER + C")
-hl.bind("SUPER + C",
+hl.unbind("SUPER + SHIFT + C")
+hl.bind("SUPER + SHIFT + C",
     hl.dsp.exec_cmd("razer-command-center"),
     { description = "Utilities: Razer Control Center" })
+
+-- Colour picker: SUPER + C, the slot the Razer Command Center just left.
+-- The shell's own GlobalShortcut does the work (modules/ii/colorPicker):
+-- a frozen grab of the screen, a crosshair and a live hex/rgba pill;
+-- Alt+X or a click copies the hex, Esc closes. The unbind is needed because
+-- the base file binds SUPER + C to the code editor later in its run.
+hl.unbind("SUPER + C")
+hl.bind("SUPER + C", hl.dsp.global("quickshell:colorPicker"),
+    { description = "Utilities: Pick color #RRGGBB >> clipboard" })
 
 -- Media keys: straight to wpctl/playerctl, permanently.
 --
@@ -326,9 +344,13 @@ hl.bind("CTRL + SUPER + Backslash", hl.dsp.window.resize({ x = 640, y = 480, "ex
 --   1. a plain-left-button drag bind -- removed long ago. binds:drag_threshold
 --      cannot tell a title-bar grab from a drag *inside* an app, so selecting
 --      text or dragging a slider moved the whole window instead.
---   2. `general:resize_on_border` (on in the base config) -- a press within 15px
---      of any window edge began a resize drag with NO modifier held. Removed in
---      custom/general.lua along with the extended grab area.
+--   2. `general:resize_on_border` (on in the base config) -- a press near any
+--      window edge began a resize drag with NO modifier held. Removed in
+--      custom/general.lua along with the extended grab area. (This was switched
+--      off 2026-09-28 and back on 2026-10-16; the dated note there carries the
+--      measurement that ended it -- the band sat OUTSIDE the window, so aiming
+--      at the border grabbed the window instead. The 15px here was the old
+--      band; it had been 10px.)
 --
 -- The SUPER + LMB move drag the base config binds is unbound above. The ONE
 -- deliberate exception is the SUPER + RMB (= two-finger press) RESIZE drag,
@@ -595,6 +617,63 @@ for _, superKey in ipairs({ "SUPER_L", "SUPER_R" }) do
     hl.bind(superKey, hl.dsp.global("quickshell:workspaceNumber"),
         { ignore_mods = true, transparent = true, release = true })
 end
+
+-- ── SUPER + SPACE: the desktops, on its own key (2026-10-14, retuned
+--    2026-10-15 -- requested) ───────────────────────────────────────────────
+--
+-- Press it and the desktop grid comes up; press it again and it goes away. That
+-- is one action for one action, the same deal the four-finger swipe offers --
+-- which is what this key is FOR. It was a 300 ms hold at first, and a tap did
+-- nothing at all: a key that opens a view, that ignores a press of it, is a key
+-- that reads as broken (measured -- the first thing anyone does with it is
+-- tap it). The hold still works, trivially: the press has already toggled.
+--
+-- IT DOES NOT GRAB A DESKTOP (2026-10-16, requested). It did for a day: the
+-- grid came up holding the desktop under the POINTER (2026-10-15). Both halves
+-- of that are gone now -- this chord raises no lift on its press edge any more
+-- (GlobalStates.superPressEdge) and the SUPER + four-finger swipe down that
+-- shared the behaviour is deleted from custom/general.lua -- so the key is what
+-- it was before: a plain toggle onto the grid. A click there still switches
+-- desktop and a click-HOLD still picks a card up to rearrange the desktops;
+-- what no longer happens is a card arriving in your hand because you pressed
+-- this key. The compositor side never changed and is still single: this key
+-- only names the chord.
+--
+-- The desktop numbers show while the chord is down, exactly as they do on a
+-- bare-SUPER hold, and the app search card never opens on the way up: the
+-- chord's SUPER release is not a tap (see the release-interrupt below, and
+-- GlobalStates.superPressEdge).
+--
+-- A different GlobalShortcut from the bare key's `workspaceNumber`, on purpose.
+-- The shell hears only names, so ONE name for both keys would make "bare SUPER
+-- was held" and "SUPER+Space was held" the same event -- which is precisely
+-- what put the grid on a slow bare-SUPER press. Two names, and the shell can
+-- keep the numbers hint and the search card on the bare key and the grid on
+-- this one (GlobalStates.qml: `superPressEdge`/`superReleaseEdge`, called by
+-- both shortcuts).
+--
+-- No `ignore_mods` here, deliberately. That flag exists on the bare binds
+-- because the keypress that RAISES SUPER is the event that creates the
+-- modifier, so a modifier-strict bind never matches it. On this chord the
+-- modifier is long established, and `ignore_mods` would instead make the bind
+-- match a bare Space -- stealing the space bar from every app on the desktop.
+--
+-- NOT transparent, also deliberately: the bare binds pass the key through so
+-- the hint can coexist with the Super+<number> workspace binds. Here the chord
+-- IS the action, so the space is consumed rather than typed into whatever is
+-- focused -- which is what the old accidental "SUPER+Space behaves like a bare
+-- SUPER tap and also types a space" was made of.
+--
+-- The release is bound as well as the press, and not because anything waits on
+-- it: the TOGGLE happens on the press edge. The release edge is what tells the
+-- shell the chord is over -- `superDown` goes false, and the tap candidate the
+-- press cleared stays cleared (GlobalStates.superReleaseEdge). Without it the
+-- shell would believe SUPER was still down until the next press told it
+-- otherwise.
+hl.bind("SUPER + Space", hl.dsp.global("quickshell:superHold"),
+    { description = "Shell: Toggle the desktops (SUPER + Space)" })
+hl.bind("SUPER + Space", hl.dsp.global("quickshell:superHold"),
+    { description = "Shell: Toggle the desktops (release)", release = true })
 
 
 -- Kept from before: a no-look "next occupied desktop" cycle, for when you do not
@@ -1075,6 +1154,16 @@ hl.bind("SUPER + SHIFT + G",
 -- the duplicate is harmless and keeps this a complete statement of the rule
 -- rather than a list of exceptions to it. Regenerate by listing the same set:
 --
+-- NOTE, because this file has been edited by hand here: SUPER + Space BELONGS
+-- in this list now that it is a chord (the toggle, bound further up). Without it,
+-- the release after a SUPER+Space tap would look like an untouched SUPER hold
+-- and open the app search a beat later -- the same job every other entry here
+-- does, and the shell drops the same candidate on the chord's own press edge
+-- (GlobalStates.superPressEdge), so the two agree either way round. Nothing but
+-- chords and commas may live inside
+-- the brackets: the loop below splits on commas and newlines, so a comment in
+-- there becomes a bind of the comment's own text.
+--
 --   hyprctl binds -j | python3 -c "..."    (modmask & 64, key not SUPER_L/R)
 local SUPER_CHORD_LIST = [[
 ALT + SUPER + A, ALT + SUPER + D, ALT + SUPER + Down, ALT + SUPER + Equal,
@@ -1100,7 +1189,7 @@ SHIFT + SUPER + N, SHIFT + SUPER + P, SHIFT + SUPER + R, SHIFT + SUPER + Right,
 SHIFT + SUPER + S, SHIFT + SUPER + T, SHIFT + SUPER + Up, SHIFT + SUPER + W,
 SHIFT + SUPER + X, SUPER + 0, SUPER + 1, SUPER + 2, SUPER + 3, SUPER + 4, SUPER + 5,
 SUPER + 6, SUPER + 7, SUPER + 8, SUPER + 9, SUPER + A, SUPER + Apostrophe, SUPER + B,
-SUPER + BracketLeft, SUPER + BracketRight, SUPER + C, SUPER + D, SUPER + Down,
+SUPER + Space, SUPER + BracketLeft, SUPER + BracketRight, SUPER + C, SUPER + D, SUPER + Down,
 SUPER + E, SUPER + Equal, SUPER + Escape, SUPER + F, SUPER + G, SUPER + I, SUPER + J,
 SUPER + K, SUPER + L, SUPER + Left, SUPER + M, SUPER + Minus, SUPER + N, SUPER + O,
 SUPER + P, SUPER + Page_Down, SUPER + Page_Up, SUPER + Period, SUPER + Q, SUPER + R,

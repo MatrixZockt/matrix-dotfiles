@@ -214,6 +214,25 @@ else
     exit 1
 fi
 
+# ── The reload just handed the panel the WRONG refresh rate ─────────────────
+# A reload re-applies custom/general.lua's monitor rule, which asks for the
+# panel's PREFERRED mode -- 240 Hz. The owner's rule is the opposite: the
+# refresh follows the POWER MODE (power-saver 60 Hz, balanced/performance the
+# panel's preferred) and moves at no other time. So on power-saver this script
+# would leave a 60 Hz panel at 240 Hz until power-autoswitch's drift check
+# noticed, up to 30 s later.
+#
+# Asking that same script for the rate is the fix, and it is deliberately a
+# refresh-only pass: no CPU cap, no profile write, so no pkexec and no password
+# prompt between the reload and the correction. One policy table (REFRESH_FOR
+# in power-autoswitch) decides the rate for both this path and a mode switch.
+#
+# Not fatal if it cannot run: the drift check is still behind it.
+POWER_AUTOSWITCH="$HOME/.local/bin/power-autoswitch"
+if [[ -x "$POWER_AUTOSWITCH" ]]; then
+    "$POWER_AUTOSWITCH" --refresh || echo "refresh not re-asserted (drift check will get it)" >&2
+fi
+
 # Follow the scale change through to the X11 apps. Runs after the reload so a
 # failed reload never leaves the X server on a scale the compositor is not
 # using; the script no-ops when there is nothing to change. Failures here are

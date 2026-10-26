@@ -80,6 +80,33 @@ ipc() { timeout 2 qs -c "$qs_config" ipc call "$@" 2>/dev/null || true; }
 # Was this stamp touched within N seconds?
 recent() { [ -f "$1" ] && [ $(( $(date +%s) - $(stat -c %Y "$1" 2>/dev/null || echo 0) )) -lt "$2" ]; }
 
+# ── Say it on screen, not only in the log ──────────────────────────────────
+#
+# This key exists because "I am not sure the desktop heard me" is a real state,
+# and until now its only answer was /tmp/fix-mouse.log -- the one place the
+# person pressing it is not looking. A key that reports into a file is
+# indistinguishable from a key that was never bound.
+#
+# FIRE AND FORGET, and that is not laziness. The shell may be the very thing
+# that is stuck (cause 3), and the ipc() helper above waits up to 2 seconds for
+# an answer: 2 seconds of a pointer that does not click, spent asking a shell
+# that may never reply. The card is worth having when it lands and costs
+# nothing when it does not, so the call goes to the background and the fix
+# carries on immediately. If the shell is mute the card simply never appears,
+# which is what the reload at the bottom is for.
+# The same top-right signal card the clipboard's "Copied" uses -- one surface
+# for "that worked", sized to the sentence. `sayIcon` (not `say`) so the glyph
+# can name the kind: a pointer fix gets a pointer, an outcome gets a check.
+# Defaults to the pointer glyph because that is what this script is about.
+notice() {
+    timeout 2 qs -c "$qs_config" ipc call signalToast sayIcon "$1" "${2:-mouse}" >/dev/null 2>&1 &
+}
+
+# Said FIRST, before any of the work: the answer to "did that do anything?" has
+# to arrive while the person is still looking at the screen, and the steps
+# below take a moment (a release sweep over 249 keycodes, an IPC round trip).
+notice "Reclaiming cursor" "mouse"
+
 # ── 1. Let go of every button and key ───────────────────────────────────────
 #
 # The masks matter. `ydotool click 0x80` is "left button UP" -- up only -- where
@@ -186,6 +213,7 @@ fi
 
 if [ -n "$state_after" ]; then
     log "shell is up and answering -- held input cleared, grab released"
+    notice "Cursor reclaimed" "check_circle"
     exit 0
 fi
 
@@ -200,11 +228,13 @@ fi
 #     measured 9.4 s idle and past 50 s under load.
 if recent "$runtime/ii-shell-reset.active" 120; then
     log "shell not answering, but a reload is already in flight -- leaving it alone"
+    notice "Shell reloading -- left alone" "sync"
     exit 0
 fi
 
 if recent "$runtime/ii-shell.started" 15; then
     log "shell not answering, but it started <15s ago (still loading) -- leaving it alone"
+    notice "Shell still loading -- left alone" "hourglass_top"
     exit 0
 fi
 

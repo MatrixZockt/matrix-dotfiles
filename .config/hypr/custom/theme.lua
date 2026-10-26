@@ -92,34 +92,26 @@ M.THEMES = {
 -- native and need no redraw; below 16 the artwork stops being legible and
 -- should not be forced.
 M.CURSOR_SIZE = 24
--- The baseline is the BORDERLESS variant. The keyed-up variants
--- (Bibata-Modern-Ice / -Classic) are still installed and are what
--- custom/scripts/cursor-adapt.py switches to when -- and only when -- the
--- pointer is over something close enough to its own colour that it would
--- otherwise be hard to track. So the rim costs nothing on an ordinary surface.
-M.CURSORS = {
-    dark  = "Bibata-Modern-Ice-NoLine",
-    light = "Bibata-Modern-Classic-NoLine",
-}
 
---- Point the pointer at the variant for `mode`.
+--- The pointer is NOT themed per mode, and it is NOT the borderless artwork.
 ---
---- Two things worth knowing:
+--- It used to be: a white borderless Bibata on dark and a black one on light,
+--- re-issued through `hyprctl setcursor` on every theme apply -- plus a second,
+--- disagreeing name in hyprland/execs.lua at startup and a third in the X11
+--- resource manager. Three answers to one question meant the artwork could
+--- change under the hand (an outlined arrow over one window, a borderless one
+--- over the next), which is the reported "border turns from black to white".
 ---
---- 1. This uses `hyprctl setcursor`, NOT `hl.config({cursor = ...})`. The cursor
----    block is applied at parse time; hl.config can set it, but the theme has to
----    be able to swap it mid-session, and going through the command is the path
----    that is documented to reload the cursor immediately. `hyprctl keyword`
----    is not an option for the same reason it is not used above -- this config
----    is a non-legacy parser.
+--- The borderless themes and the swapping are gone (removed 2026-10-22). The
+--- pointer is the STOCK Bibata-Modern-Ice artwork -- white body, black rim --
+--- the same in both modes and the same in every window.
 ---
---- 2. hl.exec_cmd spawns the child from Hyprland itself, so it is not tied to
----    whatever happened to call apply() and cannot be orphaned by it.
-local function applyCursor(mode)
-    local name = M.CURSORS[mode]
-    if not name then return end
-    hl.exec_cmd(string.format("hyprctl setcursor %s %d >/dev/null 2>&1",
-                              name, M.CURSOR_SIZE))
+--- The single answer lives in hyprland/env.lua as XCURSOR_THEME, which is what
+--- actually resolves a cursor on this build (see the measurement note there:
+--- `setcursor` accepts any name and changes nothing). Nothing here swaps it, and
+--- nothing swaps it per mode.
+local function applyCursor(_mode)
+    return
 end
 
 --- Read the mode the shell last recorded. Anything unrecognised is "dark",
@@ -172,8 +164,8 @@ function M.apply(mode)
         border_color = theme.pin,
     })
 
-    -- The pointer, last, so that a failure to swap it cannot stop the chrome
-    -- above from being applied.
+    -- The pointer used to be re-issued here on every switch; it is a single
+    -- static theme now (see applyCursor above), so there is nothing to do.
     applyCursor(mode)
 
     return true
@@ -181,14 +173,20 @@ end
 
 --- Re-apply the mode that is currently in force.
 ---
---- This exists for custom/scripts/window-border-hint.py, which paints an
---- opaque black border while the pointer rests on a window's resize edge and
---- has to put something back when it leaves. It used to hold its own copies of
---- the two resting colours, copied from hyprland/colors.lua, and pushed those
---- verbatim -- so a light theme was undone the first time the pointer left an
---- edge, and the border flipped back to dark while the rest of the desktop
---- stayed light. Asking here instead means the resting colours live in exactly
---- one place and cannot drift from what the desktop is actually wearing.
+--- This was written for custom/scripts/window-border-hint.py, which painted an
+--- opaque black border while the pointer rested on a window's resize edge and
+--- had to put something back when it left. That script is DISABLED as of
+--- 2026-10-16 -- the edge grab it advertised is off (see the dated note in
+--- custom/general.lua) -- so nothing calls this today. It stays anyway: it is
+--- the "put the current mode back" entry point, and reviving the hint should not
+--- also mean re-deriving its colours.
+---
+--- The reason it exists at all, kept from that work: the script used to hold its
+--- own copies of the two resting colours, copied from hyprland/colors.lua, and
+--- pushed those verbatim -- so a light theme was undone the first time the
+--- pointer left an edge, and the border flipped back to dark while the rest of
+--- the desktop stayed light. Asking here instead means the resting colours live
+--- in exactly one place and cannot drift from what the desktop is wearing.
 ---
 --- The script only calls this on a transition (entering or leaving the band),
 --- never per tick, so the extra require is not a cost worth worrying about.

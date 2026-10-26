@@ -201,6 +201,7 @@ import SddmComponents 2.0
     property string statusMessage: ""
     property bool statusIsError: false
     property bool userMenuOpen: false
+    property bool powerMenuOpen: false
 
     TextConstants { id: textConstants }
 
@@ -426,6 +427,7 @@ import SddmComponents 2.0
         anchors.fill: parent
         onClicked: {
             root.userMenuOpen = false;
+            root.powerMenuOpen = false;
             root.focusPassword();
         }
     }
@@ -1337,21 +1339,127 @@ import SddmComponents 2.0
         spacing: 6
 
         IconButton {
-            visible: sddm.canSuspend
-            glyph: "dark_mode"
-            onClicked: sddm.suspend()
-        }
-
-        IconButton {
-            visible: sddm.canPowerOff
+            id: powerButton
+            visible: root.powerActions().length > 0
             glyph: "power_settings_new"
-            onClicked: sddm.powerOff()
+            active: root.powerMenuOpen
+            onClicked: root.powerMenuOpen = !root.powerMenuOpen
+        }
+    }
+
+    // ==================================================================
+    // Power menu: one glyph, every action this greeter can perform.
+    //
+    // It replaces three near-identical glyphs in a row -- suspend, power off,
+    // restart -- where the pair either side of the middle one are the two
+    // irreversible things on this screen and nothing but a glyph told them
+    // apart. The shell's power menu solved the same problem the same way, so
+    // this is that card: the actions stacked, named, in the order from
+    // harmless to final. Rows the greeter cannot perform are left out rather
+    // than drawn dead (SDDM reports canSuspend / canReboot / canPowerOff).
+    //
+    // A plain child of this item, like the account list above: a greeter has
+    // no popup layer to open a window in. The click-away MouseArea declared
+    // near the top of the file closes it, which is also why nothing here needs
+    // a scrim of its own.
+    // ==================================================================
+    function powerActions() {
+        return [
+            { key: "suspend",  icon: "dark_mode",          label: "Suspend",   can: sddm.canSuspend },
+            { key: "reboot",   icon: "restart_alt",        label: "Restart",   can: sddm.canReboot },
+            { key: "poweroff", icon: "power_settings_new", label: "Power off", can: sddm.canPowerOff }
+        ].filter(function (a) { return a.can; });
+    }
+
+    function runPowerAction(key) {
+        root.powerMenuOpen = false;
+        if (key === "suspend")
+            sddm.suspend();
+        else if (key === "reboot")
+            sddm.reboot();
+        else if (key === "poweroff")
+            sddm.powerOff();
+    }
+
+    Rectangle {
+        id: powerMenu
+
+        // Hangs off the button's own corner rather than the screen's: the row
+        // it belongs to is right-aligned, so the two share an edge.
+        anchors.right: bottomRight.right
+        anchors.bottom: bottomRight.top
+        anchors.bottomMargin: 8
+        visible: root.powerMenuOpen
+        width: 178
+        height: powerColumn.implicitHeight + 12
+        radius: 14
+        color: Qt.rgba(root.colSurfaceContainer.r, root.colSurfaceContainer.g, root.colSurfaceContainer.b, 0.97)
+        border.width: 1
+        border.color: Qt.rgba(root.colOutline.r, root.colOutline.g, root.colOutline.b, 0.22)
+
+        // Swallows presses that land on the card's own padding. Without it they
+        // fall through to the click-away MouseArea behind and close the menu
+        // the user was aiming at.
+        MouseArea {
+            anchors.fill: parent
         }
 
-        IconButton {
-            visible: sddm.canReboot
-            glyph: "restart_alt"
-            onClicked: sddm.reboot()
+        Column {
+            id: powerColumn
+            anchors.centerIn: parent
+            spacing: 2
+
+            Repeater {
+                model: root.powerActions()
+
+                delegate: Item {
+                    required property var modelData
+
+                    width: 166
+                    height: 40
+
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: 11
+                        color: rowArea.containsMouse ? Qt.rgba(1, 1, 1, 0.07) : "transparent"
+
+                        Behavior on color {
+                            ColorAnimation { duration: 120 }
+                        }
+                    }
+
+                    Glyph {
+                        id: rowGlyph
+                        anchors.left: parent.left
+                        anchors.leftMargin: 12
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: parent.modelData.icon
+                        glyphSize: 18
+                        color: root.colOnSurfaceVariant
+                    }
+
+                    Text {
+                        anchors.left: rowGlyph.right
+                        anchors.leftMargin: 10
+                        anchors.right: parent.right
+                        anchors.rightMargin: 12
+                        anchors.verticalCenter: parent.verticalCenter
+                        elide: Text.ElideRight
+                        text: parent.modelData.label
+                        color: root.colOnSurface
+                        font.family: root.textFont
+                        font.pixelSize: 14
+                    }
+
+                    MouseArea {
+                        id: rowArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.runPowerAction(parent.modelData.key)
+                    }
+                }
+            }
         }
     }
 
@@ -1478,6 +1586,9 @@ import SddmComponents 2.0
 
         property string glyph
         property real glyphSize: 20
+        // Held down: the button whose menu is open. Same tint as hover, so the
+        // open state needs no second visual vocabulary.
+        property bool active: false
         signal clicked()
 
         implicitWidth: 36
@@ -1486,7 +1597,7 @@ import SddmComponents 2.0
         Rectangle {
             anchors.fill: parent
             radius: width / 2
-            color: buttonArea.containsMouse || buttonArea.pressed
+            color: buttonArea.containsMouse || buttonArea.pressed || button.active
                 ? Qt.rgba(1, 1, 1, 0.10)
                 : "transparent"
 

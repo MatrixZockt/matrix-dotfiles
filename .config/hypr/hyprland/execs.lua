@@ -66,25 +66,19 @@ hl.on("hyprland.start", function ()
     -- removed first.
     hl.exec_cmd("bash -c 'rm -f $XDG_RUNTIME_DIR/.ydotool_socket; exec ydotoold'")
 
-    -- Cursor
+    -- Cursor: deliberately NOT set here.
     --
-    -- `Bibata-Modern-Classic` does not exist anywhere on this system -- not in
-    -- /usr/share/icons, not in ~/.local/share/icons, nowhere on disk. It was
-    -- removed or never installed.
+    -- There used to be a `hyprctl setcursor capitaine-cursors 24` at startup,
+    -- and it was one of THREE places that named a cursor theme -- this one, the
+    -- mode-dependent pair in custom/theme.lua, and XCURSOR_THEME for the
+    -- clients. Every one of them is a different answer to "what does the
+    -- pointer look like", so the pointer could change artwork between windows:
+    -- a white borderless arrow in one place, an outlined one in another. That
+    -- is the "my mouse border turns from black to white sometimes" report, and
+    -- the fix is not a better name in three places, it is one name in one
+    -- place.
     --
-    -- This mattered far more than it looks. `setcursor` is how Hyprland tells
-    -- the COMPOSITOR which cursor theme to draw, and it applies to every
-    -- client -- including the Quickshell shell. Naming a theme that is not
-    -- there made Hyprland fall back to its built-in arrow for everything, so
-    -- no client could ever get a hand, a move cross, or a resize arrow
-    -- rendered, no matter what cursorShape it asked for. A Qt binding saying
-    -- `Qt::OpenHandCursor` was therefore invisible: the compositor, not Qt,
-    -- owned the cursor and it had nothing to draw.
-    --
-    -- `capitaine-cursors` is the theme that is actually installed here (it is
-    -- also what org.gnome.desktop.interface cursor-theme now names, which
-    -- covers clients that ask the portal instead of asking Hyprland). Both
-    -- Bibata names are gone; if a Bibata theme is ever installed again, this
-    -- is the one line to change.
-    hl.exec_cmd("hyprctl setcursor capitaine-cursors 24")
+    -- The single name lives in hyprland/env.lua (XCURSOR_THEME) and reaches
+    -- the compositor, Qt clients and X11 clients alike. Nothing sets it per
+    -- mode and nothing swaps it mid-session any more.
 end)

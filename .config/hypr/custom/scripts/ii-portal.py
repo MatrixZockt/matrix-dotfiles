@@ -75,7 +75,19 @@ SHELL_DIR = os.path.expanduser("~/.config/quickshell/ii")
 LAUNCHER = os.path.join(SHELL_DIR, "scripts/launch/filemanager.sh")
 # The QML the picker instance runs, which is how its process is recognised
 # below (the retired Python one had a different argv entirely).
-PICKER_QML = os.path.join(SHELL_DIR, "filemanager-picker.qml")
+#
+# RESOLVED, and that is load-bearing. The launcher resolves its own path with
+# `readlink -f` before it computes the QML it execs, so on a machine whose
+# ~/.config is a symlink into a dotfiles repo the picker's argv carries the
+# REPO path (measured here: argv says
+# /home/user/hyprland/.config/quickshell/ii/filemanager-picker.qml) while
+# this side holds the ~/.config one. Compared unresolved, the match is simply
+# never true: picker_alive() reports "never came up" about a dialog that is on
+# screen, and at STARTUP_GRACE the request is answered cancelled and the job
+# file is deleted under a live dialog -- every app's Open/Save dialog closing
+# itself after 30 seconds with the user halfway through using it. Both spellings
+# mean the same file, so both are resolved before they are compared.
+PICKER_QML = os.path.realpath(os.path.join(SHELL_DIR, "filemanager-picker.qml"))
 POLL_TIMEOUT = 600.0  # give up on the picker after 10 minutes
 
 # "Show me this file", as opposed to "pick one for me": the well-known bus
@@ -269,7 +281,10 @@ def picker_alive(token):
                         for a in fh.read().split(b"\0") if a]
         except OSError:
             continue
-        if PICKER_QML not in argv:
+        # Realpath on the argv entry too: see the note on PICKER_QML. A
+        # symlinked ~/.config is the ordinary case on this desktop, not an
+        # exotic one.
+        if not any(os.path.realpath(a) == PICKER_QML for a in argv):
             continue
         try:
             with open(f"/proc/{pid_dir}/environ", "rb") as fh:

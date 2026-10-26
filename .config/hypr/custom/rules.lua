@@ -21,6 +21,15 @@
 -- prompt, its file pickers) keep floating, which is what you want from a dialog.
 hl.window_rule({ match = { class = "^@codebuff/freebuff%-desktop$" }, float = false })
 
+-- ...and the same for when it runs through XWayland (FREEBUFF_DESKTOP_RENDER,
+-- see ~/.local/bin/freebuff-desktop). An X11 window takes its class from
+-- WM_CLASS, and Freebuff sets that to plain `Freebuff` -- verified with
+-- `hyprctl clients`: the same app is `@codebuff/freebuff-desktop` on Wayland
+-- and `Freebuff` on X11. Without this second rule the GPU build asks to
+-- float and lands loose on top of the layout, which is the exact bug the
+-- rule above exists to prevent.
+hl.window_rule({ match = { class = "^Freebuff$" }, float = false })
+
 -- A FULLSCREEN window is already edge to edge: the compositor puts it at
 -- 0,0 with the monitor's full logical size, gaps included. What is left is
 -- the 1px border, which Hyprland paints anyway -- a 2px (1 logical px at
@@ -43,24 +52,42 @@ hl.window_rule({ match = { fullscreen = true }, border_size = 0 })
 -- the only things that present as cards, and they do that as layer surfaces,
 -- not as floating windows.
 --
--- This one rule is deliberately a catch-all: it is the ONLY way to also stop
--- the applications that ask the compositor to float themselves (Electron,
--- AppImages, KDE apps, anything with a remembered geometry). Matching each of
--- them by class is a losing game of whack-a-mole.
+-- The catch-all that used to sit here (`class = ".*"`, float = false) is
+-- GONE, and this is why: it also flattened every popup and helper window --
+-- the small chooser a mail client opens over its own window, the ghost image
+-- an Electron app paints under the cursor while you drag. Those are not
+-- applications, they are part of another window's UI. Handed to the tiler
+-- they get a tile of their own, which re-flows the whole workspace and makes
+-- a two-line drop-down look like a freshly launched app. Thunderbird's From
+-- chooser and the drag image Freebuff paints were both hit by this: the
+-- popup took over a tile at the top of the screen, and the drag image
+-- re-tiled everything while a file was still in the air.
 --
--- 
--- Hyprland applies rules in order and the LAST match wins, so the catch-all is
--- placed here, and the two things that genuinely must float re-assert
--- themselves BELOW it:
+-- Naming the apps that actually misbehave costs a few lines and buys back the
+-- compositor's normal behaviour for everything else: a plain toplevel still
+-- tiles, and a window that ASKS to float (dialog, popup menu, tool window,
+-- drag ghost) floats at the size and position its own toolkit chose. That is
+-- exactly what a drop-down needs in order to open under the field it belongs
+-- to instead of taking over the layout.
 --
---   1. transient dialogs -- an "Open File"/"Save As" window is sized by its
---      parent application and is unusable stretched across the screen.
-hl.window_rule({ match = { class = ".*" }, float = false })
+-- Hyprland applies rules in order and the LAST match wins, so the apps that
+-- genuinely misbehave are named here, once, instead of sweeping up everything:
+hl.window_rule({ match = { class = "^(@codebuff/freebuff%-desktop|Freebuff|WhatsApp Desktop|com%.anthropic%.Claude|discord|opcode|TradingView|code%-oss|jetbrains%-studio|AusweisApp)$" }, float = false })
 
--- Exception 1: dialogs. Same list the base config floats, re-asserted because
--- the catch-all above would otherwise flatten them, plus the portal backends
--- (the desktop's own file chooser renders as a layer surface, but KDE's and
--- GTK's fallbacks are real windows) and the polkit password agents.
+-- Windows with no identity at all -- a drag image, a drag proxy, a ghost
+-- painted under the cursor by the toolkit while a drag is in flight. They are
+-- never an application and must never own a tile: without this they map as a
+-- managed window, the tiling layout re-flows around them mid-drag, and the
+-- drop target moves out from under the pointer. Floating keeps them out of the
+-- layout and at the size the app asked for; no_initial_focus keeps the drag
+-- from stealing focus from the window the pointer is actually over.
+hl.window_rule({ match = { class = "^()$", title = "^()$" }, float = true, no_initial_focus = true })
+
+-- Exception 1: dialogs. Same list the base config floats -- an "Open File"/
+-- "Save As" window is sized by its parent application and is unusable
+-- stretched across the screen -- plus the portal backends (the desktop's own
+-- file chooser renders as a layer surface, but KDE's and GTK's fallbacks are
+-- real windows) and the polkit password agents.
 hl.window_rule({ match = { title = "^(Open File|Select a File|Open Folder|Save As|Library|File Upload|Choose wallpaper)(.*)$" }, float = true })
 hl.window_rule({ match = { title = "^(.*)(wants to save|wants to open)$" }, float = true })
 hl.window_rule({ match = { class = "org.freedesktop.impl.portal.desktop" }, float = true })
@@ -165,6 +192,33 @@ hl.layer_rule({ match = { namespace = "quickshell:overlay" }, ignore_alpha = 0 }
 hl.layer_rule({ match = { namespace = "quickshell:barPanel" }, xray = false })
 hl.layer_rule({ match = { namespace = "quickshell:overlay" }, xray = false })
 
+-- The Files app used to be a layer-surface popup (namespace
+-- `quickshell:filesPopup`) and needed the bar popups' frost trio here. It is an
+-- ordinary desktop WINDOW now (see filemanager.qml's header), so there is
+-- nothing to match: it is tiled like every other app and its background is the
+-- opaque surface it paints itself.
+--
+-- The PICKER (`quickshell:files`, filemanager-picker.qml) is the one layer
+-- surface left, and it does need a rule -- the opposite of what the entry here
+-- used to say. "Deliberately no rule" silently fell through to the base
+-- config's catch-all (`quickshell:.*`: blur = true, ignore_alpha = 0.79), and
+-- a blurred layer in this setup samples the WALLPAPER unless it says
+-- otherwise. The dialog is a 15%-transparent card, so what showed through the
+-- file rows was the wallpaper's artwork -- positioned exactly like the
+-- wallpaper, over any app -- instead of the application that asked for the
+-- file. That is the report: "the invisibility should be through the app ... not
+-- look through it to display the wallpaper".
+--
+-- Same trio as the bar popups, for the same reason: blur = true so the card
+-- reads as glass rather than a sheet of colour, ignore_alpha 0 so the frosting
+-- covers the card's transparent pixels too (this window IS the card -- there is
+-- no full-screen scrim to frost), and xray = false so the blur samples the
+-- applications behind the dialog. Measured after the reload: the artwork
+-- behind the file rows is the requesting app's own content.
+hl.layer_rule({ match = { namespace = "quickshell:files" }, blur = true })
+hl.layer_rule({ match = { namespace = "quickshell:files" }, ignore_alpha = 0 })
+hl.layer_rule({ match = { namespace = "quickshell:files" }, xray = false })
+
 -- The SUPER-tap app search card gets the same frosting as the bar popups:
 -- translucent card + compositor blur, and xray OFF so the blur samples the
 -- applications behind it (the desktop stays sharp around the card -- the
@@ -253,11 +307,49 @@ hl.window_rule({
     no_blur = false,
 })
 
+-- ══ The Explorer window: a temporary card, not a tile ═════════════════
+--
+-- The file manager belongs to the same family as a dialog: you open it to do
+-- one thing and leave. Attached to the tiler it read as another permanent
+-- pane of the desktop, and it resized everything around it just by opening.
+-- Floating and centred, at most HALF the screen in each direction, it reads
+-- as a temporary card instead.
+--
+-- 853x533 is half of this laptop's 1706x1066 logical screen. The Lua rules
+-- API takes pixels, not percentages, so these are literal numbers: on a
+-- different monitor they are a size, not "half". The half-of-screen sizes
+-- for the picker are computed live in general.lua and explorer.py; this app's
+-- window has no such hook, so the numbers live here.
+--
+-- `max_size` is what enforces "at most": `size` only decides how it opens,
+-- and a drag would otherwise grow it back to whatever the user asked for.
+--
+-- PLAIN DOTS IN THE PATTERN, not the `%.` the rest of this file uses. The
+-- match strings go to Hyprland's REGEX engine, not to Lua's pattern matcher,
+-- so `^org%.hypr%.Explorer$` asks for a literal '%' and never matches a
+-- window class that has none -- measured on this build: that spelling floated
+-- nothing, while `^org.hypr.Explorer$` floated the window on the next open.
 hl.window_rule({
-    name  = "explorer-picker-dialog",
-    match = { class = "^org%.hypr%.Explorer%.Picker$" },
-    float = true,
-    size  = { 780, 560 },
+    name     = "explorer-centred-card",
+    match    = { class = "^org.hypr.Explorer$" },
+    float    = true,
+    center   = true,
+    size     = { 853, 533 },
+    max_size = { 853, 533 },
+})
+
+-- The picker is the same card, centred: 780x520, and the same half-screen
+-- cap so it can never read as a stretched panel. The map-time values here are
+-- only the baseline -- general.lua and explorer.py re-assert the same centred
+-- geometry live, because the catch-all float=false re-applies ~200ms after
+-- map (see the picker hook in general.lua).
+hl.window_rule({
+    name     = "explorer-picker-dialog",
+    match    = { class = "^org.hypr.Explorer.Picker$" },
+    float    = true,
+    center   = true,
+    size     = { 780, 520 },
+    max_size = { 853, 533 },
 })
 
 
@@ -293,4 +385,26 @@ hl.window_rule({
     name  = "rcc-charge-limit-dialog",
     match = { title = "^Change charge limit$" },
     float = true,
+})
+
+-- ── The file clipboard's helper window ──────────────────────────────────────
+-- Copying a file in the file manager puts a REAL file copy on the clipboard
+-- (text/uri-list + the GTK and KDE spellings, and deliberately no text
+-- flavour), and that copy is served by scripts/system/file-clipboard.py.
+--
+-- Gtk will not set the selection without an input serial, so that helper maps
+-- a window for a fraction of a second to be given one, then hides it. This
+-- rule is what keeps that window from being a window: floated (a 1x1 window in
+-- the tiling layout would resize the user's other windows and then undo it),
+-- sized to the one pixel it is, and with no shadow or blur to paint. Matching
+-- on the app id is why the helper sets its prgname -- without it the class is
+-- "python3" and this rule matches nothing.
+hl.window_rule({
+    name  = "ii-clipboard-helper",
+    match = { class = "^org%.ii%.ClipboardHelper$" },
+    float = true,
+    center = true,
+    size = { 1, 1 },
+    no_shadow = true,
+    no_blur = true,
 })

@@ -51,10 +51,16 @@ hl.env("XDG_MENU_PREFIX", "plasma-")
 -- -- was therefore silently dropped, no matter what it asked for. The binding
 -- was never wrong; Qt had no icon to send.
 --
--- Named to the borderless Bibata variants, which are installed under
--- ~/.local/share/icons/ by the v2.0.7 release. The previous note here said the
--- Bibata names "do not exist anywhere on this system" -- true when written,
--- false since they were installed.
+-- Named to the STOCK Bibata themes, installed under ~/.local/share/icons/ by
+-- the v2.0.7 release, KEYLINE INCLUDED. Bibata-Modern-Ice is the white pointer
+-- with its black rim -- the classic Bibata look. The borderless "-NoLine"
+-- variants built on 2026-10-04 were removed on request (2026-10-22: "i want it
+-- back to normal with the clean classic black border"): a solid pointer with no
+-- rim is a different cursor, not a cleaner one, and the switch between the two
+-- read as the cursor changing colour under the hand.
+--
+-- The previous note here said the Bibata names "do not exist anywhere on this
+-- system" -- true when written, false since they were installed.
 --
 -- WHY THIS VARIABLE AND NOT `hyprctl setcursor`. setcursor is a no-op on this
 -- build: it answers "ok" for any name, including ones that do not exist, and
@@ -67,7 +73,7 @@ hl.env("XDG_MENU_PREFIX", "plasma-")
 -- Read once, at startup, like QT_QPA_PLATFORMTHEME above -- which is why
 -- changing the theme later requires the app to be restarted. The dark/light
 -- switch is written by scripts/colors/sync-desktop-theme.sh.
-hl.env("XCURSOR_THEME", "Bibata-Modern-Ice-NoLine")
+hl.env("XCURSOR_THEME", "Bibata-Modern-Ice")
 
 -- Virtual environment
 hl.env("ILLOGICAL_IMPULSE_VIRTUAL_ENV", home_dir .. "/.local/state/quickshell/.venv")

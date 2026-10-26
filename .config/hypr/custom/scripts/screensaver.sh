@@ -32,6 +32,13 @@
 # Usage:
 #   screensaver.sh                    the idle sequence, configured mode
 #   screensaver.sh --restore          wake path: put everything back
+#   screensaver.sh --wake             the same, then CHECK that the compositor
+#                                     is actually drawing a picture and heal it
+#                                     if it is not. This is what the two resume
+#                                     paths run -- hypridle's after_sleep_cmd
+#                                     and before-sleep.sh's panel net -- so a
+#                                     wake that arrives either way ends at a
+#                                     screen someone can look at.
 #   screensaver.sh --test [mode]      run a mode and immediately restore, for
 #                                     previewing one without leaving it on.
 #                                     The mode is optional and defaults to the
@@ -49,6 +56,11 @@ set -u
 
 STATE_BRIGHTNESS=/tmp/ii-idle-brightness
 VIDEO_CANCEL=/tmp/ii-idle-cancel
+# The panel net's marker: written by before-sleep.sh when it takes the panel
+# down for a sleep, cleared HERE when a wake has really brought the panel back.
+# A marker that outlives the sleep means the sleep never returned -- and the
+# net is what puts the panel back in that case. See before-sleep.sh's header.
+PANEL_NET="${II_PANEL_NET:-/tmp/ii-panel-off-net}"
 DEV=${BRIGHTNESS_DEVICE:-intel_backlight}
 FALLBACK=1   # percentage used if brightnessctl is missing entirely
 
@@ -162,7 +174,155 @@ panel_on() {
     if command -v wlopm >/dev/null 2>&1 && [ -n "${WAYLAND_DISPLAY:-}" ]; then
         wlopm --on '*' >/dev/null 2>&1 && return 0
     fi
-    hyprctl dispatch dpms on >/dev/null 2>&1 || true
+    # The dispatch spellings are the fallback for a session with no wlopm -- and
+    # this function REPORTS its result rather than swallowing it, because
+    # wake_now hands that answer to the panel net: a "turn it on" that quietly
+    # did nothing must not be able to cancel the net that exists for exactly
+    # that case.
+    hyprctl dispatch 'hl.dsp.dpms("on")' >/dev/null 2>&1 \
+        || hyprctl dispatch dpms on >/dev/null 2>&1
+}
+
+# What the compositor believes about the panel's power RIGHT NOW -- the only
+# reading that has pixels behind it. Asked rather than assumed because the
+# protocol "turn it on" is a request, not a guarantee: sent at a moment when
+# the output is still being re-created (a resume is exactly that), it can be
+# accepted and change nothing, and a wake path that trusts its own send reports
+# a lit screen over a dark one.
+#
+# NO ANSWER IS NOT "OFF". Without hyprctl, or with a hyprctl that cannot
+# enumerate a monitor, the request above is the best information there is, and
+# treating silence as a dark panel would only buy ten retries and a logged
+# failure for a screen that is already on.
+panel_is_on() {
+    local answer
+    command -v hyprctl >/dev/null 2>&1 || return 0
+    # Every monitor, not just the first: on this machine there are two outputs
+    # and "one of them is awake" is what the wake path owes the user.
+    answer="$(hyprctl monitors 2>/dev/null | grep 'dpmsStatus:' | tr -d ' \t')"
+    [ -z "$answer" ] && return 0
+    case "$answer" in
+    *dpmsStatus:1*) return 0 ;;
+    esac
+    return 1
+}
+
+# Turn the panel on and KEEP ASKING until the compositor agrees, for five
+# seconds. That is the shape of the wake path: the first request can land before
+# the output exists again, and nothing else was going to send a second one.
+# Failure is reported, never swallowed -- the caller keeps its marker so
+# before-sleep.sh's net (the other half of "the panel always comes back") still
+# has a reason to fire.
+panel_on_verified() {
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        panel_on
+        panel_is_on && return 0
+        sleep 0.5
+    done
+    logger -t screensaver "panel did not come back on after 10 tries: dpms=$(hyprctl monitors 2>/dev/null | grep -m1 dpmsStatus | tr -d ' \t')" 2>/dev/null || true
+    return 1
+}
+
+# ── did the pixels come back? ────────────────────────────────────────────────
+#
+# `panel_is_on` above is the compositor's OPINION, and on 2026-10-25 an opinion
+# was not enough: the lid was closed, the machine woke, and its owner was
+# staring at a black screen with a lone white cursor while the shell was very
+# much alive -- a password typed into that screen reached PAM and failed. The
+# opinion said "on", so nothing else was asked, and nothing else ran at all on
+# the second wake (after-resume.sh produced no output, see its header).
+#
+# This is the honest question instead: grab what the compositor is about to
+# scan out and LOOK at it. grim reads the scene over the screencopy protocol,
+# so it answers "is a desktop being drawn"; it cannot see a panel that is dark
+# for a reason below the compositor, and a capture that cannot be taken is
+# reported as UNKNOWN rather than as a pass, so a missing tool can never be
+# mistaken for a lit screen.
+#
+# Prints the frame's mean luma in 0..1, or nothing at all if it cannot say.
+frame_mean() {
+    local out file
+    command -v grim   >/dev/null 2>&1 || return 1
+    command -v magick >/dev/null 2>&1 || return 1
+    # The output to capture: hyprctl's first monitor line is `Monitor <name>`.
+    out="$(hyprctl monitors 2>/dev/null | awk '/^Monitor /{print $2; exit}')"
+    [ -n "$out" ] || return 1
+    file="${II_WAKE_FRAME:-/tmp/ii-wake-frame.png}"
+    timeout 8 grim -o "$out" "$file" >/dev/null 2>&1 || return 1
+    [ -s "$file" ] || return 1
+    magick "$file" -colorspace Gray -format '%[fx:mean]' info: 2>/dev/null
+}
+
+# 0.5% mean luma is a BLACK frame, not a dark one: a wallpaper sits an order of
+# magnitude above this even at its darkest, so this threshold cannot fire on a
+# lock screen someone is meant to read.
+frame_is_black() {
+    case "${1:-}" in ''|*[!0-9.]*) return 1 ;; esac
+    awk -v m="$1" 'BEGIN { exit !(m < 0.005) }'
+}
+
+# black | ok | unknown -- three answers, kept apart on purpose: only `black`
+# may trigger a recovery, and only `ok` may be reported as a wake that worked.
+frame_state() {
+    local mean
+    if ! mean="$(frame_mean)"; then
+        printf 'unknown\n'
+    elif frame_is_black "$mean"; then
+        printf 'black\n'
+    else
+        printf 'ok\n'
+    fi
+}
+
+wake_heal() {
+    local state
+    state="$(frame_state)"
+    case "$state" in
+    ok)
+        return 0
+        ;;
+    unknown)
+        # Not a failure, and NOT a pass either: the panel net and the dpms
+        # retries still stand. Say which of the two it was, because the whole
+        # point of this path is that a future "it was black again" has a line
+        # in the journal to point at.
+        logger -t screensaver "wake: frame could not be verified (grim/magick/hyprctl unavailable) -- panel power only" 2>/dev/null || true
+        return 0
+        ;;
+    esac
+
+    logger -t screensaver "wake: the compositor is drawing a BLACK frame -- cycling the panel power" 2>/dev/null || true
+
+    # 1. Power-cycle the output. An `--on` aimed at a panel the compositor
+    #    already believes is on changes nothing, which is exactly how a wake
+    #    can report success over a dark screen; off then on makes the output go
+    #    through the state change it never got.
+    panel_off
+    sleep 0.8
+    panel_on_verified
+
+    state="$(frame_state)"
+    if [ "$state" = ok ]; then
+        logger -t screensaver "wake: the panel cycle brought the picture back" 2>/dev/null || true
+        return 0
+    fi
+
+    # 2. Make the shell paint again. Raising the lock is a state change on the
+    #    overlay that draws the entire screen, so it invalidates every surface
+    #    the shell owns -- the cheapest thing that forces fresh frames without
+    #    restarting anything or dropping the lock for even an instant.
+    timeout 4 qs -c "${qsConfig:-ii}" ipc call lock activate >/dev/null 2>&1 || true
+    sleep 1
+
+    state="$(frame_state)"
+    if [ "$state" = ok ]; then
+        logger -t screensaver "wake: the lock repaint brought the picture back" 2>/dev/null || true
+        return 0
+    fi
+
+    logger -t screensaver "wake: STILL NOT DRAWING (frame=$state) after a panel cycle and a shell repaint -- the desktop did not come back" 2>/dev/null || true
+    return 0
 }
 
 # ── video guard ─────────────────────────────────────────────────────────────
@@ -263,7 +423,7 @@ long_idle_now() {
     # Optional suspend, delayed so a quick peek is only a screen-off. A due
     # marker survives the poke-and-peek, so if the machine gets touched in
     # those seconds the suspend is silently dropped -- and hypridle's
-    # after_sleep_cmd (--restore) has already re-lit the panel.
+    # after_sleep_cmd (--wake) has already re-lit the panel.
     if long_idle_want_suspend; then
         if [ -f /tmp/ii-idle-long-suspend-due ]; then
             rm -f /tmp/ii-idle-long-suspend-due
@@ -364,7 +524,14 @@ wake_now() {
     # asks for it. Before everything else, for the same reason the brightness
     # restore comes first: a dark panel is the one failure this file cannot
     # walk back on its own. When the panel was never off, this is a no-op.
-    panel_on
+    #
+    # Cancelling the panel net is attached to that success, not to reaching this
+    # line: before-sleep.sh's net is the other half of "the panel always comes
+    # back" (it fires on a sleep that never returned), and the only honest
+    # reason to disarm it is a panel_on that worked.
+    if panel_on_verified; then
+        rm -f "$PANEL_NET" 2>/dev/null || true
+    fi
 
     # The backlight comes back FIRST, before anything is asked of the
     # compositor. A dark panel is the failure this whole file has to avoid, and
@@ -387,6 +554,14 @@ wake_now() {
 case "${1:-}" in
 --restore)
     wake_now
+    ;;
+--wake)
+    # The resume path proper: the same restore, then PROOF that it worked.
+    # Two things call this -- after-resume.sh (hypridle delivered the resume
+    # signal) and before-sleep.sh's net (it did not, 2026-10-25) -- and a wake
+    # that arrives by either road has to end at a screen someone can read.
+    wake_now
+    wake_heal
     ;;
 --long-idle)
     long_idle_now

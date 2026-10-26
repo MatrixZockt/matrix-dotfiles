@@ -55,7 +55,7 @@ do
         end
     end
 end
-local function monitorRule(output)
+local function monitorRule(output, mode)
     -- NOTE: `disabled` is deliberately NOT set here. A previous revision of
     -- this file carried `disabled = true`, which matches BOTH eDP spellings
     -- and therefore switched the machine's only physical output off at every
@@ -65,11 +65,57 @@ local function monitorRule(output)
     -- on. If the panel ever needs to be turned off again, do it at runtime
     -- with `hyprctl keyword monitor eDP-1,disable` instead -- never as a
     -- standing rule in the config, or the next login is black again.
+    --
+    -- On the MODE: `preferred` is deliberate, and the panel's refresh rate is
+    -- NOT this file's business. This EDID exposes exactly one DRM mode
+    -- (2560x1600@240), so no rule here can name a lower rate -- and the panel
+    -- is meant to drop to 60Hz on the power-saver profile, which only
+    -- `hyprctl eval hl.monitor(...)` can express. That is `power-autoswitch`'s
+    -- job (see its header: power-saver 60Hz, balanced/performance preferred),
+    -- and it re-asserts the refresh whenever it has drifted from what the
+    -- profile asks for. Naming a rate here would only fight it.
+    --
+    -- ── 10-bit scanout (added 2026-10-15) ────────────────────────────────
+    -- The panel is a 10 bpc part -- EDID base block says 10 bpc, the
+    -- DisplayID block says native 12 bpc / RGB 10 bpc encoding -- and this
+    -- desktop was feeding it an 8-bit XRGB8888 buffer, with Hyprland warning
+    -- at every start: "Wide color gamut is enabled but the display is not in
+    -- 10bit mode". Every dark grey it drew therefore arrived with 256 codes
+    -- per channel on a panel that can resolve 1024. `bitdepth = 10` is the
+    -- switch: the scanout format becomes XRGB2101010 and i915's `max bpc`
+    -- connector property goes 8 -> 10.
+    --
+    -- WHAT IT DOES NOT DO: remove the grain this OLED shows in flat dark
+    -- greys. Measured with grim reading back the compositor's OWN scanout
+    -- buffer: a flat #1f1f1f comes back as ONE exact colour (31,31,31) over
+    -- 968540 pixels -- no dither pattern, no second value -- so that speckle
+    -- is added after the digital signal, by the panel. 10 bpc buys smoother
+    -- dark GRADIENTS (banding steps); the grain is physical and stays.
+    --
+    -- Verified to hold at BOTH rates this machine runs, which was not a given:
+    -- 10 bpc at 2560x1600@240 needs ~29.5 Gbit/s of active video against the
+    -- ~25.9 Gbit/s a 4-lane DP 1.4 link carries, so 240 Hz can only keep 10
+    -- bits per channel through DSC (60 Hz rides uncompressed, ~6.8 Gbit/s).
+    -- Measured after asking for it: currentFormat XRGB2101010 and `max bpc`
+    -- 10 at 60 Hz AND at 240 Hz.
+    --
+    -- WHY IT HAS TO BE HERE and not only at runtime: measured 2026-10-15, any
+    -- `hyprctl reload` -- which apply-display.sh runs for every scale or
+    -- quality change -- re-applies THIS rule, and with the key absent the
+    -- output drops straight back to XRGB8888 / 8 bpc. A refresh change
+    -- (`hl.monitor()` over `hyprctl eval`) is not destructive the same way:
+    -- it leaves the monitor on whatever depth it already had. So this line is
+    -- what makes 10-bit survive reload, re-login and boot, and
+    -- `power-autoswitch` restates the same value in its own eval so the two
+    -- writers of this rule cannot disagree. Change one, change the other.
     hl.monitor({
         output = output,
-        mode = "preferred",
+        mode = mode or "preferred",
         position = "auto",
         scale = scaleValue,
+        -- 10 bpc, the panel's native depth. See the block above for what it
+        -- buys (dark gradients) and what it does not (the panel's own grain).
+        bitdepth = 10,
     })
 end
 monitorRule("eDP-1")
@@ -125,6 +171,27 @@ monitorRule("eDP-2")
 -- XWayland to restart: it is read when the X server is created. A re-login
 -- does it; `hyprctl eval 'hl.config({xwayland={enabled=false}})'` followed by
 -- the same with `true` restarts it in place.
+-- STAYS true (re-checked 2026-10-20, briefly flipped to false and put back).
+--
+-- This block was worth re-testing because Freebuff now runs through XWayland
+-- to get the GPU (see ~/.local/bin/freebuff-desktop), and the question was
+-- whether that path was soft. It is not:
+--
+--   true  -> X root = 2560x1600 (measured with `xrandr --current`), i.e. the
+--            panel's real pixels. A 1.5x window is 1267 X pixels wide and
+--            reaches the panel unchanged. Sharp.
+--   false -> X root = 1707x1067 (measured the same way), every X window
+--            upscaled 1.5x by the compositor. Blurry.
+--
+-- Chromium/Electron on X11 pick that scale up on their own (Xft.dpi, set by
+-- custom/scripts/x11-dpi.sh) -- the GPU Freebuff window came up at the same
+-- 845x1010 layout size as the Wayland one, at 1267x1514 real pixels. The
+-- launcher names --force-device-scale-factor explicitly so this does not
+-- depend on Xft.dpi being right.
+--
+-- Restart needed: it is read when the X server is created.
+-- `hyprctl eval 'hl.config({xwayland={enabled=false}})'` then the same with
+-- `true`, or just re-login.
 hl.config({
     xwayland = {
         force_zero_scaling = true,
@@ -148,42 +215,55 @@ hl.config({
     general = {
         gaps_in = 2,
 
-    -- ── The mouse cannot MOVE a window. It can RESIZE one, from its edges. ──
+    -- ── The mouse cannot move a window, and it can no longer resize one. ──
     --
     -- Attached (tiled) windows are FIXED in place. The way you move a window is a
     -- three-finger swipe (the built-in "move" gesture registered in
     -- hyprland/general.lua), and the way you take one to another desktop is
     -- SUPER + four-finger swipe (custom/general.lua). Nothing else.
     --
-    -- `resize_on_border` is ON again (2026-09-28), by request: a press inside
-    -- the grab band around any window edge and a drag resizes, and Hyprland
-    -- anchors it to the edge/corner nearest the CURSOR for the whole drag
-    -- (dwindle:smart_resizing, set below). No modifier is held.
+    -- EDGE RESIZE IS OFF AGAIN (2026-10-16), by request: "double clicking on the
+    -- border of a desktop app grabs it". It was switched on 2026-09-28 for the
+    -- same person, so this is a reversal, not a correction -- and the reason it
+    -- went back is worth recording, because the setting was never the problem:
+    -- WHERE the grab zone sits is.
     --
-    -- Two input paths reach the same drag:
-    --   * LEFT button press on the edge band ... press and hold, then move
-    --   * TWO-FINGER PRESS on the edge band ... clickfinger maps that to the
-    --     right button, so a two-finger press + move resizes too, and the
-    --     two-finger MOUSE MOVE on its own still scrolls normally everywhere
-    --     else. Only a genuine press arms the drag; hovering the edge (even
-    --     while two fingers are scrolling) never does, which is what keeps
-    --     this from firing on ordinary scrolling.
+    -- Measured, not guessed (`extend_border_grab_area = 10` was live, border 1px):
+    -- driving a real press-and-drag through a synthetic mouse at four points
+    -- against a tiled window's left edge,
+    --   * 4px INSIDE the edge      -- nothing happens. The application keeps it.
+    --   * exactly ON the 1px border -- nothing happens.
+    --   * 2px OUTSIDE the edge      -- THE WINDOW IS GRABBED. The focused window's
+    --                                 edge follows the drag (844px wide -> 587px)
+    --                                 and the neighbour takes the space (845 ->
+    --                                 1102). The layout re-splits as it moves.
+    --   * middle of the window      -- nothing (control).
+    -- So the whole 10px band lives OUTSIDE the window, straddling the 2px gap
+    -- between two tiled windows -- which is exactly where a hand lands when it
+    -- aims at the border, and why aiming carefully at the border still grabbed
+    -- the window. Widening the window's own share of the band was not an option
+    -- either: a press INSIDE the window is the application's, and taking it would
+    -- break sliders, text selection and every control that sits near an edge.
     --
-    -- The grab band is 10px: wide enough to hit with a fingertip without
-    -- leaning on the window, narrow enough that the middle of a window stays
-    -- entirely the application's own (so sliders, text selection and the
-    -- sidebar's controls are unaffected).
+    -- What this costs: no UNMODIFIED press can grab a window any more -- which is
+    -- the request. The paths that remain need a modifier held, and the one that
+    -- is verified is the keyboard: after this change, SUPER+ALT+RIGHT resized a
+    -- test window 844px -> 804px, the documented 40px a press. SUPER+arrows does
+    -- the same thing (custom/keybinds.lua), and the SUPER + right-button bind
+    -- there is left exactly as it was -- it was never what grabbed a window,
+    -- since it requires SUPER.
     --
-    -- `smart_resizing` (dwindle block below) is what makes this feel right:
-    -- the corner/edge you press CLOSEST TO is the one that follows your
-    -- fingers for the whole drag, at whatever angle you happen to be coming
-    -- in from. A tiled window resizing re-splits the layout and the
-    -- neighbours shift -- that is what resizing an attached window IS.
-    -- Keyboard resizing is still SUPER+ALT+arrows (40px per press,
-    -- in custom/keybinds.lua), and SUPER+two-finger press-drag still works
-    -- as a second path to the same resize.
-    resize_on_border = true,
-    extend_border_grab_area = 10,
+    -- One honest gap: a synthetic SUPER + right-button drag did not resize
+    -- anything in testing, with the modifier sent from a keyboard device (that
+    -- injection itself is proven -- the SUPER+ALT+RIGHT above used it). So the
+    -- mouse-resize bind is NOT claimed to work from here; the keyboard path is
+    -- the one that was measured. Nothing about it is relied on to stop the grab.
+    --
+    -- `smart_resizing` (dwindle block below) stays: the keyboard and
+    -- SUPER-modified paths use it to anchor the drag to the edge nearest the
+    -- cursor, and with no unmodified grab left it costs nothing.
+    resize_on_border = false,
+    extend_border_grab_area = 0,
     },
 
     -- Corner-follows-the-cursor resize (dwindle, a sibling of `general`).
@@ -765,6 +845,48 @@ local function desktopOverviewOpen()
     local ts = tonumber(text:match('"ts"%s*:%s*([0-9%.]+)'))
     if ts and (os.time() - ts) > 10 then return false end -- stale = closed
     return text:match('"open"%s*:%s*true') ~= nil
+end
+
+-- ── Are there really four fingers on the pad? ────────────────────────────
+-- The compositor cannot answer this, and it matters for exactly one gesture:
+-- four fingers DOWN is the close-window drag. This touchpad reports
+-- four-finger swipes with NO four fingers on it -- palm and grip noise under
+-- libinput's gesture detection, measured 2026-10-22 at 100-272px of travel and
+-- 900-3100px/s, i.e. the same shape as a deliberate short push. Trusting
+-- those closed a window roughly every 45 seconds.
+--
+-- The shell's evdev tracker reads the real contacts and publishes them, so the
+-- close-drag can tell the two apart:
+--
+--   $XDG_RUNTIME_DIR/ii-touchpad-fingers.json
+--   {"fingers":4,"active":true,"ts":<epoch seconds>}
+--
+-- Epoch seconds, not milliseconds: this Lua's only wall clock is os.time(),
+-- which is whole seconds -- so the file is refreshed on every tracker event and
+-- by its 2s idle heartbeat, and anything older than 3s is treated as unknown. Missing,
+-- stale, or active=false all read as NOT confirmed -- the safe direction,
+-- because the conservative distance rule then does the deciding.
+local function padFingersStateFile()
+    local dir = os.getenv("XDG_RUNTIME_DIR")
+    if not dir or dir == "" then dir = "/tmp" end
+    return dir .. "/ii-touchpad-fingers.json"
+end
+
+local function fourFingersConfirmed()
+    local file = io.open(padFingersStateFile(), "r")
+    if not file then return false end
+    local text = file:read("*a") or ""
+    file:close()
+    if text:match('"active"%s*:%s*true') == nil then return false end
+    local fingers = tonumber(text:match('"fingers"%s*:%s*(%d+)')) or 0
+    if fingers < 4 then return false end
+    -- A file without a timestamp is NOT trusted: the publisher always writes
+    -- one, so its absence means something else wrote this (or a truncated
+    -- write), and an unconditioned "true" would then be permanent.
+    local ts = tonumber(text:match('"ts"%s*:%s*([0-9%.]+)'))
+    if not ts then return false end
+    if (os.time() - math.floor(ts)) > 3 then return false end
+    return true
 end
 
 -- (The swipe trace helper, `trace`, is DEFINED HERE rather than beside the
@@ -2629,34 +2751,29 @@ hl.gesture({
     action = function() moveWindowToNeighbour(1) end
 })
 
--- ═══ SUPER + four fingers DOWN: the desktop overview ═════════════════
+-- ═══ SUPER + four fingers DOWN: REMOVED (2026-10-16, requested) ═════════
 --
--- The bar's empty stretches open it too (BarContent.qml), so this is the
--- keyboard-free way in from anywhere on the desktop.
+-- This gesture opened the desktop overview with the desktop under the pointer
+-- already IN HAND -- a lift, so moving the pointer carried a card and the next
+-- click dropped it somewhere else. It is removed at the root rather than muted:
+-- there is no `hl.gesture` for it any more, so a SUPER + four-finger swipe down
+-- reaches nothing at all. The plain four-fingers-down below is untouched and
+-- still the close-drag -- only the SUPER variant was ever bound here.
 --
--- The hard requirement, and the reason this is a separate modifier-bound
--- gesture rather than a change to the plain one: IT MUST NOT CLOSE THE
--- CURRENT APP. Plain four-fingers-down is the close-drag (window follows your
--- fingers, closes past the commit threshold) and it stays exactly that --
--- only the SUPER variant is bound here, and `mods` is how Hyprland
--- disambiguates: a modifier-restricted gesture and the plain one with the
--- same finger count and direction coexist, and the one whose modifiers fit
--- what you are holding is the one that fires.
+-- THE OTHER HALF OF THE SAME ASK. SUPER+Space raised the same lift (see the
+-- note in custom/keybinds.lua and GlobalStates.superPressEdge), and that
+-- request is removed too -- so NEITHER entry point grabs a desktop now. The grid
+-- is still on SUPER+Tab, SUPER+Z and the bar's empty stretches, and a card can
+-- still be rearranged by click-holding it; what no longer happens is a card
+-- arriving in your hand just because the grid was opened.
 --
--- It also dispatches the SUPER-release interrupt, like every other SUPER
--- gesture here. A SUPER *tap* opens the app search overlay on release, and a
--- gesture is not a key press -- without the interrupt, letting go after this
--- swipe opened the launcher on top of the overview.
-hl.gesture({
-    fingers = 4,
-    direction = "down",
-    mods = "SUPER",
-    disable_inhibit = true,
-    action = function()
-        hl.dispatch(hl.dsp.global("quickshell:searchToggleReleaseInterrupt"))
-        hl.dispatch(hl.dsp.global("quickshell:desktopOverviewToggle"))
-    end
-})
+-- The shell-side capability is deliberately left standing: the
+-- `desktopOverviewGrab` global and the IPC `desktopOverview lift` both still
+-- work, and a force-dispatch (`hyprctl dispatch
+-- "hl.dsp.global('quickshell:desktopOverviewGrab')"`) still opens the grid
+-- holding a card. What is gone is the INPUT that reached it -- putting it back
+-- is one gesture block, and the ordering the lift depends on is documented
+-- where it is implemented.
 
 -- Four fingers down closes the focused window. The window follows your
 -- fingers downward and only actually closes if you carry it past the commit
@@ -2673,55 +2790,28 @@ hl.gesture({
 --     floated at gesture start (remembering that we did) and follows the
 --     fingers like any floating window; releasing early springs it back and
 --     re-tiles it. A FULLSCREEN window (including the morphed settings /
---     task-manager window) is detached the same way but pinned to the monitor
---     rect in the same frame, so it follows the fingers at the size it was
---     already showing and the desktop is revealed behind it; releasing early
---     restores fullscreen.
+--     task-manager window) is NOT moved at all (2026-10-24, requested: "when
+--     dragging things on desktop apps they go from fullscreen to attached
+--     windows. I dont want that"). It used to be detached -- un-fullscreened,
+--     floated and pinned to the monitor rect so it could follow the fingers --
+--     and that is what the user was seeing: any swipe, committing or not,
+--     turned the app into a floating window for as long as the fingers were
+--     down, and when the restore did not land it left it that way. Now the
+--     window keeps its fullscreen state through the gesture and the swipe is
+--     distance-only: far enough and it closes, short and nothing happens.
 --   * The `windowsMove` animation is disabled while a follow-drag is active so
 --     each per-frame move lands instantly (true 1:1), and re-enabled for the
 --     spring-back so the return trip is a smooth animated settle for free.
 --   * The little "this closes the app" hint you see while dragging is the
 --     shell's own chip (GlobalStates); it keys off the window actually moving
 --     past the screen edge, which the follow path produces.
--- Close a window, smartly: park to the tray workspace if the window's class
--- is in config.json's tray.closeToTray list, otherwise close normally. Used by
--- both the 4-finger-down close-drag finish and the SUPER+Q keybind (custom/
--- keybinds.lua). Returns true when the window was parked (caller should not
--- also close it), false when it should be closed.
--- Reusable check: is this window class in config.json's tray.closeToTray?
--- Used by both smartClose (park the window) and the 4-finger-close start path
--- (skip the unfullscreen/float dance for a tray app so a fullscreen tray app
--- stays fullscreen while the fingers move, instead of flashing non-fullscreen).
-function isTrayAppCls(cls)
-    if not cls or cls == "" then return false end
-    local ok, payload = pcall(function()
-        local f = io.open(os.getenv("HOME") .. "/.config/illogical-impulse/config.json", "r")
-        if f then local s = f:read("*a"); f:close(); return s end
-        return nil
-    end)
-    if not (ok and payload) then return false end
-    local object = payload:match('"closeToTray"%s*:%s*({[^}]*})')
-    if not object then return false end
-    local escaped = cls:gsub("([^%w])", "%%%1")
-    return object:match('"' .. escaped .. '"%s*:%s*true') ~= nil
-end
-
-function smartClose(addr)
-    local w = findWindow(addr)
-    if not w then return false end
-    local cls = w.class or w.initialClass or ""
-    if not isTrayAppCls(cls) then return false end
-    -- Park to the special tray workspace. The shell re-asserts the tray icon
-    -- from the parked window, and SysTrayAppItem.qml reads TrayApps.isRunning/
-    -- isHidden to keep the icon in sync.
-    -- NOTE: do NOT call focusAddr() here -- it is a `local function` declared
-    -- further down, so at this point in the file it resolves to a nil global
-    -- and the throw aborted the whole bind (no park, no close). Focus inline
-    -- via the window we already looked up above.
-    hl.dispatch(hl.dsp.focus({ window = w }))
-    hl.dispatch(hl.dsp.window.move({ workspace = "special:tray", follow = false }))
-    return true
-end
+-- (isTrayAppCls lived here. Its one reader was the fullscreen branch of the
+-- close-drag's start: it kept a close-to-tray app fullscreen instead of
+-- flashing it out of fullscreen for the length of a swipe. Since 2026-10-24 no
+-- fullscreen window is un-fullscreened by that gesture at all, which is that
+-- behaviour for every class, so the config.json table it read is no longer
+-- consulted by anything. Deleted rather than left as a trap: a function whose
+-- only reader is gone reads like a live behaviour and is not one.)
 
 local closeDrag = nil
 -- windowsMove's live values cannot be read back (hl.get_config returns nil for
@@ -3400,12 +3490,39 @@ hl.gesture({
                 tostring(win.class or "?"), tonumber(win.fullscreen) or 0,
                 tostring(win.floating and true or false))
             local addr = win.address
-            -- Screen height for the threshold, measured from the window's
-            -- monitor so a second display does not skew it.
+            -- Screen height, measured from the window's monitor so a second
+            -- display does not skew it. TWO numbers, because they differ:
+            --
+            --   screenH   -- the framebuffer's height (1600 on this 2560x1600
+            --             panel). This is the number the DEAD TRAVEL and the
+            --             pad-confirm window have always been expressed in, so
+            --             it stays exactly as it was.
+            --   logicalH  -- the height the user sees, screenH / scale (1067
+            --             here at 1.5). The commit rule below is about how much
+            --             of the SCREEN the window covers, and that is this one.
+            --             Using screenH there would have asked for 384 logical
+            --             pixels, i.e. 36% of the screen, not a quarter.
             local mon = win.monitor
             local screenH = (mon and mon.height) or 900
+            local msc = (mon and mon.scale) or 1
+            if msc <= 0 then msc = 1 end
+            local logicalH = math.floor(screenH / msc + 0.5)
             closeDrag = { addr = addr, dy = 0, t0 = e.time_ms, screenH = screenH,
-                wasFloating = win.floating, wasFullscreen = (win.fullscreen or 0) ~= 0 }
+                logicalH = logicalH,
+                -- Where the window sat when the fingers landed. finish() reads
+                -- the window again and measures how far it actually travelled,
+                -- which is the same thing the user is watching -- see the commit
+                -- note there.
+                startY = (win.at and win.at.y) or 0,
+                wasFloating = win.floating, wasFullscreen = (win.fullscreen or 0) ~= 0,
+                -- Did the PAD have four real fingers on it when this started?
+                -- See fourFingersConfirmed: a phantom swipe is the same shape
+                -- as a deliberate short push, so the confirm is what decides
+                -- which distance rule this gesture gets (finish()). Read here,
+                -- at the top, and again during the first 3% of travel in
+                -- update(): the shell's reader can land a few milliseconds
+                -- after the compositor's own libinput detection.
+                confirmed = fourFingersConfirmed() }
             -- The RAW event, dumped once per gesture. The timing arithmetic in
             -- finish() needs a timestamp field, and this build's gesture event
             -- has never been confirmed to carry the one that code assumed --
@@ -3414,92 +3531,45 @@ hl.gesture({
             -- the keys are recorded once so the next swipe names them.
             trace("4f-down start: " .. describeGestureEvent(e))
             if closeDrag.wasFullscreen then
-                -- Fullscreen: it detaches and follows the fingers like anything
-                -- else. This used to be threshold-close only (unfullscreening
-                -- under the hand was judged to read as the window exploding),
-                -- but that left fullscreen apps -- and the morphed settings /
-                -- task-manager window, which is exactly this case -- as the one
-                -- thing four fingers down could NOT move. It is safe now because
-                -- the window is pinned to the monitor rect in the same frame it
-                -- leaves fullscreen: for that instant it looks identical, and
-                -- from there it slides down with the fingers and reveals the
-                -- desktop behind it instead of vanishing.
+                -- FULLSCREEN STAYS FULLSCREEN (2026-10-24, requested:
+                -- "when dragging things on desktop apps they go from fullscreen
+                -- to attached windows. I dont want that").
                 --
-                -- Exception: a tray app (WhatsApp, etc.) is going to be parked
-                -- into the vault, not closed. Unfullscreening it at the start of
-                -- the swipe makes it flash non-fullscreen for the duration of the
-                -- gesture ("reopens in fullscreen for a few seconds and then
-                -- closes truthfully in the system tray"). A fullscreen window
-                -- cannot follow the fingers via hl.dsp.window.move anyway, so
-                -- skip the unfullscreen/float/resize/move dance for tray apps:
-                -- keep it fullscreen, disable follow, and let the commit path
-                -- park the fullscreen window directly.
-                closeDrag.wasFloating = win.floating
-                if isTrayAppCls(win.class or win.initialClass or "") then
-                    closeDrag.follow = false
-                    closeDrag.weUnfullscreened = false
-                else
-                    closeDrag.follow = true
-                    closeDrag.weUnfullscreened = true
-                    local mon = win.monitor
-                    -- monitor.width/height are PHYSICAL here (2256x1504 on this
-                    -- 1.6x panel) while the geometry dispatchers work in LOGICAL
-                    -- units, so divide by scale (1410x940).
-                    local mw = (mon and mon.width) or 1410
-                    local mh = (mon and mon.height) or 940
-                    local mscale = (mon and mon.scale) or 1
-                    if mscale <= 0 then mscale = 1 end
-                    local lw = math.floor(mw / mscale + 0.5)
-                    local lh = math.floor(mh / mscale + 0.5)
-                    local mx = (mon and mon.x) or 0
-                    local my = (mon and mon.y) or 0
-                    closeDrag.savedW, closeDrag.savedH = lw, lh
-                    closeDrag.savedX, closeDrag.savedY = mx, my
-                    hl.animation({ leaf = "windowsMove", enabled = false, speed = 1 })
-                    -- Leave fullscreen, then pin to the rect it visually already
-                    -- had, so the first follow frame starts from what the user is
-                    -- looking at.
-                    hl.dispatch(hl.dsp.window.fullscreen({ mode = "fullscreen", action = "toggle", address = addr }))
-                    -- Float it EXPLICITLY -- and unconditionally. `float()`
-                    -- TOGGLES, and this build drops a float request that arrives
-                    -- while the window is still fullscreen, so a toggle could leave
-                    -- it TILED. The absolute resize below is then a SPLIT-RATIO
-                    -- change rather than a size change, which permanently rearranged
-                    -- the workspace: that is exactly "the desktop apps' positions
-                    -- get shifted". `set` states the intent, and is a no-op when it
-                    -- is already floating.
-                    hl.dispatch(hl.dsp.window.float({ action = "set", address = addr }))
-                    -- Re-read it: geometry work is only safe once it really is
-                    -- floating.
-                    local function refloat()
-                        for _, w2 in ipairs(hl.get_windows() or {}) do
-                            if w2.address == addr then return w2 end
-                        end
-                        return nil
-                    end
-                    local now = refloat()
-                    closeDrag.isFloating = (now and now.floating) or false
-                    if closeDrag.isFloating then
-                        hl.dispatch(hl.dsp.window.resize({ x = lw, y = lh, address = addr }))
-                        hl.dispatch(hl.dsp.window.move({ x = mx, y = my, address = addr }))
-                    else
-                        -- The read can lag the dispatch queue. Retry once, one
-                        -- frame later; if it is floating by then the pin lands and
-                        -- the follow starts, offset by however far the fingers
-                        -- already travelled. If it still is not, the window is left
-                        -- alone entirely and this swipe stays a threshold close.
-                        closeDrag.follow = false
-                        hl.timer(function()
-                            if not closeDrag or closeDrag.addr ~= addr then return end
-                            local w3 = refloat()
-                            if not w3 or not w3.floating then return end
-                            closeDrag.isFloating = true
-                            closeDrag.follow = true
-                            hl.dispatch(hl.dsp.window.resize({ x = lw, y = lh, address = addr }))
-                            hl.dispatch(hl.dsp.window.move({ x = mx, y = my + closeDrag.dy, address = addr }))
-                        end, { timeout = 40, type = "oneshot" })
-                    end
-                end
+                -- The branch that used to stand here DETACHED the window so it
+                -- could follow the fingers: toggle fullscreen off, float it
+                -- explicitly, resize and move it back onto the monitor rect in
+                -- the same frame so the first follow frame looked unchanged,
+                -- and remember `weUnfullscreened` so finish() could put it back.
+                --
+                -- Two costs came with that. The visible one is the report: for
+                -- as long as the fingers were down, a fullscreen app WAS a
+                -- floating -- "attached" -- window, and any swipe showed it, not
+                -- only one that committed. The lasting one is when the restore
+                -- did not land: the trace has the pair -- a fullscreen window at
+                -- 19:45:37 whose swipe ended moved=0 commit=false, and the next
+                -- gesture at 19:45:39 starting on the same window with
+                -- `floating=true`, i.e. fullscreen off and the app loose on the
+                -- desktop.
+                --
+                -- So a fullscreen window is not moved by this gesture at all.
+                -- `follow = false` means update() dispatches no move, and the
+                -- swipe is a distance-only dismiss: far enough and the window
+                -- closes, short and nothing at all happens to it. It keeps its
+                -- size, position and fullscreen state for the whole gesture, so
+                -- there is nothing to restore -- and the belt in finish() puts it
+                -- back if anything else ever takes it out.
+                --
+                -- The tray-app exception that used to live here (skip the
+                -- unfullscreen dance for a tray app so a fullscreen one would
+                -- not flash) has nothing left to do and is gone with this
+                -- branch; so is the config.json table it was the last reader of.
+                --
+                -- The shell's "this closes the app" chip keys off the window
+                -- actually moving past the screen edge, so a fullscreen swipe
+                -- gets no chip now. That is the price of the window not moving,
+                -- and the window not moving is the request.
+                closeDrag.follow = false
+                closeDrag.weUnfullscreened = false
             elseif win.floating then
                 -- Floating already: follow the fingers 1:1. Kill the move
                 -- animation so per-frame dispatches land instantly. (speed is
@@ -3553,10 +3623,64 @@ hl.gesture({
             local dy = tonumber(delta.y) or 0
             d.dy = d.dy + dy
             if d.dy < 0 then d.dy = 0 end -- one-way: this is a dismiss gesture
-            -- Performance mode: no per-frame dispatches -- the drag records
-            -- its travel and finish() closes or springs directly. That is
-            -- the mode's whole contract: fewer dispatches, same features.
-            if d.follow and not performance.performance then
+            -- Second chance at the pad confirmation, while the swipe is still
+            -- shorter than the dead travel below (so nothing has moved yet and
+            -- this is still "the start"): the shell reads the contacts off
+            -- evdev and can be a few milliseconds behind the compositor.
+            if not d.confirmed and d.dy < d.screenH * 0.03 then
+                d.confirmed = fourFingersConfirmed()
+            end
+            -- ── Nothing moves until the gesture is deliberate ────────────────
+            -- This touchpad reports four-finger swipes WITHOUT four fingers on
+            -- it: measured on 2026-10-22, 530 gestures in one session and two
+            -- of them inside a single 90-second window where nobody touched the
+            -- pad. Each phantom arrives as 100-150px of travel at 900-3100px/s
+            -- (palm and grip noise underneath libinput's gesture detection), and
+            -- each one used to drag the focused window with it.
+            --
+            -- So the first ~6% of the screen is dead travel: the window does
+            -- not follow, because a gesture that never becomes deliberate is
+            -- noise and has to look like nothing happened. A real drag simply
+            -- starts a few pixels later, where the fingers already are.
+            if d.dy < d.screenH * 0.06 then return end
+            -- …and the moment it becomes deliberate, catch the window up in one
+            -- dispatch, so the dead travel is not a permanent offset between
+            -- the fingers and the window: after this the two are 1:1 again.
+            if d.follow and not d.armed then
+                d.armed = true
+                hl.dispatch(hl.dsp.window.move({ x = 0, y = d.dy, relative = true }))
+                return
+            end
+            -- FOLLOW THE FINGERS IN EVERY MODE (changed 2026-10-20).
+            --
+            -- This used to be gated on `not performance.performance`: with
+            -- Performance mode on, the drag recorded its travel and finish()
+            -- closed or sprang back, with no per-frame dispatch. That is the
+            -- mode's documented contract -- fewer dispatches, same features --
+            -- but on this gesture the saving was not invisible: the window sat
+            -- still under a moving hand and then did something on release.
+            -- Measured live (the flag was on, `performance.performance` = true):
+            -- four fingers down on a tiled window dispatched no movement at
+            -- all, so the gesture read as broken -- "the swipe does not move
+            -- the app with the fingers".
+            --
+            -- A direct-manipulation gesture has to track the pointer; there is
+            -- no version of "the window follows your fingers" that is cheaper
+            -- and still true. The cost is bounded by the gesture: dispatches
+            -- only happen while fingers are on the pad and moving, a fraction
+            -- of a second, and the mode keeps every other saving (all the
+            -- animation leaves stay off, so these moves are instant).
+            if d.follow then
+                -- One line per gesture, not per frame: proof in the trace that
+                -- the drag is actually tracking (the only previous evidence was
+                -- "the window did not move", which reads the same whether the
+                -- follow was disabled, the window was tiled, or the dispatch
+                -- failed).
+                if not d.followTraced then
+                    d.followTraced = true
+                    tracef("4f-down follow: %s tracking the fingers",
+                        tostring(findWindow(d.addr) and (findWindow(d.addr).class or "?")))
+                end
                 hl.dispatch(hl.dsp.window.move({ x = 0, y = dy, relative = true }))
             end
         end,
@@ -3570,41 +3694,120 @@ hl.gesture({
                 trace("4f-down finish: no drag armed (start bailed early)")
                 return
             end
-            -- Commit: past a fifth of the screen, or a fast flick. A cancelled
-            -- gesture never commits -- the fingers went somewhere else.
+            -- Commit: a quarter of the screen. A cancelled gesture never
+            -- commits -- the fingers went somewhere else.
             --
-            -- NOTHING HERE MAY THROW. This is the fix for the whole bug: the
-            -- gesture used to compute `e.time_ms - d.t0` to get the flick
-            -- speed, and this build's gesture event does not carry `time_ms`,
-            -- so the subtraction was nil-minus-nil and THREW. The throw
-            -- happened on the first line after the drag was set up, which meant
-            -- everything after it never ran: no commit, no close, no park, and
-            -- the window left floating where the fingers had dragged it. The
-            -- symptom was "the four-finger swipe does not close anything", and
-            -- it was invisible because the failure was a Lua error inside a
-            -- compositor callback, on the one code path in this file that had
-            -- no logging on it at all.
+            -- THE QUARTER RULE (2026-10-23, asked for): "if the app gets to 3/4
+            -- of the screen, so if it goes down 1/4 of the screen, then close
+            -- it". That is the rule now, and it is the only one: push the window
+            -- down a quarter of the screen -- it is showing three quarters of
+            -- itself -- and release, and it closes. Release before that and it
+            -- springs back into place. The distance is read off the window
+            -- itself (see `moved` below), so "three quarters" means exactly what
+            -- it says on the panel, whatever the touchpad or the scale is doing.
             --
-            -- So: every field is coerced, the speed is simply 0 when there is
-            -- no usable timing (which disables the flick shortcut and leaves
-            -- the distance threshold doing the work), and the gesture degrades
-            -- to a plain threshold close instead of dying. A cosmetic
-            -- enhancement -- recognising a fast flick -- is never worth being
-            -- the reason the primary action does not happen.
-            local now = tonumber(e.time_ms) or tonumber(e.time) or tonumber(e.timestamp) or 0
-            local t0 = tonumber(d.t0) or 0
-            local dt = (now > t0) and ((now - t0) / 1000) or 0
-            local speed = (dt > 0) and (d.dy / dt) or 0
-            local commit = not e.cancelled
-                and (d.dy > d.screenH * 0.2
-                     or (d.dy > d.screenH * 0.05 and speed > 900))
+            -- 0.22, which is deliberately a little EARLIER than the quarter
+            -- (2026-10-23, second pass: "even very slightly more sensitive so it
+            -- closes when the app is swiped even slightly less"). A hand lifts a
+            -- few pixels short of the mark it is aiming at, and the release
+            -- itself takes a moment, so the commit point sits under the visual
+            -- quarter rather than on it: the window is still ~78% of the screen
+            -- when it fires, and the close then plays as the continuation of the
+            -- push instead of a snap-back. The 6% dead travel needs no
+            -- correction -- the catch-up dispatch in update() moves the window
+            -- the whole distance the fingers have already made.
+            --
+            -- THIS NUMBER IS THE TUNING KNOB. `moved=` and `need>` in the trace
+            -- file are what to compare after a swipe feels wrong: moved falling
+            -- just short of need means the constant is a touch high, a close
+            -- that surprises means it is low.
+            --
+            -- WHAT THIS REPLACES, and why each had to go:
+            --   * 0.09 for a pad-confirmed swipe ("close with a strong short
+            --     push"). It fired while the window had barely moved -- ~145px
+            --     on this display -- so an ordinary drag closed things on its
+            --     way past, which is the "not sensible" this rule undoes. The
+            --     window's own size going to three quarters is the feedback;
+            --     a short push gives none.
+            --   * the speed rules. A fast swipe used to commit EARLY (5% of the
+            --     screen at 900px/s), which closed windows on palm noise, and a
+            --     later revision refused fast swipes outright, which broke
+            --     deliberate quick drags (dy=967 at 5689px/s, commit=false).
+            --     Speed is not evidence of intent once distance is: a hand that
+            --     pushes the window a quarter of the way down meant it, however
+            --     fast it did so. `speed` is still measured -- for the trace
+            --     below, and nothing else.
+            --
+            -- The phantom swipes this pad produces (measured with nobody on it:
+            -- 98-272px at 900-3100px/s, at most 0.17 of the screen) are rejected
+            -- by the distance test alone, which is why the pad confirm no longer
+            -- moves the threshold (2026-10-23). It used to add 4% of the screen
+            -- for an unconfirmed swipe; that looked harmless and was not. Three
+            -- consecutive swipes in this log read pad44=true, false, false --
+            -- the tracker samples the contacts on its own schedule and misses
+            -- the real start often enough that the SAME push closed on one
+            -- attempt and sprang back on the next. One number for every swipe
+            -- is worth more than that. The confirm is still measured, and still
+            -- traced; it just has nothing to decide here.
+            local screenH = d.logicalH or d.screenH
+            local needsScreen = screenH * 0.22
+            -- THE DISTANCE IS THE WINDOW'S OWN, not the finger-delta sum.
+            -- `dy` accumulates this build's swipe deltas, and those are in the
+            -- framebuffer's pixels while a window move dispatch is in logical
+            -- ones -- two different scales on any desk that is not 1:1. The
+            -- question the rule asks is "does the window cover three quarters
+            -- of the screen", and the honest way to answer it is to read where
+            -- the window ended up. It also covers the case where the drag was
+            -- clamped at the bottom of the screen: the window stops, the
+            -- fingers do not, and the window's position is what the user sees.
+            --
+            -- `d.armed` is set by update() at the moment the drag actually
+            -- started moving the window; before that (a tray app pinned
+            -- fullscreen, or a drag whose follow never came up) nothing moved,
+            -- and there the raw delta is the only distance there is.
+            local moved = d.dy
+            if d.armed then
+                local wend = findWindow(d.addr)
+                if wend and wend.at and d.startY then
+                    moved = math.max(0, (tonumber(wend.at.y) or d.startY) - d.startY)
+                end
+            else
+                -- NOT ARMED: nothing followed the fingers, so the window's own
+                -- position says nothing and the finger travel is the distance.
+                -- Two corrections are needed before it can be compared with a
+                -- rule expressed as a share of the SCREEN:
+                --
+                --   * `dy` is in framebuffer pixels (1600 tall here) while
+                --     needsScreen is logical ones (1067) -- a fullscreen window
+                --     never moves, so this is now the normal path, not the
+                --     tray-app exception it used to be. Convert by
+                --     logicalH/screenH, or a quarter of the screen would be
+                --     asked for at 1.5x the travel.
+                --   * the dead travel is included in `dy` (update() only
+                --     refuses to MOVE before it, it still accumulates it) and
+                --     there is no catch-up dispatch on this path to absorb it,
+                --     so it is subtracted here: the distance that counts is the
+                --     one past the point where the gesture became deliberate.
+                local ratio = 1
+                if d.screenH and d.screenH > 0 and d.logicalH then
+                    ratio = d.logicalH / d.screenH
+                end
+                local dead = (d.screenH or 0) * 0.06
+                moved = math.max(0, (tonumber(d.dy) or 0) - dead) * ratio
+            end
+            -- No speed term. See the note above: distance alone decides, and
+            -- the phantom swipes this pad emits cannot reach a quarter of the
+            -- screen, so nothing else has to stand between them and a close.
+            local commit = not e.cancelled and moved > needsScreen
             -- Traced UNCONDITIONALLY, including the non-committing case. A
             -- trace that only appears on success cannot answer "why did it not
             -- close", which is the question that matters when a dismiss gesture
             -- misbehaves -- and it is exactly why the last few rounds of this
-            -- were guesswork. `speed` is the number to read when the window
-            -- follows the fingers and springs back: it says whether the swipe
-            -- simply did not travel far enough, or was cancelled.
+            -- were guesswork. `moved` against `need>` is the pair to read when the
+            -- window follows the fingers and springs back: it says whether the
+            -- swipe simply did not travel far enough, or was cancelled. `dy` is
+            -- kept beside them -- the finger-delta sum in the compositor's own
+            -- units -- because a wide gap between the two is itself a finding.
             -- %.0f, NOT %d. `dy` accumulates touchpad deltas and is routinely
             -- fractional, and `%d` on a non-integral float is a hard error in
             -- Lua 5.3+ -- "bad argument to 'format' (number has no integer
@@ -3614,9 +3817,10 @@ hl.gesture({
             -- diagnosing. A log line that can throw is worse than no log line,
             -- because it converts a silent failure into a loud one that still
             -- loses the behaviour.
-            tracef("4f-down finish: %s dy=%.0f need>%.0f speed=%.0f commit=%s",
+            tracef("4f-down finish: %s moved=%.0f dy=%.0f need>%.0f speed=%.0f pad44=%s commit=%s",
                 tostring(findWindow(d.addr) and (findWindow(d.addr).class or "?")),
-                d.dy, d.screenH * 0.2, speed, tostring(commit))
+                tonumber(moved) or 0, tonumber(d.dy) or 0, tonumber(needsScreen) or 0,
+                tonumber(speed) or 0, tostring(d.confirmed), tostring(commit))
             if commit then
                 restoreMoveAnim()
                 -- Traced, because this branch is where "the swipe did nothing"
@@ -3624,9 +3828,10 @@ hl.gesture({
                 -- question worth asking about a dismiss that misbehaves --
                 -- did the swipe commit at all, on which window, and how far it
                 -- travelled -- is answered here, in one log.
-                tracef("4f-down COMMIT %s dy=%.0f/%.0f speed=%.0f",
+                tracef("4f-down COMMIT %s moved=%.0f/%.0f dy=%.0f speed=%.0f",
                     tostring(findWindow(d.addr) and (findWindow(d.addr).class or "?")),
-                    d.dy, d.screenH, speed)
+                    tonumber(moved) or 0, tonumber(screenH) or 0,
+                    tonumber(d.dy) or 0, tonumber(speed) or 0)
                 --
                 -- EVERY APP IS CLOSED THE SAME WAY NOW. There is no per-app
                 -- branch here: no vault, no tray hide, no "close to tray"
@@ -3664,34 +3869,21 @@ hl.gesture({
                 -- `{ address = ... }` here would close whatever holds focus
                 -- if anything stole it mid-drag.
                 focusAddr(d.addr)
-                -- Per-app minimize-to-tray: if this window's class is in
-                -- config.json's tray.closeToTray list, park it on the special
-                -- tray workspace instead of closing (smartClose, above) --
-                -- the same helper SUPER+Q uses, so the two paths cannot
-                -- drift apart. Everything else closes normally.
+                -- NO TRAY BRANCH, for the reason the paragraph above gives.
                 --
-                -- A tray app is about to be PARKED, not closed -- and the drag's
-                -- own start path may have floated this window (the tiled-start
-                -- dance, or the fullscreen detach). Parking it in that state put
-                -- a FLOATING window in the vault, and every later tray-icon open
-                -- then restored that popup: the "opens as popup" regression.
-                -- So undo the drag's float before parking. The vault invariant
-                -- this enforces: smartClose never receives a floating window.
-                -- (The float dispatcher on this build is focus-scoped -- an
-                -- address form moved the wrong window, see focusRunningApp's
-                -- note in the shell -- so focus first, then unset WITHOUT
-                -- naming an address. focusAddr above already aims the focus.)
-                -- For a non-tray app the float is deliberately left alone: it
-                -- is closed outright below, and the close-survived spring-back
-                -- already knows how to un-float a window that survived.
-                if d.weFloated or d.weUnfullscreened then
-                    local w = findWindow(d.addr)
-                    if w and isTrayAppCls(w.class or w.initialClass or "") then
-                        focusAddr(d.addr)
-                        hl.dispatch(hl.dsp.window.float({ action = "unset" }))
-                    end
-                end
-                if smartClose(d.addr) then return end
+                -- The block that used to sit here parked a close-to-tray
+                -- window into `special:tray` instead of closing it, and it
+                -- outlived the mechanism it belonged to: the vault was
+                -- retired, the comment above says so, and this call was left
+                -- behind. What that cost is the 2026-10-22 report -- "about
+                -- 100 compose windows" -- because a swipe over a Thunderbird
+                -- compose window did not close it, it HID it somewhere the
+                -- user could not see, so every retry added another one.
+                --
+                -- Worse than cosmetic: with no shell running there is no tray
+                -- icon and no way back to the vault, so a parked window is a
+                -- window the user cannot reach at all. A close gesture has to
+                -- close things.
                 hl.dispatch(hl.dsp.window.close())
                 -- A close that asks for confirmation ("Save before
                 -- quitting?") does not actually close: the window survived,
@@ -3788,6 +3980,28 @@ hl.gesture({
                     else
                         hl.timer(retiler, { timeout = 350, type = "oneshot" })
                     end
+                end
+            end
+            -- ── A fullscreen window leaves this gesture fullscreen ──────────
+            --
+            -- The start path no longer detaches one (see there), so in the
+            -- normal case there is nothing to restore -- this is the belt.
+            -- If the window was fullscreen when the fingers landed, did not
+            -- close, and is not fullscreen now, something took it out: a
+            -- detach left behind by an earlier revision (the trace has exactly
+            -- that at 19:45:37-19:45:39), a client that dropped its own
+            -- fullscreen on the way past, or a restore that never landed. A
+            -- window the user was watching fullscreen is put back the way they
+            -- left it. Only the toggle is needed, and the float flag is left
+            -- alone on purpose: unsetting it first would show a tiled frame on
+            -- the way back (the flash documented in the spring-back above).
+            if not commit and d.wasFullscreen then
+                local wend = findWindow(d.addr)
+                if wend and (wend.fullscreen or 0) == 0 then
+                    focusAddr(d.addr)
+                    hl.dispatch(hl.dsp.window.fullscreen({ mode = "fullscreen", action = "toggle" }))
+                    tracef("4f-down restore: %s was fullscreen, put back",
+                        tostring(wend.class or "?"))
                 end
             end
         end,
@@ -3923,15 +4137,20 @@ local function swipeUpBody()
     --     window that comes back is not the window that went out. What this
     --     gesture is for is "make this app fill the screen".
     --
-    --   * the bar yields its strip, so the maximized window can actually reach
-    --     the top edge instead of stopping at the workarea. A maximized window
-    --     stops at the workarea, and the workarea includes the bar's strip, so
-    --     without this half the app is left 50px down with a hoverable gap.
+    --   * the bar gets out of the way, so the expanded window reaches the top
+    --     edge instead of stopping at the workarea. It does that by itself:
+    --     the bar reads the covering window from its own window list, the same
+    --     authority it already uses for real fullscreen, so nothing here has
+    --     to ask it to.
     --
-    -- The strip request stays a request rather than a standalone mechanism: the
-    -- bar re-derives whether to keep hiding from the window's own live state
-    -- (coverAlive), so a window that closes or leaves the desktop cannot leave
-    -- the bar stranded off-screen.
+    --     That half used to be a REQUEST -- `qs ipc call barCover ...`, a full
+    --     Qt process per swipe, on the critical path of the transition
+    --     (measured 89ms and 78% of a core, twice per toggle) -- and by the end
+    --     it changed nothing: the bar's exclusive zone answers to auto-hide
+    --     alone, and its hide, slide and edge-reveal are all derived from the
+    --     window list. Removed 2026-10-14 along with the last call sites, so
+    --     the transition is the only thing running; custom/cover.lua's header
+    --     has the measurements, both cover shapes verified without it.
     local active = hl.get_active_window()
     trace("swipe up: active=" .. tostring(active and active.class)
         .. " fs=" .. tostring(active and active.fullscreen))
@@ -3940,9 +4159,9 @@ local function swipeUpBody()
         return
     end
     if (active.fullscreen or 0) ~= 0 or cover.owns(active) then
-        -- Coming back OUT: the window leaves its expanded state FIRST, and
-        -- only then is the bar's strip returned -- the reverse order snaps
-        -- the window's height twice in two frames.
+        -- Coming back OUT: one step, because there is nothing to order against
+        -- any more -- no strip is returned (see the header), so the window
+        -- leaving its expanded state IS the whole of it.
         --
         -- Three shapes of "out", and the routing matters:
         --   * the cover THIS module creates -- internal fullscreen, client
@@ -3959,7 +4178,6 @@ local function swipeUpBody()
             cover.exit(active)
         else
             anchoredTransition(active.address, false)
-            cover.barStrip(active.address, false)
         end
         return
     end
@@ -3967,9 +4185,10 @@ local function swipeUpBody()
     -- the tiler once the window is out of the layout, which is what
     -- anchoredTransition lands on the way home.
     popup.rememberSlot(active)
-    -- Yield the strip first: the window is about to be laid out, and this
-    -- keeps the bar from animating over the app for a frame.
-    cover.barStrip(active.address, true)
+    -- (Nothing to yield first: the bar takes itself out of the way from the
+    -- window list as soon as the window is expanded -- see the header. The
+    -- request that used to sit here is gone, and with it a Qt process per
+    -- swipe.)
     --
     -- "maximized", NOT "fullscreen". This is the difference between sizing
     -- the window and TELLING THE APP it is fullscreen: mode = "fullscreen"
@@ -4118,7 +4337,6 @@ hl.gesture({
             elseif (w.fullscreen or 0) == 2 then
                 hl.dispatch(hl.dsp.window.fullscreen({
                     mode = "fullscreen", action = "toggle", address = w.address }))
-                cover.barStrip(w.address, false)
             else
                 cover.toggle(w)
             end
@@ -4505,6 +4723,40 @@ hl.on("window.open", function(w)
             -- do" -- measured, and the reason the popup hook below documents
             -- at length. So return without settling and let the timer retry.
             if not newcomer then return end
+            -- ── A DRAG GHOST IS NOT A WINDOW THAT NEEDS THE SCREEN ───────
+            -- Dragging anything OUT of an app makes that app's toolkit map a
+            -- helper toplevel under the cursor: the drag image / drag proxy.
+            -- It has no class, no title and no input, and it lives exactly as
+            -- long as the drag. (rules.lua floats the identity-less ones for
+            -- the same reason -- "windows with no identity at all".)
+            --
+            -- This hook demotes the fullscreen incumbent for ANY newcomer, so
+            -- that ghost un-fullscreened the app the user was dragging FROM:
+            -- "drag and dropping things of an app still closes the
+            -- fullscreen", reported twice. The trace has it verbatim, five
+            -- times over:
+            --
+            --   fullscreen: stepped aside for Freebuff so  is visible
+            --
+            -- -- an empty class between the two spaces, at the moment of a
+            -- drag. Vacating the screen for a drag image is never what the
+            -- user asked for: the window the ghost belongs to is the one they
+            -- are working in, and it is the one that gets demoted.
+            --
+            -- A window with neither class nor title IS that ghost, by the
+            -- same definition rules.lua uses; `accepts_input == false`
+            -- catches the ones whose toolkit gives them a class. The input
+            -- test does NOT settle -- it is one read at map time, and a real
+            -- app that answered "no" for a frame must still be able to
+            -- demote on a retry tick.
+            local noIdentity = (newcomer.class == nil or newcomer.class == "")
+                and (newcomer.title == nil or newcomer.title == "")
+            if noIdentity then
+                tracef("fullscreen: left alone for a drag ghost (%s)", tostring(addr))
+                settled = true
+                return
+            end
+            if newcomer.accepts_input == false then return end
             -- ANY window counts now. There used to be an early return here:
             --
             --     if newcomer.floating or isDialogClass(...) then
@@ -4843,51 +5095,48 @@ hl.on("window.open", function(w)
             -- block is skipped when it already matches.
             local sz0 = live.size
             local at0 = live.at
-            local want_w, want_h, margin = 780, 560, 24
-            -- Where it SHOULD be: size, and the top-right anchor.
-            local mon0 = live.monitor
-            local already_right = false
-            if sz0 and at0 and mon0 then
-                local sc0 = mon0.scale or 1
-                if sc0 <= 0 then sc0 = 1 end
-                local mw0 = math.floor((mon0.width or 1920) / sc0 + 0.5)
-                local want_x = (mon0.x or 0) + mw0 - want_w - margin
-                already_right = math.abs((sz0.x or 0) - want_w) < 6
-                    and math.abs((sz0.y or 0) - want_h) < 6
-                    and math.abs((at0.x or 0) - want_x) < 6
-                    and math.abs((at0.y or 0) - ((mon0.y or 0) + margin)) < 6
-            end
-
-            -- Size and place it as well, anchored to the TOP-RIGHT of the
-            -- monitor the opening app is on. The rules.lua `size` is applied
-            -- by the same map-time state change the catch-all overrides, so
-            -- it is lost in exactly the same way the float is -- the dialog
-            -- needs its geometry given live too.
+            -- CENTRED, AND AT MOST HALF THE SCREEN IN EACH DIRECTION.
+            --
+            -- This used to place the chooser flush to the TOP-RIGHT corner,
+            -- which read as an attached panel rather than a dialog that had
+            -- come and would go. Centred is the same card the shell's own
+            -- popups draw.
             --
             -- Coordinates are computed HERE because move() rejects expression
             -- strings. Monitors report PHYSICAL width/height while the
             -- geometry dispatchers work in LOGICAL units, so the scale is
-            -- divided out: using the raw numbers puts the dialog at roughly
-            -- twice the intended offset on a scaled display.
+            -- divided out: using the raw numbers halves the offset on a
+            -- scaled display instead of centring it.
             local mon = live.monitor
-            if mon and not already_right then
-                local mscale = (mon.scale or 1)
-                if mscale <= 0 then mscale = 1 end
-                local mw = math.floor((mon.width or 1920) / mscale + 0.5)
-                local mh = math.floor((mon.height or 1080) / mscale + 0.5)
-                local dw, dh = 780, 560
-                -- Clamp, so a small monitor cannot push the dialog off-screen
-                -- -- which reads as "the chooser never opened".
-                if dw > mw - 40 then dw = mw - 40 end
-                if dh > mh - 40 then dh = mh - 40 end
-                -- No `address` on either: same measured reason as the float
-                -- above -- these act on the focused window, which is the
-                -- picker we just focused.
-                hl.dispatch(hl.dsp.window.resize({ x = dw, y = dh }))
-                hl.dispatch(hl.dsp.window.move({
-                    x = (mon.x or 0) + mw - dw - margin,
-                    y = (mon.y or 0) + margin,
-                }))
+            local want_w, want_h, want_x, want_y
+            if mon then
+                local sc = (mon.scale or 1)
+                if sc <= 0 then sc = 1 end
+                local mw = math.floor((mon.width or 1920) / sc + 0.5)
+                local mh = math.floor((mon.height or 1080) / sc + 0.5)
+                want_w = math.min(780, math.floor(mw / 2))
+                want_h = math.min(520, math.floor(mh / 2))
+                want_x = (mon.x or 0) + math.floor((mw - want_w) / 2)
+                want_y = (mon.y or 0) + math.floor((mh - want_h) / 2)
+            end
+            local already_centred = false
+            if sz0 and at0 and want_w then
+                already_centred = math.abs((sz0.x or 0) - want_w) < 6
+                    and math.abs((sz0.y or 0) - want_h) < 6
+                    and math.abs((at0.x or 0) - want_x) < 6
+                    and math.abs((at0.y or 0) - want_y) < 6
+            end
+
+            -- The rules.lua `size` is applied by the same map-time state change
+            -- the catch-all overrides, so it is lost in exactly the same way
+            -- the float is -- the dialog needs its geometry given live too.
+            --
+            -- No `address` on either: same measured reason as the float
+            -- above -- these act on the focused window, which is the picker we
+            -- just focused.
+            if mon and not already_centred then
+                hl.dispatch(hl.dsp.window.resize({ x = want_w, y = want_h }))
+                hl.dispatch(hl.dsp.window.move({ x = want_x, y = want_y }))
             end
             -- WATCH LONGER THAN YOU ACT -- the same distinction explorer.py's
             -- _hypr_anchor makes, and for the same reason.
@@ -4902,7 +5151,7 @@ hl.on("window.open", function(w)
             -- that window; without it, speeding the first tick up made the
             -- dialog end up TILED on three of five measured opens.
             local sz = live.size
-            local geom_ok = live.floating and already_right
+            local geom_ok = live.floating and already_centred
             tries = tries + 1
             if geom_ok and tries >= 12 then return end
             if tries >= 24 then return end
@@ -4953,7 +5202,17 @@ end)
 --   * portals and polkit agents -- already floated by rules.lua, and their
 --     size is dictated by the portal that asked for them.
 local popupExempt = {
+    -- The shell's own windows: settings, the task manager and the files app.
+    -- BOTH spellings, because the one that was here was the wrong one -- a
+    -- Quickshell toplevel reports its class as `org.quickshell` (read off the
+    -- running windows with `hyprctl clients`), so the `quickshell` key matched
+    -- nothing, and every SECOND window of a shell app was judged a popup and
+    -- floated at its own size. That is exactly the window which has to tile
+    -- now: the files app opens a new window per launch (2026-10-14,
+    -- filemanager.qml) and its 2nd, 3rd and 4th windows came up floating
+    -- 1100x760 instead of taking a tile like any other app.
     ["quickshell"] = true,
+    ["org.quickshell"] = true,
     ["org.hypr.Explorer"] = true,
     ["org.hypr.Explorer.Picker"] = true,
 }

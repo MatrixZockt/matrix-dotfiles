@@ -109,39 +109,38 @@ hl.exec_cmd("$HOME/.config/hypr/custom/scripts/workspace-sanity.sh")
 -- ~/.local/bin/freebuff-desktop remains the plain one-window launcher used by
 -- the app menu and the terminal.
 
--- Black border while the pointer is on a window's resize edge.
+-- Black border while the pointer is on a window's resize edge.  DISABLED
+-- 2026-10-16, with the grab it advertised.
 --
 -- Paired with `resize_on_border` / `extend_border_grab_area` in
--- custom/general.lua: Hyprland makes the edge draggable, this makes it
--- visible, so the black frame only ever appears on an edge that would really
--- accept a drag. The wrapper keeps it single-instance across config reloads.
-hl.exec_cmd("$HOME/.config/hypr/custom/scripts/window-border-hint.sh &")
+-- custom/general.lua: Hyprland made the edge draggable and this made it
+-- visible, so the black frame only ever appeared on an edge that would really
+-- accept a drag. Both are gone now -- a border that turned black was the half
+-- of the report a person actually SEES ("double clicking the border grabs it"),
+-- and a cue for a drag that no longer exists would be worse than no cue: it
+-- would keep promising a grab that does not happen.
+--
+-- The scripts stay, unused, because they are the working half if the grab is
+-- ever wanted back: window-border-hint.sh (single-instance wrapper) and
+-- window-border-hint.py. Re-enabling means this line AND putting
+-- resize_on_border back in custom/general.lua -- and re-reading the note there
+-- first, because the band is what made it feel broken, not the feature.
+-- hl.exec_cmd("$HOME/.config/hypr/custom/scripts/window-border-hint.sh &")
 
--- Cursor that only grows a rim when it would otherwise vanish.
+-- GONE 2026-10-22: the adaptive rim daemon (cursor-adapt.py/.sh) and the
+-- borderless Bibata themes it drove.
 --
--- The Bibata themes used here are the borderless variants, so the pointer is
--- solid white on the dark desktop and solid black on the light one. That looks
--- cleaner than Bibata's stock white-body/black-rim arrow, but it has one
--- failure mode: on a surface the same colour as the pointer -- a white app
--- window while in dark mode -- a solid pointer is genuinely hard to track.
+-- It sampled the background under the pointer with `grim` and swapped between
+-- a solid pointer and a rimmed one. Both the themes and the daemon are removed
+-- on request: the pointer is now the STOCK Bibata-Modern-Ice artwork -- white
+-- body, black rim -- everywhere, with nothing able to swap it mid-session.
 --
--- scripts/cursor-adapt.py closes that gap by sampling the background under the
--- pointer with `grim` (which does not draw the cursor unless passed -c, so it
--- reads the surface and not the pointer itself) and switching to the rimmed
--- variant of the same body colour only while the gap is small. It also watches
--- the mode file and re-seeds itself when darkMode flips, so it never fights
--- custom/theme.lua, which owns the baseline.
+-- It never worked here anyway: it drove the pointer with `hyprctl setcursor`,
+-- which is a NO-OP on this build (`grim -c` vs `grim` diffs of the same region
+-- gave byte-identical silhouettes for three different theme names). XCURSOR_THEME
+-- in hyprland/env.lua is what actually resolves the cursor, and it is read at
+-- process start, so the theme is fixed for the session by design.
 --
--- The wrapper keeps it single-instance across config reloads.
---  DISABLED 2026-10-04: this daemon drives the pointer with `hyprctl
---  setcursor`, which is a NO-OP on this build -- it answers "ok" for any
---  theme name, including ones that do not exist, and the pointer never
---  changes. Proof: `grim -c` vs `grim` diff of the same region gave
---  byte-identical silhouettes for three different themes. The runtime
---  cursor theme actually comes from XCURSOR_THEME, which is only read at
---  process start, so nothing can swap it mid-session here.
---  Re-enable if/when this Hyprland exposes `cursor.theme` to hl.config.
--- hl.exec_cmd("$HOME/.config/hypr/custom/scripts/cursor-adapt.sh &")
 
 -- Polkit authentication agent.
 --

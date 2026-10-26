@@ -91,8 +91,12 @@ hl.bind("SUPER + SHIFT + X", hl.dsp.exec_cmd(
     " || pidof slurp || grim -g \"$(slurp $SLURP_ARGS)\" \"/tmp/ocr_image.png\" && tesseract \"/tmp/ocr_image.png\" stdout -l $(tesseract --list-langs | awk 'NR>1{print $1}' | tr '\\\\n' '+' | sed 's/\\\\+$/\\\\n/') | wl-copy && rm \"/tmp/ocr_image.png\""
 ))
 --# Color picker
-hl.bind("SUPER + SHIFT + C", hl.dsp.exec_cmd("hyprpicker -a"),
-    { description = "Utilities: Pick color #RRGGBB >> clipboard" })
+-- The picker is the shell's own now, on SUPER + C (bound in
+-- custom/keybinds.lua, once the Razer Command Center moved off that key to
+-- SUPER + SHIFT + C). hyprpicker is not installed on this machine, so the
+-- bind that used to sit here launched nothing at all. SUPER + C is bound in
+-- custom/ rather than here because this file later binds it to the code
+-- editor, and two binds on one key would both fire.
 --# Recording stuff
 hl.bind("SUPER + SHIFT + R", hl.dsp.global("quickshell:regionRecord"),
     { locked = true, description = "Utilities: Record region (no sound)" })

@@ -119,6 +119,39 @@ trap 'rm -f "$reset_flag" 2>/dev/null || true' EXIT INT TERM
 # of dead time to every reload (measured: one run spent 8 s between `kill` and
 # the launch). `kill -0` on a known pid costs microseconds.
 pids="$(timeout 3 qs -c "$qs_config" list 2>/dev/null | sed -n 's/^ *Process ID: *//p')"
+
+# ── 3b. Take the shell's ATTACHED helpers down with it ───────────────────────
+#
+# `qs kill` ends one process. Everything the shell spawned that is still
+# attached to it -- the `nmcli monitor` wrapper, `udevadm monitor`, the
+# `wl-paste` watchers, the python input watcher -- is left to the kernel, which
+# reparents each one to init without telling it that its owner is gone. Until
+# 2026-10-16 every reload therefore leaked a fresh set: sixteen `nmcli monitor`
+# processes were alive at once, one per reload in forty minutes, ~11 MB each,
+# and the sweeps in shell-watchdog.sh only reached them on their own 15 s tick.
+#
+# BEFORE THE KILL, deliberately: the parent link is what identifies a helper as
+# the shell's, and the instant the shell dies that link is gone. Stopping them
+# here is also why a reload no longer depends on the watchdog to clean up after
+# it.
+#
+# Applications are NOT touched: they detach themselves with `setsid` and the
+# helper only takes processes still in the shell's session that do not lead
+# their own process group (see scripts/launch/shell-tree.sh for the reasoning,
+# and `bash shell-tree.sh --self-test` for the synthetic case that proves it).
+tree_helper="$HOME/.config/quickshell/ii/scripts/launch/shell-tree.sh"
+if [ -r "$tree_helper" ]; then
+    # The pid source is the same IPC as above; if it answered nothing, fall back
+    # to the process name so the helpers are still taken down rather than left.
+    [ -z "${pids// /}" ] && pids=$(pgrep -f '[q]s -c ii' 2>/dev/null | tr '\n' ' ')
+    # shellcheck source=/dev/null
+    . "$tree_helper"
+    stopped=$(shell_tree_stop $pids)
+    log "stopped $stopped attached helper process(es) alongside the shell"
+else
+    log "WARNING: $tree_helper not readable -- helpers will be left to the watchdog sweep"
+fi
+
 qs -c "$qs_config" kill >>"$log_file" 2>&1 || true
 
 # ── 4. Start it again, immediately ───────────────────────────────────────────

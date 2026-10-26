@@ -66,10 +66,38 @@
 -- kept for the same two cases plus the one real fallback: a window that
 -- refuses the fullscreen request must still be able to fill the screen.
 --
--- Exit: one dispatch back to the tile, then the bar's strip -- and ONLY then if
--- no OTHER window is still covering: two windows can be covered at once (cover
--- one, switch workspace, cover another), and handing the strip back under the
--- second would push a covered window out of its edge-to-edge geometry.
+-- ═══ The bar is NOT told anything any more (2026-10-14) ═══════════════════
+--
+-- Every enter/exit here used to ask the shell for the bar's strip over
+-- `qs -c ii ipc call barCover onCover <on> <addr>`. That call is GONE, and it
+-- was pure cost:
+--
+--   * IT SPAWNED A PROCESS ON THE KEYPRESS PATH. `qs` is the whole Qt client
+--     binary, so each request meant a fresh process loading Qt to deliver two
+--     strings. Measured on this machine: 89ms wall, 78% of a core, twice per
+--     toggle (enter and exit) -- CPU burned *underneath* the transition it was
+--     meant to serve.
+--
+--   * IT CHANGED NOTHING. The bar's exclusive zone stopped answering to this
+--     request long ago: measured, handing the zone back while a cover was up
+--     moved the covering window by zero pixels and moved every OTHER window
+--     45px, so the zone now follows auto-hide alone (see Bar.qml's
+--     `exclusiveZone`). The flag's one remaining consumer was the bar's
+--     hide decision -- and that is DERIVED, from the same window list the bar
+--     already watches: `fullscreenOnMonitor` for the internal-fullscreen
+--     cover this module creates, `coverByGeometry` for the old float+pin one.
+--
+--     Verified both ways on this machine, reading the bar's own state with the
+--     request never sent: an internal-fullscreen cover reads `barHidden=true`,
+--     and a float pinned to the monitor (1707x1067 @ 1,1, the legacy shape)
+--     reads `barHidden=true` too -- identical to the same window covered
+--     through this module with the request in place.
+--
+-- What that removes is not only the CPU: the spawn was long enough for focus
+-- to leave the window being expanded before the geometry dispatch landed
+-- (the reason focusAddr() below exists), and it landed the bar's own state
+-- change in the middle of the compositor's transition. The transition is now
+-- the only thing happening.
 
 local M = {}
 
@@ -79,38 +107,30 @@ local M = {}
 -- window wrong' reported when covering several windows in a row.
 -- The table itself MUST exist here: when this was refactored from the single
 -- slot, the initialisation was dropped with it, and enter() then wrote into a
--- nil table -- throwing AFTER the bar had been told to hide and BEFORE the
--- window was floated. Covering died silently and the bar strip leaked.
+-- nil table -- throwing AFTER the save and BEFORE the
+-- window was expanded. Covering died silently, and the state it left read as
+-- "a cover that was never entered".
 M.remember = M.remember or {}
 
-local shellConfig = os.getenv("qsConfig") or "ii"
+-- (A `shellConfig`/`qsConfig` read lived here too, for the shell call above.
+-- Nothing in this module talks to the shell any more, so it is gone with it --
+-- a stale `qsConfig` here would only invite the call back.)
 
 local function trace(msg)
     local f = io.open("/tmp/hypr-cover.log", "a")
     if f then f:write(os.date("%H:%M:%S ") .. msg .. "\n"); f:close() end
 end
 
--- Ask the shell to release (or take back) the bar's strip, naming the window
--- it is acting on so the bar can spot it disappearing underneath it.
+-- (The `barCover` request and its public `M.barStrip` wrapper used to live
+-- here: one hl.dispatch of an exec_cmd that ran
 --
--- The handler is called by its FULL name, `onCover`. This build's IPC does not
--- strip the `on` prefix the way the docs describe -- `ipc call barCover cover`
--- answers "Function not found" and only `... onCover` lands -- and a bar that
--- silently never yields its strip is the exact bug this module exists to fix,
--- so the call is spelled the way that provably works here.
-local function barCover(on, address)
-    hl.dispatch(hl.dsp.exec_cmd(
-        "qs -c " .. shellConfig .. " ipc call barCover onCover "
-            .. (on and "true" or "false") .. " " .. tostring(address or "")))
-end
-
--- Yield (or take back) the bar's strip for a window WITHOUT changing that
--- window's own state. Kept as the module's public half so the four-finger-up
--- swipe in custom/general.lua can release the strip for its own flow -- see
--- its comments for why that gesture asks for the strip alone.
-function M.barStrip(address, on)
-    barCover(on, address)
-end
+--     qs -c <config> ipc call barCover onCover <on> <addr>
+--
+-- on every enter and every exit -- a full Qt process per toggle, for a strip
+-- the bar no longer ties to this request. See the header. There is now no
+-- channel from this module to the shell at all, and none is needed: the shell
+-- derives "a window is covering the screen" from its own window list, which is
+-- the same authority it already uses for real fullscreen.)
 
 -- The window's monitor, in LOGICAL pixels -- the units the move/resize
 -- dispatchers work in. Falls back to the panel's known values if the monitor
@@ -155,8 +175,11 @@ end
 -- "Covering" means: real fullscreen (fs ~= 0), OR a floating window that
 -- fills its monitor (the state this module creates). The second test is
 -- what makes SUPER+F a clean toggle after the redesign: the maximized
--- marker is gone, so the geometry IS the marker. Defined before exit, whose
--- strip guard walks every window through it.
+-- marker is gone, so the geometry IS the marker. It is also what the SHELL
+-- reads now -- the bar decides whether to get out of the way from the same
+-- predicate, on its own window list (modules/ii/bar/Bar.qml's
+-- `coverByGeometry`), which is why no request crosses between the two any
+-- more.
 --
 -- The geometry test allows a small tolerance, and it has to. Hyprland does
 -- not hand back the exact position that was dispatched for a float: a
@@ -193,18 +216,25 @@ end
 -- inside COVER_EPS of the monitor origin -- so isCoverState() called it a
 -- live cover, permanently, no matter what the user did.
 --
--- The cost was not cosmetic. M.exit() walks every window to decide whether
--- the bar's strip can go back, and it holds the strip when it finds another
--- cover. A parked, invisible Thunderbird meant it ALWAYS found one, so the
--- strip was never returned. That is verbatim in the trace, twice in the same
--- minute, on a real Firefox exit:
+-- The cost was not cosmetic, and it is worth keeping because the shape of it
+-- outlived the mechanism. Exiting a cover used to ask the shell to hand the
+-- bar's strip back -- and it asked only when it found no OTHER cover, so a
+-- window that merely LOOKED like one held the strip away from a real exit.
+-- A parked, invisible Thunderbird was such a window: it meant the strip was
+-- never returned. That is verbatim in the trace, twice in the same minute, on
+-- a real Firefox exit:
 --
 --     22:22:39 exit 0x558da645e7a0 (strip held: another cover)
 --     22:22:45 exit 0x558da645e7a0 (strip held: another cover)
 --
--- With the strip held, the bar never takes its exclusive zone back, the
--- workarea stays wrong, and the window re-tiles underneath the bar -- which
--- is the reported symptom, verbatim.
+-- With the strip held, the bar never took its exclusive zone back, the
+-- workarea stayed wrong, and the window re-tiled underneath the bar -- which
+-- was the reported symptom, verbatim.
+--
+-- The strip request itself is gone now (see the header), so that particular
+-- stranding cannot happen again; what survives is the reason this predicate
+-- has to tell a PARKED window from a covering one. The sweep and the drift
+-- repair below still walk every window through it.
 --
 -- So a window has to be VISIBLE to count as covering. Both of these are
 -- parking, not covering:
@@ -260,9 +290,14 @@ end
 -- Focus a window by address, as a WINDOW OBJECT. The window dispatchers on
 -- this build act on the focused window and ignore an `address` argument (see
 -- the long note in custom/general.lua), so anything that resizes or expands a
--- window has to take focus first -- and the cover does, because the bar's
--- strip request in enter() spawns a `qs` process, which is long enough for
--- focus to be somewhere else by the time the geometry dispatch lands.
+-- window has to take focus first -- and the cover does, because focus is not
+-- ours to assume: a notification, a click or another gesture can move it
+-- between the keypress and the dispatch, and an expansion that lands on a
+-- different window expands that one instead.
+--
+-- (The other reason focus had to be retaken -- the bar's strip request
+-- spawning a `qs` process that outlasted the keypress -- went with the
+-- request itself; see the header.)
 local function focusAddr(addr)
     local w = liveWindow(addr)
     if not w then return nil end
@@ -321,8 +356,6 @@ end
 function M.enter(w)
     if not w or not w.address then return false end
     local addr = w.address
-    -- The bar first, always: its strip is what the window is about to cover.
-    M.barStrip(addr, true)
 
     -- Remember the pre-cover state. Exit no longer needs it to place the
     -- window (the compositor restores the tile itself), but the sweep and the
@@ -359,6 +392,18 @@ function M.enter(w)
     -- (a rule, a client that will not resize) has to be able to fill the
     -- screen anyway, so the old float+pin is kept for exactly that case.
     hl.timer(function()
+        -- Only while this cover is still OURS. exit() drops the memory, so a
+        -- window deliberately taken back out of the cover inside this 60ms beat
+        -- must not be read as "it refused the request" -- without this test the
+        -- timer floats and pins a window the user has already restored, leaving
+        -- a monitor-sized float that no later call can tell from a real cover
+        -- (the geometry IS the marker for a float cover).
+        --
+        -- A hand cannot exit inside 60ms; a script that drives enter and then
+        -- exit (a test harness, a recovery script) can, and this fired four
+        -- times in one measurement run -- "fullscreen refused" in the log, for a
+        -- window that had simply been let go a beat earlier.
+        if not (M.remember and M.remember[addr]) then return end
         local now = liveWindow(addr)
         if now == nil then return end
         if (now.fullscreen or 0) ~= 0 then return end
@@ -371,9 +416,10 @@ function M.enter(w)
     return true
 end
 
--- Put it back. `w` may be nil if the window has already gone; in that case
--- only the bar is released, which is the safe direction (the strip comes back,
--- the bar is visible, nothing is stuck).
+-- Put it back. `w` may be nil if the window has already gone; that is then a
+-- no-op, and the safe direction -- the bar is not left yielded for a window that
+-- no longer exists, because it follows the window list rather than a request
+-- (see the header), so a vanished window clears the cover by itself.
 function M.exit(w)
     local addr = w and w.address or nil
     local mem = addr and M.remember and M.remember[addr] or nil
@@ -434,19 +480,12 @@ function M.exit(w)
         end
     end
     if M.remember then M.remember[addr] = nil end
-    -- Hand the strip back only when nothing else is covering. The bar is a
-    -- shared resource: two windows can be covered at once (cover one, switch
-    -- workspace, cover another), and returning it under the second would push
-    -- a covered window out of its edge-to-edge geometry. Without a remembered
-    -- state, treat a full-monitor float as covering (the geometry IS the
-    -- marker; see isCoverState).
-    for _, w2 in ipairs(hl.get_windows() or {}) do
-        if w2.address ~= addr and isCoverState(w2) then
-            trace("exit " .. tostring(addr) .. " (strip held: another cover)")
-            return
-        end
-    end
-    M.barStrip(addr or "", false)
+    -- Nothing to hand back to the bar: it follows the window list, so the
+    -- strip (and the slide, and the edge-reveal) are already answered for this
+    -- window the moment it stops covering. The walk that used to sit here --
+    -- "hold the strip if another window is still covering" -- existed to
+    -- decide whether to send that request, and went with it: two covered
+    -- windows now yield nothing between them at all.
     trace("exit " .. tostring(addr))
 end
 

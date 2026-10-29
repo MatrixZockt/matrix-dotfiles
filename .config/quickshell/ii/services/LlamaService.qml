@@ -248,21 +248,27 @@ Singleton {
     // single description the panel draws from, so a flag still cannot reach the
     // command without a row to change it.
     //
-    // DEFAULTS ARE THE REQUESTED ONES, and they include `-ngl 99` with
-    // `-c 65536`. Be aware that this exact pairing is the one this file
-    // already proved FAILS on this machine (RTX 4070 Laptop, 8 GB, Qwen3-8B
-    // Q4_K_M): forcing full offload removes llama.cpp's ability to back off,
-    // so instead of a partial offload you get
+    // DEFAULTS ARE MEASURED, not requested. `-ngl 99` means "force full
+    // offload", which removes llama.cpp's ability to back off, so a context
+    // that does not fit fails hard instead of partially offloading:
     //
     //   common_fit_params: failed to fit params to free device memory
     //   ggml_backend_cuda_buffer_type_alloc_buffer: cudaMalloc failed: OOM
     //
-    // The measured-good combinations were: no `-ngl` at all with -c 32768 x4,
-    // or `-ngl 99` with -c 16384 x4. So the server will probably refuse to
-    // start on these defaults. Every row is editable, and there is a Reset in
-    // the panel header, precisely because this is a starting point rather than
-    // a recommendation.
-    property int propCtx: 65536
+    // Measured on this machine (RTX 4070 Laptop, 8188 MiB, Qwen3-8B Q4_K_M
+    // 4.7 GB, KV cache q4_0):
+    //
+    //     -ngl 99 -c 65536  ->  cudaMalloc failed allocating 2592 MiB (dies)
+    //     -ngl 99 -c 40960  ->  loads, 7255 MiB used, 635 MiB left  (the
+    //                           model's trained max; tight, nothing spare)
+    //     -ngl 99 -c 32768  ->  loads, 6887 MiB used, 1002 MiB left  (chosen)
+    //
+    // 65536 was the old default and it is exactly the case that crash-looped.
+    // 32768 keeps ~1 GB free for the desktop and needs no YaRN rope scaling
+    // (it stays under Qwen3's 40960-token trained window). Raising Context is
+    // still allowed -- the launcher caps the flag at 40960, where the KV cache
+    // stops fitting -- but anything above 32768 spends the spare headroom.
+    property int propCtx: 32768
     property int propNgl: 99
     property int propParallel: 1
     property string propHost: "127.0.0.1"
@@ -284,7 +290,7 @@ Singleton {
     // the only value the slider will ever land on -- a drag over context has
     // to produce 32768 or 36864, never 33127.
     readonly property var launchParams: [
-        { key: "ctx",       label: "Context",         flag: "-c",          kind: "int",  value: root.propCtx,       def: 65536,    min: 512,      max: 1048576, step: 4096 },
+        { key: "ctx",       label: "Context",         flag: "-c",          kind: "int",  value: root.propCtx,       def: 32768,    min: 512,      max: 40960,   step: 4096 },
         { key: "ngl",       label: "GPU layers",      flag: "-ngl",        kind: "int",  value: root.propNgl,       def: 99,       min: 0,        max: 999,     step: 1 },
         { key: "parallel",  label: "Parallel slots",  flag: "--parallel",  kind: "int",  value: root.propParallel,  def: 1,        min: 1,        max: 64,      step: 1 },
         { key: "host",      label: "Host",            flag: "--host",      kind: "text", value: root.propHost,      def: "127.0.0.1" },
@@ -371,7 +377,7 @@ Singleton {
     // Write one parameter, by key, to the scalar that owns it.
     function setParam(key, value) {
         switch (key) {
-        case "ctx": root.propCtx = root.clamp(value, 512, 1048576, root.propCtx); break;
+        case "ctx": root.propCtx = root.clamp(value, 512, 40960, root.propCtx); break;
         case "ngl": root.propNgl = root.clamp(value, 0, 999, root.propNgl); break;
         case "parallel": root.propParallel = root.clamp(value, 1, 64, root.propParallel); break;
         case "host": root.propHost = String(value); break;
@@ -385,7 +391,7 @@ Singleton {
 
     // Put every row back to the defaults above.
     function resetParams() {
-        root.propCtx = 65536;
+        root.propCtx = 32768;
         root.propNgl = 99;
         root.propParallel = 1;
         root.propHost = "127.0.0.1";

@@ -3,6 +3,11 @@ Description=Local llama-server (Qwen3-8B) for Claude Code
 After=network.target
 # Auto-start when the user session is available
 PartOf=graphical-session.target
+# A start that cannot fit its context in VRAM used to restart every 5s forever
+# (78 restarts observed). Give up after three tries instead of burning CPU in a
+# loop that never succeeds -- the panel shows the log, which says why.
+StartLimitIntervalSec=120
+StartLimitBurst=3
 
 [Service]
 Type=simple

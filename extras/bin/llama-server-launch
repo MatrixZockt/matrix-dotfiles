@@ -45,7 +45,11 @@ for cand in "$STATE/quickshell/llama-params.json" \
 done
 
 # ── Defaults: MUST match LlamaService.qml's `def` values ────────────────────
-ctx=65536
+# 32768, not 65536: with `-ngl 99` (forced full offload) the KV cache at 65536
+# is 2592 MiB on top of a 4.7 GB model, and 8 GB of VRAM is not enough --
+# cudaMalloc failed and the unit crash-looped 78 times. Measured here:
+#   65536 -> dies   |   40960 -> 7255 MiB used, 635 MiB left   |   32768 -> 6887 / 1002 left
+ctx=32768
 ngl=99
 parallel=1
 host=127.0.0.1
@@ -93,7 +97,43 @@ for k, v in d.items():
 ')"
 fi
 
-args=(--model "$model"
+# The ceiling. Above this the KV cache stops fitting next to a fully offloaded
+# model on this GPU (40960 is the last size measured to load, and it is also
+# Qwen3's trained window, so a larger value would need YaRN AND would not fit).
+# Clamped rather than trusted because a too-large value does not degrade -- it
+# fails to allocate and the unit restarts forever, which is what made the local
+# model look "broken" instead of misconfigured.
+MAX_CTX=40960
+if [ "$ctx" -gt "$MAX_CTX" ] 2>/dev/null; then
+  echo "llama-server-launch: ctx $ctx exceeds the ${MAX_CTX}-token VRAM ceiling; using $MAX_CTX" >&2
+  ctx=$MAX_CTX
+fi
+
+# ── The served model NAME ───────────────────────────────────────────────────
+# Without this, the only id the server advertises is the absolute path of the
+# .gguf (`/home/user/Models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf`), in /v1/models
+# and in every response body. Clients that build a model picker out of
+# /v1/models -- Claude Desktop's gateway screen does exactly that -- cannot use
+# a filesystem path as a model name and report "Gateway returned no usable
+# models" even though the server is healthy. An alias is what makes the server
+# publish `qwen3-8b` as the id instead.
+#
+# The server also IGNORES the model field on requests (verified: it answers 200
+# for arbitrary Claude model ids and always serves the loaded model), so the
+# alias only has to be a sane thing to select, not something requests must use.
+#
+# WHY IT IS SPELLED LIKE A CLAUDE MODEL AND NOT `qwen3-8b`:
+# Claude Desktop's gateway mode validates every model in its list against an
+# Anthropic-shaped route -- "expected a gateway model route referencing an
+# Anthropic model (e.g. claude-sonnet-4-5, anthropic/claude-*)". A plain
+# `qwen3-8b` is rejected as "Doesn't look like an Anthropic model", and during
+# discovery it is dropped entirely ("Gateway returned no usable models", 0
+# models found). The id is only a label the gateway forwards, and the server
+# serves the loaded Qwen3 either way, so the label is spelled in the shape the
+# client requires. Set Display name to "Qwen3 8B (local)" in the app so the
+# picker does not claim this is a real Claude.
+MODEL_ALIAS=claude-sonnet-4-5
+args=(--model "$model" --alias "$MODEL_ALIAS"
       --host "$host" --port "$port"
       --ctx-size "$ctx"
       --n-gpu-layers "$ngl"

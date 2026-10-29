@@ -69,12 +69,46 @@ Scope {
     // trap `listView` sets. One reference, set once, and the geometry probe
     // below can read the real on-screen numbers instead of re-deriving them.
     property var panelRef: null
+    // Every live row item, for the diagnostics in the IpcHandler below: a
+    // readout needs a REAL item's geometry and nothing else reachable from
+    // outside the ListView can reach in (the delegate's ids are scoped to it).
+    // Replaced as a whole array so bindings notice; rows add and remove
+    // themselves as the list grows and the ListView recycles delegates.
+    property var rowRefs: []
     // The card Rectangle itself. Separate from panelRef on purpose: the
     // window's implicitWidth/implicitHeight report what it INTENDED to be,
     // which is exactly the number that stayed correct while the card itself
     // was 380x0 and drew nothing. Reading the real item catches that class of
     // bug instead of repeating its assumption.
     property var cardRef: null
+
+    // ── Image previews ────────────────────────────────────────────────────
+    // Decoded in one batch when the card opens, and again when the history
+    // changes while it is up: a screenshot taken with the popup open still
+    // shows its snapshot. Cliphist owns the batch and the generation counter
+    // the rows bind to (see decodeImagePreviews there).
+    // Only the rows the card actually shows: the history is capped at
+    // maxEntries on screen, and decoding the whole store (measured: 234 PNGs,
+    // ~23 MB) to display twenty rows is work nobody sees.
+    // The ROWS that are drawn, not the raw history: `entries` is the whole
+    // store (measured: 234 images), while the card shows at most a screenful.
+    function visibleEntries() {
+        const out = [];
+        for (const row of root.listRows)
+            if (row && row.entry) out.push(row.entry);
+        return out;
+    }
+    onOpenChanged: {
+        if (root.open)
+            Cliphist.decodeImagePreviews(root.visibleEntries());
+    }
+    Connections {
+        target: Cliphist
+        function onEntriesChanged() {
+            if (root.open)
+                Cliphist.decodeImagePreviews(root.visibleEntries());
+        }
+    }
 
     Process {
         id: cursorProbe
@@ -154,7 +188,10 @@ Scope {
     // comment on the quickshell:clipboard rule in custom/rules.lua. Frost
     // under a surface this dark and this open does not read as glass, it
     // reads as fog.
-    readonly property real cardAlpha: 0.78
+    // 0.90 rather than 0.78: the card sits over whatever the user was doing,
+    // and at 0.78 the window behind it read through the rows. "make it less
+    // transparent" (2026-10-28).
+    readonly property real cardAlpha: 0.90
     readonly property color cardSurface: ColorUtils.applyAlpha(Appearance.m3colors.m3surfaceContainerLow, cardAlpha)
     readonly property color cardBorder: Appearance.colors.colLayer0Border
     // The three inner tones are NOT "a bit more opaque than the card" -- they
@@ -192,6 +229,13 @@ Scope {
     // `listRows` itself, so the arrows step over the "Pinned"/"Recent" headers
     // instead of stopping on them and appearing to do nothing.
     property int cursor: 0
+
+    // The entry the user CLICKED open. Expansion is now a click, not a
+    // consequence of the keyboard cursor moving: rows used to grow the moment
+    // they were selected (hover included), so scrolling through the list
+    // reshaped it under the pointer. Only the clicked row expands, and
+    // clicking it again is what pastes it (2026-10-28).
+    property string expandedEntry: ""
 
     // What kind of thing an entry is, which decides its icon, its hint line
     // and whether it gets a thumbnail. Cheap string tests on the content --
@@ -360,6 +404,8 @@ Scope {
         // show the card where it was last time.
         root.cursorKnown = false;
         cursorProbeTimeout.stop();
+        // A closed popup has no expanded row; the next open starts compact.
+        root.expandedEntry = "";
     }
 
     Variants {
@@ -398,13 +444,19 @@ Scope {
             // half the screen next to the pointer. CAPPED against the space
             // between the pointer and the far edge, so it can never be wider
             // than the room it opens into.
-            readonly property real cardW: Math.max(260, Math.min(380, screenW - root.edgeMargin * 2))
+            // 440 wide (was 380): the rows carry a thumbnail, a line of text
+            // and the two actions, and at 380 an image row's dimensions and
+            // the entry were always elided. "slightly bigger" (2026-10-28).
+            readonly property real cardW: Math.max(300, Math.min(440, screenW - root.edgeMargin * 2))
             // Height is decided together with the position (see below) so the
             // two cannot chase each other: the card is never taller than the
             // room on whichever side of the pointer it opens towards.
             readonly property real naturalContentHeight: popupCard.naturalHeight
             readonly property real minPopupHeight: 180
-            readonly property real maxPopupHeight: Math.min(360, screenH - root.edgeMargin * 2)
+            // 400 (was 360): with 46px rows and the wider card the list was
+            // showing barely six entries before scrolling. "slightly bigger"
+            // (2026-10-28).
+            readonly property real maxPopupHeight: Math.min(400, screenH - root.edgeMargin * 2)
 
             // Pointer position relative to this monitor.
             readonly property real localX: root.cursorX - (modelData?.x ?? 0)
@@ -1007,8 +1059,24 @@ Scope {
             const sel = root.selectedEntry === null
                 ? "none"
                 : String(root.selectedEntry).replace(/\s+/g, " ").slice(0, 60);
+            // `expanded` is part of the readout because expansion is now a
+            // CLICK rather than a consequence of selection, and a check (or a
+            // person) has to be able to see which row is open without
+            // measuring the card.
+            const open = root.expandedEntry === "" ? "none"
+                : String(root.expandedEntry).replace(/\s+/g, " ").slice(0, 40);
+            // rowH is the LIVE height of the first compact row. It is here
+            // because the compact-row geometry (50 = 6 + 38 + 6 content box)
+            // is the whole point of the last change and is not visible in any
+            // other readout: 46 means the old rows are still on screen, i.e.
+            // the edit did not reload. Rows the user has clicked open report
+            // their expanded height instead of the compact one, so only
+            // compact rows are counted here.
+            const compact = root.rowRefs.filter(r => r && !r.expanded && r.height > 0);
+            const rowH = compact.length > 0 ? Math.round(compact[0].height) : -1;
             return `open=${root.open} rows=${root.listRows.length} entries=${root.entryRowIndices.length}`
                 + ` cursor=${root.cursor} selected="${sel}" query="${root.searchText}"`
+                + ` expanded="${open}" rowH=${rowH} liveRows=${root.rowRefs.length}`
                 + ` anchor=${root.cursorKnown && !root.placementFallback}`;
         }
         // Where the card actually landed, and whether it fits on the screen.
@@ -1067,6 +1135,25 @@ Scope {
             root.togglePinSelected();
             return before === null ? "nothing selected" : "toggled pin";
         }
+        // Diagnostic: open the row whose entry contains `query` -- the state a
+        // CLICK produces -- without owning the pointer. Moving the pointer
+        // from a script never generates real motion here, so the hover/click
+        // routes cannot be exercised from outside; this is the readable half
+        // of that. An empty query collapses whatever is open.
+        function expandEntry(query: string): string {
+            const q = String(query ?? "");
+            if (q.length === 0) {
+                root.expandedEntry = "";
+                return "collapsed";
+            }
+            for (const row of root.listRows) {
+                if (row && row.entry && String(row.entry).indexOf(q) !== -1) {
+                    root.expandedEntry = row.entry;
+                    return "expanded";
+                }
+            }
+            return "no match";
+        }
     }
 
     // ── One entry row ──────────────────────────────────────────────────────
@@ -1084,6 +1171,14 @@ Scope {
         // is what turns it back into a cursor position.
         required property int rowIndex
 
+        // Open only because the user CLICKED this row (see root.expandedEntry).
+        // The keyboard cursor does not expand anything: moving through the
+        // list used to reshape it under the pointer.
+        readonly property bool expanded: entryRoot.entry === root.expandedEntry
+
+        Component.onCompleted: root.rowRefs = root.rowRefs.concat([entryRoot])
+        Component.onDestruction: root.rowRefs = root.rowRefs.filter(r => r !== entryRoot)
+
         readonly property bool pinned: Cliphist.isPinned(entry)
         readonly property bool isImage: Cliphist.entryIsImage(entry)
         readonly property string kind: root.entryKind(entry)
@@ -1091,9 +1186,18 @@ Scope {
 
         // One clean line: real newlines and runs of spaces flattened so a
         // multi-line copy reads as a single row.
+        // For an IMAGE the row says what the picture IS -- its pixel size and
+        // its weight -- because the snapshot beside it is what identifies it
+        // now. The word "(image)" was the best a row could do before the
+        // previews were decoded reliably.
         readonly property string flatText: {
-            if (isImage)
-                return Translation.tr("(image)");
+            if (isImage) {
+                const meta = root.imageMeta(entry);
+                const bits = [];
+                if (meta.dims) bits.push(meta.dims);
+                if (meta.size) bits.push(meta.size);
+                return bits.join(" · ");
+            }
             return root.entryBody(entry).replace(/\s+/g, " ").trim();
         }
 
@@ -1111,12 +1215,18 @@ Scope {
         // 2px between them, 6px from the edge) so text can never be drawn
         // underneath them.
         readonly property real actionsWidth: 64
-        readonly property real rowPadX: 8
+        readonly property real rowPadX: 11
 
         // The selected row grows; everything else stays one compact line. The
         // hint line only exists on the selected row, which is what makes the
         // expansion read as "this one is open" rather than just highlighted.
-        implicitHeight: selected ? contentColumn.implicitHeight + 14 : 42
+        // The CLICKED row is the tall one. 50 compact (was 46): that makes
+        // the content box inside a compact row exactly the thumbnail's 38px,
+        // so the snapshot, the glyph, the text and the pin/delete buttons all
+        // centre on ONE line -- with 38px in a 32px box the thumbnail was
+        // pinned to the top and hung 3px below the text's centre, which is
+        // the misalignment it looked like.
+        implicitHeight: expanded ? contentColumn.implicitHeight + 12 : 50
         width: listView.width
 
         Rectangle {
@@ -1153,6 +1263,16 @@ Scope {
             hoverEnabled: true
             acceptedButtons: Qt.LeftButton
             onClicked: {
+                // First click OPENS the row; a click on the already-open row
+                // pastes it. Expansion used to follow selection, which made
+                // the list jump while just looking through it.
+                const idx = root.entryRowIndices.indexOf(entryRoot.rowIndex);
+                if (idx !== -1)
+                    root.cursor = idx;
+                if (root.expandedEntry !== entryRoot.entry) {
+                    root.expandedEntry = entryRoot.entry;
+                    return;
+                }
                 Cliphist.paste(entryRoot.entry);
                 root.close();
             }
@@ -1194,20 +1314,27 @@ Scope {
             anchors.fill: parent
             anchors.leftMargin: entryRoot.rowPadX + 4
             anchors.rightMargin: entryRoot.rowPadX + entryRoot.actionsWidth
-            anchors.topMargin: 7
-            anchors.bottomMargin: 7
+            anchors.topMargin: 6
+            anchors.bottomMargin: 6
             spacing: 2
 
             RowLayout {
                 Layout.fillWidth: true
-                spacing: 9
+                spacing: 10
 
                 // Thumbnail / glyph slot. A fixed square either way, so the
                 // text column starts at the same x on every row.
                 Item {
-                    Layout.preferredWidth: 30
-                    Layout.preferredHeight: 30
-                    Layout.alignment: Qt.AlignTop
+                    // A 38px snapshot in a compact row, 96px once the row is
+                    // clicked open: big enough to tell two screenshots apart,
+                    // which is the whole point of the thumbnail.
+                    Layout.preferredWidth: entryRoot.isImage && entryRoot.expanded ? 96 : 38
+                    Layout.preferredHeight: entryRoot.isImage && entryRoot.expanded ? 96 : 38
+                    // VCentre and not Top: in a compact row the thumbnail and
+                    // the text now share the same centre line, and the text
+                    // column's own AlignVCenter then agrees with it instead of
+                    // centring against a box that starts higher.
+                    Layout.alignment: Qt.AlignVCenter
 
                     Rectangle {
                         anchors.fill: parent
@@ -1218,16 +1345,53 @@ Scope {
                         visible: !entryRoot.isImage
                     }
 
-                    // An image entry shows its own preview. Decoded to a temp
-                    // file by Cliphist, and loaded asynchronously so a 985 KiB
-                    // screenshot never blocks the list.
-                    IconImage {
+                    // The snapshot: the decoded PNG, reloaded when the decode
+                    // batch lands. `imageDecodeGeneration` is part of the
+                    // source, so the binding re-runs on arrival and no image
+                    // cache can hold the pre-decode miss -- the failure mode
+                    // the old `imagePreviewPath` call had (it started a decode
+                    // from inside a binding and handed back a path before the
+                    // file existed).
+                    Rectangle {
                         anchors.fill: parent
-                        anchors.margins: entryRoot.isImage ? 0 : 8
                         visible: entryRoot.isImage
-                        source: Cliphist.imagePreviewPath(entryRoot.entry)
-                            || Quickshell.iconPath("image", Quickshell.shellPath("assets/icons/fluent/image.svg"))
-                        asynchronous: true
+                        radius: Appearance.rounding.small
+                        color: ColorUtils.transparentize(Appearance.colors.colLayer2, 0.45)
+                        clip: true
+
+                        // Behind the snapshot, so a decode that failed (an
+                        // unsupported format) still reads as "an image" rather
+                        // than as an empty square.
+                        MaterialSymbol {
+                            anchors.centerIn: parent
+                            visible: previewImage.status !== Image.Ready
+                            text: "image"
+                            iconSize: entryRoot.expanded ? 28 : 17
+                            color: Appearance.colors.colSubtext
+                        }
+
+                        StyledImage {
+                            id: previewImage
+                            anchors.fill: parent
+                            fillMode: Image.PreserveAspectCrop
+                            cache: false
+                            source: entryRoot.isImage ? Cliphist.imagePreviewFile(entryRoot.entry) : ""
+                        }
+                        // Reload when the decode batch lands. NOT with a
+                        // `?v=` cache-buster on the source: Qt treats the query
+                        // as part of a local file path and answers "Cannot
+                        // open: .../2422.png?v=1" (measured). Clearing the
+                        // source first is what makes the assignment re-read the
+                        // file instead of keeping the earlier miss.
+                        Connections {
+                            target: Cliphist
+                            function onImageDecodeGenerationChanged() {
+                                if (!entryRoot.isImage) return;
+                                const file = Cliphist.imagePreviewFile(entryRoot.entry);
+                                previewImage.source = "";
+                                previewImage.source = file;
+                            }
+                        }
                     }
 
                 MaterialSymbol {
@@ -1258,19 +1422,24 @@ Scope {
                         color: entryRoot.selected
                             ? Appearance.colors.colOnLayer1
                             : ColorUtils.transparentize(Appearance.colors.colOnLayer1, 0.18)
-                        wrapMode: entryRoot.selected ? Text.Wrap : Text.NoWrap
-                        elide: entryRoot.selected ? Text.ElideNone : Text.ElideRight
-                        maximumLineCount: entryRoot.selected ? 4 : 1
+                        wrapMode: entryRoot.expanded ? Text.Wrap : Text.NoWrap
+                        elide: entryRoot.expanded ? Text.ElideNone : Text.ElideRight
+                        maximumLineCount: entryRoot.expanded ? 4 : 1
                         linkColor: Appearance.colors.colPrimary
 
-                        // The full content as a tooltip, so a collapsed row is
-                        // never a dead end. `alternativeVisibleCondition` is the
-                        // documented way to drive a StyledToolTip from a parent
-                        // that has no `hovered` property -- relying on the
-                        // internal condition silently renders nothing.
+                        // The full content as a tooltip -- but only once the
+                        // row is CLICKED open. On hover it used to pop the
+                        // whole paste up over the list while the pointer was
+                        // merely crossing it, which was noise; now the full
+                        // value appears exactly when you ask for the row.
+                        // (The expanded row itself shows at most four wrapped
+                        // lines, so this is still what reveals the rest.)
+                        // `alternativeVisibleCondition` is the documented way
+                        // to drive a StyledToolTip from a parent that has no
+                        // `hovered` property -- relying on the internal
+                        // condition silently renders nothing.
                         StyledToolTip {
-                            alternativeVisibleCondition: rowMouse.containsMouse
-                                && !entryRoot.selected
+                            alternativeVisibleCondition: entryRoot.expanded
                                 && entryRoot.flatText.length > 0
                             // Wider than the card: clipboard entries are
                             // arbitrary pasted text, and this is the one place
@@ -1293,7 +1462,7 @@ Scope {
                     // the selection an expansion rather than a highlight.
                     StyledText {
                         Layout.fillWidth: true
-                        visible: entryRoot.selected && entryRoot.hint !== ""
+                        visible: entryRoot.expanded && entryRoot.hint !== ""
                         text: entryRoot.hint
                         font.pixelSize: Appearance.font.pixelSize.smaller
                         color: Appearance.colors.colSubtext

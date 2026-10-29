@@ -420,6 +420,60 @@ Singleton {
         return out;
     }
 
+    // ── Image previews for the popup (2026-10-28) ─────────────────────���────
+    //
+    // The popup shows a SNAPSHOT of a copied image instead of the word
+    // "(image)", which means a PNG per entry on disk. Decoding is done in ONE
+    // batch, once, when the popup opens:
+    //
+    //   * a decode per row per binding re-evaluation is what the old
+    //     `imagePreviewPath` did -- it ran `cliphist decode` from inside a
+    //     binding, so a re-render started the work again, and the Image had
+    //     its source before the file existed and never retried.
+    //   * `imageDecodeGeneration` is the signal that the batch has LANDED.
+    //     Rows bind their Image source to it (see ClipboardListWindow), so the
+    //     picture appears when the files exist instead of racing them.
+    //
+    // The files live in Directories.cliphistDecode, the same cache directory
+    // the shell empties at start.
+    property int imageDecodeGeneration: 0
+
+    function imagePreviewFile(entry) {
+        const id = String(entry ?? "").split("\t")[0];
+        if (id.length === 0) return "";
+        return Directories.cliphistDecode + "/" + id + ".png";
+    }
+
+    Process {
+        id: imageDecodeProc
+        property string script: ""
+        command: ["bash", "-c", script]
+        // The generation bump re-runs every row's Image binding: that is how a
+        // preview shows up after the decode rather than staying on its
+        // fallback.
+        onExited: root.imageDecodeGeneration += 1
+    }
+
+    function decodeImagePreviews(entries) {
+        if (imageDecodeProc.running) return;
+        const list = (entries ?? []).filter(e => root.entryIsImage(e));
+        if (list.length === 0) return;
+        const cmds = [`mkdir -p '${Directories.cliphistDecode}'`];
+        for (let i = 0; i < list.length; i++) {
+            const file = root.imagePreviewFile(list[i]);
+            if (file.length === 0) continue;
+            const id = String(list[i]).split("\t")[0];
+            const quoted = file.replace(/'/g, "'\"'\"'");
+            // Already decoded (a previous open of this shell session): leave
+            // it alone. Only missing or empty files are decoded -- an empty one
+            // is a decode that failed, and retrying it is the only way it can
+            // ever recover.
+            cmds.push(`[ -s '${quoted}' ] || ${root.cliphistBinary} decode ${id} > '${quoted}' 2>/dev/null`);
+        }
+        imageDecodeProc.script = cmds.join("; ");
+        imageDecodeProc.running = true;
+    }
+
     // Surface the brief "copied" feedback.
     //
     // It is the desktop's top-right signal card, and deliberately NOT a

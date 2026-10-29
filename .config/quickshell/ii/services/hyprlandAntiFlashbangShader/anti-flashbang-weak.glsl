@@ -32,8 +32,16 @@ void main() {
     float hot = 0.0;
     float sum = 0.0;
     float samples = 0.0;
-    for (float x = 0.05; x < 1.0; x += 0.1) {
-        for (float y = 0.05; y < 1.0; y += 0.1) {
+    // WHY 5x5, NOT 10x10 (2026-10-27). This grid runs for every pixel of
+    // every frame: at 2560x1600 the 10x10 asked ~410 million questions a
+    // frame and measured +11 ms of compositor time, which held the whole
+    // desktop to 36 fps in eco and 45 fps on AC regardless of the panel's
+    // refresh -- the gate was paid for on every pixel instead of once.
+    // The taps are every other row and column of the calibrated grid (the
+    // positions the thresholds were measured against), so the gate still
+    // answers the same way; 25 taps measured at the panel's full rate.
+    for (float x = 0.05; x < 1.0; x += 0.2) {
+        for (float y = 0.05; y < 1.0; y += 0.2) {
             float l = luma(texture(tex, vec2(x, y)).rgb);
             hot += step(WHITE, l);
             sum += l;

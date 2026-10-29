@@ -6164,6 +6164,54 @@ end
 -- idle case is reading a list of a dozen objects once a second; the cost
 -- of the busy case is one focus and one float dispatch, which is what
 -- attaching a window costs anyway.
+local clientFullscreen = {}
+
+-- Undo a COMPOSITOR fullscreen whose client has already withdrawn its own
+-- request: the window goes back into the layout as a tile, which is the
+-- "attached" half of the report. Takes an ADDRESS (the event hands over a
+-- window object that is not safe to hold across a timer).
+local function settleStaleFullscreen(addr)
+    if not addr then return end
+    local w = findWindow(addr)
+    if not w then
+        clientFullscreen[addr] = nil
+        return
+    end
+    if (w.fullscreenClient or 0) ~= 0 then return end
+    if (w.fullscreen or 0) == 0 then
+        -- Already back in the layout (a clean exit, or this repair): the
+        -- memory has done its job.
+        clientFullscreen[addr] = nil
+        return
+    end
+    if not clientFullscreen[addr] then return end
+    -- The guard is the cover module's MEMORY, not its owns() predicate.
+    --
+    -- measured, and it is the reason the first version of this repair never
+    -- fired: owns() falls back to isCoverState(), and isCoverState() answers
+    -- true for ANY window with fs ~= 0 -- so every genuine client fullscreen
+    -- (a YouTube video, F11) came back "the cover module owns this" and was
+    -- skipped. The trace said so plainly, for a browser deliberately put into
+    -- exactly the broken state (compositor half on, client half off):
+    --
+    --     sweep halves: brave-browser fs=2 client=0 owns=true
+    --
+    -- owns() has to stay that broad for the TOGGLE path (a cover that has
+    -- been dragged out of the monitor rect is still ours to put back), so the
+    -- repair asks the narrower question instead: did this module actually
+    -- make a cover here? That is the memory it sets on the way in, and it is
+    -- only ever set by this desktop's own cover, never by an app's request.
+    if cover and cover.remember and cover.remember[w.address] then return end
+    -- Focus first: window dispatchers on this build act on the FOCUSED window
+    -- and ignore an address (the note at the top of this file).
+    hl.dispatch(hl.dsp.focus({ window = w }))
+    hl.dispatch(hl.dsp.window.fullscreen_state({
+        internal = 0, client = 0, action = "set" }))
+    clientFullscreen[addr] = nil
+    tracef("fullscreen: client left, cleared the stale compositor half on %s \"%s\"",
+        tostring(w.class), tostring(w.title))
+end
+
 local function attachSweep()
     -- Read the registry ONCE per pass, not once per window: it is a file
     -- read, and doing it per window would be the only I/O in the sweep.
@@ -6180,6 +6228,24 @@ local function attachSweep()
             local cls = win.class or win.initialClass
             seen[win.address or ""] = true
             if cls and not isDialogClass(cls) then
+                -- ── The two halves of a fullscreen, reconciled ──────────────
+                -- See the section above settleStaleFullscreen for the
+                -- measurements. The CLIENT's half is remembered here (this is
+                -- the only place that sees every window every second, so it is
+                -- what makes the repair happen even when the event is missed),
+                -- and a compositor half the client has abandoned is cleared --
+                -- which puts the window back in the layout as an attached
+                -- window instead of leaving it covering the screen.
+                local addr = win.address or ""
+                if addr ~= "" then
+                    if (win.fullscreenClient or 0) ~= 0 then
+                        clientFullscreen[addr] = true
+                    elseif (win.fullscreen or 0) ~= 0 then
+                        settleStaleFullscreen(addr)
+                    else
+                        clientFullscreen[addr] = nil
+                    end
+                end
                 -- Two states a window of ours must not arrive in: floating
                 -- with broken geometry (un-float it) or fullscreen (demote
                 -- it, ONCE). Everything else is left as it arrived -- a
@@ -6363,3 +6429,111 @@ hl.timer(attachSweep, { timeout = 1000, type = "oneshot" })
 -- cold, so capturing first (while the window is still visible, which is
 -- invisible to the user because nothing has changed yet) is the only order
 -- that does not flash a black hole where the window was.
+
+-- ═══ A client that leaves its OWN fullscreen comes back as an attached window
+--
+-- REQUESTED 2026-10-29: "when making something fullscreen like a youtube video
+-- in the brave browser or f11 etc, make sure the desktop app is also treated
+-- as actually fullscreen and put back as attached window when done".
+--
+-- A fullscreen on this build is TWO fields, and they are set and cleared
+-- separately:
+--
+--     fullscreen        -- the COMPOSITOR's half  (1 = maximized, 2 = fullscreen)
+--     fullscreenClient  -- the CLIENT's request   (same encoding)
+--
+-- Entering works untouched: a YouTube video (or F11) and the compositor follows
+-- on its own. MEASURED on the running Brave window with `hyprctl clients`:
+-- fs=2 fullscreenClient=2 at=[0,0] size=[1707,1067] -- the whole 2560x1600
+-- panel at scale 1.5, bar strip not reserved. Nothing here asks for that.
+--
+-- Leaving is where the halves come apart. Three F11 presses on that window
+-- produced:
+--
+--     before   fs=2 client=2   (fullscreen, correct)
+--     F11 #1   fs=2 client=0   <- client gone, COMPOSITOR STILL FULLSCREEN
+--     F11 #2   fs=2 client=2
+--     F11 #3   fs=2 client=1
+--
+-- The window keeps the fullscreen rect and stays on top of everything: the app
+-- is a window again, the desktop still treats it as fullscreen. That is the
+-- "put back as attached window when done" half of the report -- and it is a
+-- STALE half, not a re-assert, measured by clearing both fields directly:
+--
+--     fullscreen_state({ internal = 0, client = 0, action = "set" })
+--     -> fs=0 client=0 at=[6,51] size=[845,1010], and ten reads over the next
+--        5s were identical: nothing in this config puts it back.
+--
+-- So the repair is one dispatch, in the direction the client cannot take for
+-- itself: when the CLIENT's half is clear and the COMPOSITOR's half is still
+-- set, the stale half is cleared and the window rejoins the layout as a tile.
+--
+-- It RUNS FROM TWO PLACES, deliberately: `window.fullscreen` (immediate), and
+-- the attach sweep below (once a second, as the guarantee). The sweep is what
+-- makes it converge even when an event is coalesced or missed -- measured: a
+-- compositor-side un-fullscreen of a browser in HTML5 fullscreen produced no
+-- readable event at all, because the app re-asserted in the same frame.
+--
+-- Two things keep it off the paths it must not touch:
+--
+--   * `cover.remember` -- SUPER+F and the four-finger swipe up deliberately
+--     set the internal half while the client is NEVER told (that is the point:
+--     a browser keeps its tabs). That state is client=0 internal=2 by
+--     construction, i.e. indistinguishable from the bug by the numbers alone,
+--     so the cover module's own MEMORY is the authority, not the numbers. Its
+--     owns() predicate cannot be used here: owns() falls back to
+--     isCoverState(), which is true for any fs ~= 0 window, so it excluded
+--     every real client fullscreen from the repair.
+--   * `clientFullscreen` -- the repair only ever undoes a fullscreen the client
+--     ASKED for, and it only knows that because it watched the request. A
+--     window in an internal fullscreen this desktop did not create is left
+--     alone rather than demoted by the wrong code path.
+--
+-- Deliberately NOT done: forcing the compositor's half ON when only the
+-- client's is set. That is the other shape of the same desync (fs=0
+-- client=2, "the video fills the page but the window is a normal window"), and
+-- it looks like the obvious symmetric fix -- but it turns every deliberate
+-- un-fullscreen into a bounce: the sweep would put the window back fullscreen
+-- a second later, forever, and SUPER+ALT+Space would stop being able to leave
+-- fullscreen at all. The safe direction is the one that converges: towards the
+-- layout, which is where the exit lands anyway.
+--
+-- The event hands over an HL.Window, NOT the address string that window.open
+-- passes: measured, `tostring(arg)` reads "HL.Window(0x56464b22ca40)" while
+-- findWindow() compares against `w.address` ("0x56464b22ca40"), so the first
+-- version of this handler matched nothing and was a silent no-op (the trace
+-- showed the event arriving and nothing ever happening). The address is
+-- resolved here, while the object is certainly alive; the deferred step then
+-- only sees a string.
+local function addressOfEventWindow(win)
+    if win == nil then return nil end
+    if type(win) == "table" then return win.address end
+    -- userdata: the fields hl.get_windows() exposes are on it too.
+    local ok, addr = pcall(function() return win.address end)
+    if ok and type(addr) == "string" and addr ~= "" then return addr end
+    -- Last resort, the way window.open identifies its window: the string form
+    -- is stable per window, so it can be matched against the live list.
+    local key = tostring(win)
+    for _, w in ipairs(hl.get_windows() or {}) do
+        if tostring(w) == key then return w.address end
+    end
+    return nil
+end
+
+hl.on("window.fullscreen", function(win)
+    local addr = addressOfEventWindow(win)
+    if not addr then return end
+    -- One frame: dispatchers are queued, so a read in the same tick as the
+    -- event returns the state from before it (the note at anchoredTransition).
+    hl.timer(function()
+        local w = findWindow(addr)
+        if not w then return end
+        if (w.fullscreenClient or 0) ~= 0 then
+            -- The entry half: remember the request so the exit can be
+            -- recognised, and leave the compositor alone.
+            clientFullscreen[addr] = true
+            return
+        end
+        settleStaleFullscreen(addr)
+    end, { timeout = 32, type = "oneshot" })
+end)

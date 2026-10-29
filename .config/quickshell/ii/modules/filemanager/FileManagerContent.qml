@@ -172,6 +172,12 @@ Item {
 
     // ── Path + history ──────────────────────────────────────────────────
     property string path: Quickshell.env("II_FILES_START") ?? root.homeDir
+    // The folder THIS LAUNCH was pointed at ("show in file manager", a folder
+    // handed to the desktop entry), or "" for an ordinary launch. Named
+    // separately from `path` because `path` moves the moment the app navigates,
+    // and where the launch was aimed is a question asked later -- when the
+    // saved tabs arrive (restoreTabs).
+    readonly property string launchFolder: Quickshell.env("II_FILES_START") ?? ""
     property var history: []
     property int historyIndex: 0
 
@@ -214,7 +220,42 @@ Item {
     // ── Tabs ────────────────────────────────────────────────────────────
     property var tabs: []
     property int activeTab: 0
-    readonly property bool tabsAvailable: !root.pickerMode
+    // Tabs are in the file-open dialog too (asked 2026-10-27): the dialog
+    // shows the SAME set the file manager has open and switches between them
+    // the same way it does. What it does not do is KEEP them -- persistTabs
+    // below stays with the file manager -- so the dialog mirrors, switches,
+    // and lets go when it closes.
+    readonly property bool tabsAvailable: true
+
+    // ── Tabs that outlive the window ──────────────────────────────────────
+    // Closing the file manager ENDS the process (filemanager.qml), so the
+    // tabs have to be written down to come back: paths plus the active index
+    // in Persistent.states.fileManagerTabs. What comes back is the tabs as
+    // they were -- the window itself is fresh, history cleared, which is the
+    // "closing resets it but keeps the tabs" asked for. Reboots keep them
+    // too: the state file is on disk.
+    //
+    // A launch that was ASKED for a folder (II_FILES_START: "show in file
+    // manager", and the check suite) still comes back with the tabs you had
+    // open -- asked 2026-10-28: opening Files at a folder used to start from a
+    // single fresh chip and show none of them, which read as "it added a new
+    // tab and threw mine away". restoreTabs handles that launch like any
+    // other; what the request must never do is write, because a reveal must
+    // not turn its own folder (or the suite's scratch path) into a saved tab.
+    //
+    // Decoupled from tabsAvailable (2026-10-27): the dialog SHOWS the tabs
+    // now but only the file manager WRITES them. A portal folder chosen
+    // through the dialog must never become the tabs the app restores, and
+    // neither must a reveal launch -- the II_FILES_START guard is older and
+    // for the same reason.
+    readonly property bool persistTabs: !root.pickerMode
+        && (Quickshell.env("II_FILES_START") ?? "").length === 0
+    // The guard on saving: false until the saved set has been read (or
+    // decided absent), so the default tab seeded in Component.onCompleted
+    // cannot overwrite the real tabs while the state file is still loading.
+    property bool tabsRestored: false
+    onTabsChanged: root.saveTabs()
+    onActiveTabChanged: root.saveTabs()
 
     // ── The rows on screen ──────────────────────────────────────────────
     //
@@ -948,6 +989,46 @@ Item {
                     root.firstLine(shellProc.output) || root.volumeLabelOf(payload), true);
             return;
         }
+        // The adopted desktop clipboard arrived: paste it through the normal
+        // path. Kept as its own mode rather than folded into "paste" because
+        // this one CONTINUES a paste (a second sh() from inside onExited is
+        // legal -- the process has already exited) while "paste" ENDS one.
+        if (mode === "paste-adopt") {
+            const dest = String(root.pendingPasteDest ?? "");
+            root.pendingPasteDest = "";
+            const list = root.parseAdoptedClipboard(String(shellProc.output ?? ""));
+            if (list.length === 0) {
+                // Nothing on the desktop clipboard either: the same quiet
+                // no-op an empty local list always gave, with the
+                // "Pasting…" status cleared rather than left hanging.
+                root.statusNote = "";
+                return;
+            }
+            root.clipboard = list;
+            root.pasteInto(dest.length > 0 ? dest : root.currentFolderPath());
+            return;
+        }
+        // Zip and unzip. The same shape as the mutations below -- clear the
+        // note, explain a failure, re-read the folder -- plus the row that was
+        // MADE is selected: the archive you just asked for is the thing you are
+        // reaching for next, and hunting for it in a long listing is a tax worth
+        // not paying. An extraction into the folder that was already open has no
+        // single row to point at (payload is empty), so it points at nothing
+        // rather than at a guess.
+        if (mode === "compress" || mode === "extract") {
+            root.statusNote = "";
+            if (code !== 0) {
+                root.notify(mode === "compress" ? Translation.tr("Could not compress")
+                                                : Translation.tr("Could not extract"),
+                    root.firstLine(shellProc.output), true);
+            } else if (String(payload ?? "").length > 0) {
+                root.pendingSelectName = root.baseName(payload);
+                pendingSelectTimer.attempts = 0;
+                pendingSelectTimer.restart();
+            }
+            root.refresh();
+            return;
+        }
         // Mutations land here: the listing has to be re-read, and a selection
         // that pointed at a name that just moved is dropped rather than left
         // pointing at nothing.
@@ -1084,6 +1165,11 @@ Item {
             return;
         }
         root.atThisPc = false;
+        // Where we are LEAVING, read before `path` moves. If the destination
+        // turns out to be this folder's parent, the folder itself is what the
+        // new listing should be pointing at -- see the reveal below.
+        const leaving = String(root.path ?? "");
+        const leftName = root.baseName(leaving);
         root.path = dest;
         // The folder being entered wears its OWN saved view, not the one the
         // folder we came from was wearing.
@@ -1094,6 +1180,24 @@ Item {
         root.anchorIndex = -1;
         root.statusNote = "";
         root.filter = "";
+        // ── Walking OUT leaves the folder selected behind you ────────────
+        // "Which one did I just come out of" is the question being asked the
+        // moment you go up, and an empty list with nothing selected answers it
+        // with nothing. So when the destination is the parent of the folder
+        // being left, that folder lands selected in the new listing and the
+        // list is scrolled to it once.
+        //
+        // Queued through pendingSelectTimer rather than selected here: the new
+        // folder's rows do not exist yet, and selecting an index against the
+        // OLD model is how a selection ends up on whatever row happens to sort
+        // into that slot. The timer waits for the listing and then selects and
+        // scrolls -- the same route a just-created file takes.
+        if (leftName.length > 0
+                && (dest.replace(/\/+$/, "") || "/") === root.dirName(leaving)) {
+            root.pendingSelectName = leftName;
+            pendingSelectTimer.attempts = 0;
+            pendingSelectTimer.restart();
+        }
         if (record !== false) {
             const next = root.history.slice(0, root.historyIndex + 1);
             if (next[next.length - 1] !== dest)
@@ -1394,9 +1498,112 @@ Item {
         root.activeTab = -1;
         root.applyTab(Math.max(0, Math.min(i, list.length - 1)));
     }
+    // ── Saving and restoring the tabs ──────────────────────────────────────
+    // Called from onTabsChanged/onActiveTabChanged: every new tab, close,
+    // switch and navigation rewrites the saved set, so the file on disk is
+    // never behind the window by more than the write debounce.
+    function saveTabs() {
+        if (!root.persistTabs || !root.tabsRestored) return;
+        Persistent.states.fileManagerTabs.paths = root.tabs.map(t => String(t.path ?? root.homeDir));
+        Persistent.states.fileManagerTabs.active = root.activeTab;
+    }
+    // Runs once, when the state file has arrived (or immediately, if it
+    // already had). tabsRestored is set FIRST: assigning the restored tabs
+    // fires onTabsChanged, and without the flag already up that save would
+    // write the default single tab over the set it is about to read.
+    function restoreTabs() {
+        // In the dialog this runs as a MIRROR (tabs shown, never written --
+        // saveTabs is barred from picker mode). A launch that named a folder
+        // restores as well, and is answered inside the set it comes back with
+        // (see the tail of this function); only WRITING is refused there.
+        if (root.tabsRestored) return;
+        root.tabsRestored = true;
+        const saved = Persistent.states.fileManagerTabs;
+        const paths = (saved?.paths ?? []).filter(p => typeof p === "string" && p.length > 0);
+        if (paths.length === 0) return;
+        const restored = paths.map(p => ({
+            path: p,
+            atThisPc: p === root.thisPc,
+            history: [p],
+            historyIndex: 0,
+            selection: []
+        }));
+        if (root.pickerMode) {
+            // The dialog's own view -- wherever the portal pointed it -- JOINS
+            // the mirrored set instead of being replaced by it: it is one of
+            // the file manager's tabs when it is one (that index goes
+            // active), and an extra local tab at the end when it is not. No
+            // applyTab here: the view is already ON that folder, so this only
+            // tells the strip which chip is lit -- navigating to where it
+            // already stands would rebuild the listing for nothing.
+            const norm = s => String(s ?? "").replace(/\/+$/, "");
+            const here = root.tabSnapshot();
+            let idx = restored.findIndex(t => norm(t.path) === norm(here.path));
+            if (idx < 0) {
+                restored.push(here);
+                idx = restored.length - 1;
+            }
+            root.tabs = restored;
+            root.activeTab = idx;
+            return;
+        }
+        root.tabs = restored;
+        const active = Math.max(0, Math.min(Number(saved?.active ?? 0), root.tabs.length - 1));
+        // ── Where a launch that NAMED a folder lands ─────────────────────
+        // Inside the set it just restored, never on top of it (asked
+        // 2026-10-28): the folder a launch was pointed at, if it is one of the
+        // tabs, is simply SELECTED; if it is not, the tab that would have been
+        // open goes there. Either way the strip does not grow -- opening Files
+        // must not hand you a new chip beside the ones you already had.
+        const want = root.launchFolder;
+        if (want.length === 0) {
+            root.applyTab(active);
+            return;
+        }
+        const norm = s => String(s ?? "").replace(/\/+$/, "");
+        const named = norm(want);
+        const at = restored.findIndex(t => t.atThisPc
+            ? named === norm(root.thisPc)
+            : norm(t.path) === named);
+        if (at >= 0) {
+            root.applyTab(at);
+            return;
+        }
+        root.applyTab(active);
+        // The open tab follows the request, as an ordinary navigation (Back
+        // returns to the folder that tab was at). Nothing is saved in a launch
+        // like this -- persistTabs is false -- so the tab set on disk is not
+        // touched by it.
+        root.navigateTo(want);
+    }
     function pickerNavigate(p) {
-        if (String(p ?? "").length > 0)
-            root.navigateTo(p);
+        if (String(p ?? "").length === 0) return;
+        // The portal's folder joins the dialog's mirrored tabs whenever it
+        // arrives -- restoreTabs may run before the job file or after it,
+        // and both orders end in the same place: already a tab of the set ->
+        // it goes active; a folder the file manager does not have -> it is
+        // appended as the dialog's own tab and activated. Local either way:
+        // nothing is written back from picker mode.
+        if (root.pickerMode) {
+            const norm = s => String(s ?? "").replace(/\/+$/, "");
+            const want = norm(p);
+            let idx = root.tabs.findIndex(t => norm(t.path) === want);
+            if (idx < 0) {
+                root.tabs = root.tabs.concat([{
+                    path: p,
+                    atThisPc: p === root.thisPc,
+                    history: [p],
+                    historyIndex: 0,
+                    selection: []
+                }]);
+                root.applyTab(root.tabs.length - 1);
+                return;
+            }
+            if (idx !== root.activeTab) root.applyTab(idx);
+            else root.navigateTo(p);
+            return;
+        }
+        root.navigateTo(p);
     }
 
     // ── Volumes ─────────────────────────────────────────────────────────
@@ -3177,11 +3384,94 @@ Item {
             + `if [ -e "$target" ]; then stem="${'$'}{base%.*}"; ext="${'$'}{base##*.}"; `
             + `if [ "$stem" = "$base" ]; then ext=""; else ext=".$ext"; fi; `
             + `target="$dst/$stem - copy$ext"; i=2; while [ -e "$target" ]; do target="$dst/$stem - copy ($i)$ext"; i=$((i+1)); done; fi; `
-            + `${verb} "$src" "$target"`;
+            // A DIRECTORY is not something gio will copy or move: both verbs
+            // answer "Can't recursively copy directory" and do nothing, which
+            // is why Ctrl+V of a folder onto another drive looked like no paste
+            // at all (measured 2026-10-28 on /home -> the NTFS SSD). A folder
+            // is handled by cp -a (recursive, keeps timestamps and modes where
+            // the filesystem allows them), and a MOVE deletes the source only
+            // after the copy has succeeded -- `&&` is the guard, so a
+            // half-copied folder is never removed. On the same filesystem mv
+            // is used instead: it is a rename, and duplicating the tree first
+            // would be pointless work.
+            + `if [ -d "$src" ]; then `
+            + `if [ "$(stat -c %d -- "$src" 2>/dev/null)" = "$(stat -c %d -- "$dst" 2>/dev/null)" ]; then `
+            + `mv -- "$src" "$target"; `
+            + `else cp -a -- "$src" "$target"`
+            + (move ? ` && rm -rf -- "$src"` : ``)
+            + `; fi; `
+            + `else ${verb} "$src" "$target"; fi`;
+    }
+    // Where a paste that had to adopt the DESKTOP clipboard is aimed. Set
+    // before the read starts: the read is asynchronous (one sh()) and the
+    // folder on screen can change while it runs, so the destination is
+    // carried in a property rather than re-read afterwards.
+    property string pendingPasteDest: ""
+    // The desktop's file clipboard, parsed into this window's own list.
+    //
+    // Both formats a file copy can carry are read in ONE shell line: the GTK
+    // flavour first -- it carries the ACTION ("copy" or "cut"), which the URI
+    // list does not -- then text/uri-list, which every app that publishes files
+    // offers. The cut flag is only trusted from the GTK flavour: a URI-list
+    // paste is always treated as a copy, because moving another app's source
+    // without being asked destroys it.
+    function parseAdoptedClipboard(text) {
+        const lines = String(text ?? "").split("\n");
+        let section = "";
+        let cut = false;
+        let gnomeActionSeen = false;
+        const paths = [];
+        // BOTH flavours describe the SAME selection -- the gnome flavour and
+        // the uri-list are two spellings of one copy -- so a file seen once is
+        // already pasted. Without this the paste ran twice per file (the
+        // second run then collided with the first and produced the "- copy"
+        // twin), measured with a single-file copy pasting two entries.
+        const seen = {};
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].replace(/\r$/, "");
+            if (line === "##GNOME##") { section = "g"; continue; }
+            if (line === "##URIS##") { section = "u"; continue; }
+            if (line.length === 0) continue;
+            if (section === "g" && !gnomeActionSeen) {
+                gnomeActionSeen = true;
+                cut = line.trim() === "cut";
+                continue;
+            }
+            if (line.startsWith("file://")) {
+                let path = line.substring(7);
+                // uri_for percent-encodes per segment; decoding restores the
+                // name exactly. A malformed escape throws in decodeURI, which
+                // is why this is guarded -- one bad line must not drop the
+                // other files on the clipboard.
+                try { path = decodeURIComponent(path); } catch (e) {}
+                if (path.length > 0 && !seen[path]) {
+                    seen[path] = true;
+                    paths.push(path);
+                }
+            }
+        }
+        return paths.map(p => ({ path: p, cut: cut }));
     }
     function pasteInto(dir) {
         const dest = String(dir ?? root.currentFolderPath());
-        if (root.clipboard.length === 0) return;
+        if (root.clipboard.length === 0) {
+            // Not this window's clipboard -- adopt the DESKTOP's. Every launch
+            // is its own process, so a copy made in ANOTHER Files window (or
+            // in any other app, since copies are published as text/uri-list by
+            // scripts/system/file-clipboard.py) is not in `root.clipboard`,
+            // and Ctrl+V used to do NOTHING in a freshly opened window: the
+            // shortcut itself was disabled on the empty local list. "Copy over
+            // there on the other drive, paste in here" is exactly the
+            // cross-drive flow this window was asked for, so the local list is
+            // a cache rather than the source of truth: an empty cache reads
+            // the desktop's list first and then pastes through the same path.
+            root.pendingPasteDest = dest;
+            root.statusNote = Translation.tr("Pasting") + "…";
+            root.sh("echo '##GNOME##'; wl-paste --no-newline --type x-special/gnome-copied-files 2>/dev/null; "
+                + "echo '##URIS##'; wl-paste --no-newline --type text/uri-list 2>/dev/null",
+                "paste-adopt", dest);
+            return;
+        }
         const cmds = root.clipboard.map(c => root.transferCommand(c.path, dest, c.cut));
         // A cut is consumed by the paste; a copy stays on the clipboard, which
         // is what makes "paste three times" work.
@@ -3371,10 +3661,11 @@ Item {
         return [
             ...root.createMenuItems(),
             root.sep(),
-            { id: "paste", label: Translation.tr("Paste"), icon: "content_paste", enabled: root.clipboard.length > 0 },
+            { id: "paste", label: Translation.tr("Paste"), icon: "content_paste", enabled: true },
             { id: "selectAll", label: Translation.tr("Select all"), icon: "select_all", enabled: true },
             { id: "newTab", label: Translation.tr("Open in new tab"), icon: "tab", enabled: root.tabsAvailable && !root.atThisPc },
             { id: "newWindowTab", label: Translation.tr("New tab"), icon: "add", enabled: root.tabsAvailable },
+            { id: "pinFolder", label: root.isPinnedFolder(root.currentFolderPath()) ? Translation.tr("Unpin from sidebar") : Translation.tr("Pin to sidebar"), icon: "push_pin", enabled: !root.pickerMode && !root.atThisPc },
             root.sep(),
             { id: "sortName", label: Translation.tr("Sort by name"), icon: "sort_by_alpha", enabled: true },
             { id: "sortTime", label: Translation.tr("Sort by date modified"), icon: "schedule", enabled: true },
@@ -3394,16 +3685,25 @@ Item {
     }
     function entryMenu(p) {
         const isDir = root.isDirPath(p);
+        const isZip = root.isArchiveFile(p);
         return [
             { id: "open", label: Translation.tr("Open"), icon: "open_in_new", enabled: true },
             // Files only: "open a folder WITH something" is not a thing, and the
             // row would be a dead one under every right-click on a directory.
             { id: "openWith", label: Translation.tr("Open with…"), icon: "apps", enabled: !isDir },
             { id: "openTab", label: Translation.tr("Open in new tab"), icon: "tab", enabled: isDir && root.tabsAvailable },
+            { id: "pinFolder", label: root.isPinnedFolder(p) ? Translation.tr("Unpin from sidebar") : Translation.tr("Pin to sidebar"), icon: "push_pin", enabled: isDir && !root.pickerMode },
             root.sep(),
             { id: "cut", label: Translation.tr("Cut"), icon: "content_cut", enabled: true },
             { id: "copy", label: Translation.tr("Copy"), icon: "content_copy", enabled: true },
-            { id: "pasteInto", label: Translation.tr("Paste into folder"), icon: "content_paste", enabled: isDir && root.clipboard.length > 0 },
+            { id: "pasteInto", label: Translation.tr("Paste into folder"), icon: "content_paste", enabled: isDir },
+            // Zip sits next to the copy rows it belongs with: the same set the
+            // menu acts on is the set that goes into the archive, and a folder
+            // is as compressible as a file. Extract is a zip's own row and only
+            // a zip's -- a greyed "Extract" under every other file is furniture.
+            { id: "compress", label: Translation.tr("Compress to .zip"), icon: "folder_zip", enabled: !root.atThisPc },
+            { id: "extractHere", label: Translation.tr("Extract here"), icon: "folder_open", enabled: isZip },
+            { id: "extractToFolder", label: Translation.tr("Extract to folder"), icon: "create_new_folder", enabled: isZip },
 
             // Rename names ONE thing: greyed over a multi-selection rather
             // than renaming only the row under the pointer (see menuTargets).
@@ -3570,10 +3870,19 @@ Item {
         case "openTab": if (target) root.newTab(target); break;
         case "newTab": if (target) root.newTab(target); break;
         case "newWindowTab": root.newTab(""); break;
+        // The empty-space menu has no target, so it pins the folder on
+        // screen; a row's menu pins the row's own folder.
+        case "pinFolder": root.togglePinFolder(target.length > 0 ? target : root.currentFolderPath()); break;
         case "newFolder": root.newFolder(); break;
         case "newFile": root.newFile(); break;
         case "paste": root.pasteInto(root.currentFolderPath()); break;
         case "pasteInto": if (target) root.pasteInto(target); break;
+        case "compress": root.compressSelection(root.menuTargets(target)); break;
+        // One archive at a time: extracting a multi-selection into one folder
+        // would have to answer "which archive won" for two files with the same
+        // name, so the row acts on the zip the pointer is on.
+        case "extractHere": if (root.isArchiveFile(target)) root.extractArchive(target, false); break;
+        case "extractToFolder": if (root.isArchiveFile(target)) root.extractArchive(target, true); break;
         case "selectAll": root.selectAll(); break;
         case "viewDetails": root.setViewMode("details"); break;
         case "viewTiles": root.setViewMode("tiles"); break;
@@ -3621,6 +3930,71 @@ Item {
     function setSort(field) {
         if (root.sortField === field) root.sortReversed = !root.sortReversed;
         else root.sortField = field;
+    }
+
+    // ── Zip and unzip ────────────────────────────────────────────────────
+    //
+    // Compressing takes the same SET the menu acts on (see menuTargets), so
+    // four selected rows make one archive instead of whichever row the pointer
+    // happened to be over. A folder goes in AS a folder -- the archive holds
+    // its tree, not a flattened copy of it -- because that is the only reading
+    // of "zip this folder" that survives being unpacked.
+    //
+    // What runs is `bsdtar -a -cf x.zip -- a b`. `zip` itself is not installed
+    // on this machine; libarchive writes a plain, portable zip from the suffix
+    // and `unzip` (Info-ZIP) reads it, which is the reader every other system
+    // has too. Names are passed as BASE NAMES from inside the folder, so no
+    // path above it can leak into the archive, and each is quoted on its own
+    // because a name with a space in it is not two names.
+    function isArchiveFile(p) {
+        return String(p ?? "").length > 0 && !root.isDirPath(p) && root.suffixOf(p) === "zip";
+    }
+    // What the archive is called: the folder's own name, the file's stem, or
+    // the name of the folder you are in when several things go in at once. The
+    // unique-name walk is the one New file uses, so "photos.zip" over an
+    // existing "photos.zip" is "photos (2).zip" rather than a silent replace.
+    function archiveNameFor(paths) {
+        const list = paths ?? [];
+        const here = root.currentFolderPath();
+        let stem = "";
+        if (list.length === 1) {
+            const one = String(list[0] ?? "");
+            stem = root.isDirPath(one) ? root.baseName(one) : root.stemOf(root.baseName(one));
+        }
+        if (stem.length === 0) stem = root.baseName(here);
+        return (stem.length > 0 ? stem : Translation.tr("Archive")) + ".zip";
+    }
+    function compressSelection(paths) {
+        const list = (paths ?? []).filter(p => String(p ?? "").length > 0);
+        const here = root.currentFolderPath();
+        if (list.length === 0 || root.atThisPc || here.length === 0) return;
+        const target = root.uniqueName(here, root.archiveNameFor(list));
+        const archive = target.slice(target.lastIndexOf("/") + 1);
+        const names = list.map(p => root.shq(root.baseName(p))).join(" ");
+        root.statusNote = Translation.tr("Compressing…");
+        root.sh("cd " + root.shq(here) + " && bsdtar -a -cf " + root.shq(archive) + " -- " + names,
+                "compress", target);
+    }
+    // Unpacking. "Here" writes into the folder on screen; "to folder" makes one
+    // named after the archive first, which is what an archive of a folder's
+    // CONTENTS needs -- those would otherwise land loose among your files.
+    // `unzip -o -q` answers an existing file instead of stopping to ask a
+    // question nobody is reading, and it refuses the "../" entries an archive
+    // uses to write outside the folder it was pointed at.
+    function extractArchive(p, intoOwnFolder) {
+        const archive = String(p ?? "");
+        if (archive.length === 0) return;
+        const here = root.currentFolderPath();
+        let dest = here;
+        if (intoOwnFolder) {
+            const stem = root.stemOf(root.baseName(archive));
+            dest = root.uniqueName(here, stem.length > 0 ? stem : Translation.tr("Extracted"));
+        }
+        root.statusNote = Translation.tr("Extracting…");
+        // The payload is what LANDS on screen: the new folder when one was made,
+        // nothing when the archive was unpacked into the folder already open.
+        root.sh("mkdir -p " + root.shq(dest) + " && unzip -o -q " + root.shq(archive) + " -d " + root.shq(dest),
+                "extract", intoOwnFolder ? dest : "");
     }
 
     // ── The name prompt: rename, and the name a new file or folder gets ──
@@ -4452,6 +4826,19 @@ Item {
         contentGrid.width - contentGrid.columnSpacing - root.fileListMinWidth)
     readonly property int previewPaneMaxHeight: Math.max(root.previewMinHeight,
         contentGrid.height - contentGrid.rowSpacing - root.fileListMinHeight)
+    // What the pane is DRAWN at when the saved size no longer fits: the live
+    // ceiling, applied at the LAYOUT (the two bindings on previewCard below),
+    // never to the property itself. contentGrid is the box the panes are laid
+    // out in, and a pane bigger than that box draws past the window's own
+    // bottom (over the status bar), leaves the divider band where no drag can
+    // start, and puts probeLayout in a spot where it cannot say whether the
+    // pane is beside or under the list (it answers "nowhere") -- measured
+    // 2026-10-27: a saved 390 in a 620-wide window whose ceiling was 306. The
+    // stored size is the user's preference: a temporarily narrow window must
+    // not destroy it, so the drawn box clamps down for as long as it has to
+    // and grows back to the stored size when the window does -- the same
+    // reasoning as previewClamp's own ceiling in a drag, only here it is a
+    // question of pixels, not of what gets written down.
     readonly property int commandBarHeight: 40
     // Quiet lock: the header reads the way the lock screen does -- the micro
     // row (nav, crumbs, search) first, the folder's name at quietTitlePx under
@@ -4473,12 +4860,265 @@ Item {
     // have all to itself, and without it the name read as hanging off the path
     // box -- the "title spacing" that was wrong.
     readonly property int addressBarHeight: 26 + 8 + 48
+    // The strip's own bottom edge to the bar's rectangle: where the tab
+    // baseline hairline hangs (see tabBaseline in the address bar). ONE name
+    // for both, so the line can never drift away from the margin it marks.
+    readonly property int addressBarTopMargin: 6
     readonly property int statusBarHeight: 26
 
     // ── The window ──────────────────────────────────────────────────────
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
+
+        // ── Tab strip ─────────────────────────────────────────────────
+        // The browser's row, at the very top of the window and ALWAYS there.
+        // It used to sit in the command bar and only appear once there were
+        // two tabs -- a strip that shows up on the second tab is a strip
+        // nobody finds, which is how tabs stayed undiscoverable.
+        //
+        // One chip per folder, titled with the folder's name: left-click
+        // switches, middle- or right-click closes, as in a browser. The lane
+        // clips and flicks sideways instead of pushing the "+" off the window
+        // when tabs pile up; the "+" is the next tab (newTab, the folder on
+        // screen). It is in the file-open dialog as well (tabsAvailable is
+        // unconditional since the dialog was asked to mirror the set); what
+        // the dialog does not do is persist them -- see persistTabs.
+        RowLayout {
+            id: tabStrip
+            visible: root.tabsAvailable
+            Layout.fillWidth: true
+            // A bit of air above the strip (asked 2026-10-27): at 8 the chips
+            // read as part of the window's frame rather than as their own row.
+            Layout.topMargin: 12
+            Layout.leftMargin: 6
+            Layout.rightMargin: 6
+            spacing: 4
+
+            Flickable {
+                id: tabLane
+                Layout.fillWidth: true
+                Layout.preferredHeight: 26
+                contentWidth: Math.max(width, tabsRow.implicitWidth)
+                contentHeight: 26
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                flickableDirection: Flickable.HorizontalFlick
+                Row {
+                    id: tabsRow
+                    spacing: 4
+                    Repeater {
+                        // Named so the bridge in the address bar can find the
+                        // chip: itemAt(index) is the DELEGATE. tabsRow.children
+                        // is not -- children[0] is this Repeater itself (an Item
+                        // of no size, parented to the Row like any other), so
+                        // the old lookup handed the bridge a zero-width box and
+                        // it never drew once.
+                        id: tabsRepeater
+                        model: root.tabs
+                        delegate: Rectangle {
+                            required property var modelData
+                            required property int index
+                            // implicitHeight, not Layout.preferredHeight:
+                            // this Row is a plain Row inside the lane, and a
+                            // plain Row sizes its children from their
+                            // implicit size.
+                            implicitHeight: 26
+                            // 35, not 26: the title's wall has to clear the
+                            // close glyph by a real gap (8 left + title + 8 of
+                            // air + the 13 px glyph + 6 right). At 26 the text
+                            // ended one pixel from the X's left edge and the
+                            // two read as one run of characters.
+                            implicitWidth: Math.min(150, tabText.implicitWidth + 39)
+                            radius: Appearance.rounding.small
+                            // Tabs you can SEE (asked 2026-10-27, corrected the
+                            // same day, and re-based the next): alternating DARK
+                            // shades, mixed from the surface the chips have to
+                            // be darker THAN -- which is the window's own grey,
+                            // colTerminalSurfaceSolid (#141414 in dark), the
+                            // grey this app paints. Not colLayer0: that is the
+                            // shell's layer colour (#0A0A0A), and a mix toward
+                            // black from it lands at #03-#06 on a #141414
+                            // window -- five levels of difference between the
+                            // chips and between them and the surface, which is
+                            // how they came out invisible and, worse, how the
+                            // open folder came out indistinguishable from the
+                            // closed ones (active was #060606 against #050505).
+                            //
+                            // ColorUtils.mix(c1, c2, p) is p of c1, so black is
+                            // the first argument and p is the share of black:
+                            // 0.35 for even tabs (#0D0D0D) and 0.62 for odd
+                            // (#070707).
+                            //
+                            // The open folder wears THE BAR'S OWN COLOUR
+                            // (asked 2026-10-28, in place of the dark chip that
+                            // reached down into the toolbar). That is the whole
+                            // of the integration: the chip, the hairline under
+                            // it (erased for that span) and the address bar
+                            // below are one continuous surface, exactly like a
+                            // browser's active tab, with no block descending
+                            // over the toolbar.
+                            //
+                            // It is the WINDOW's surface -- colTerminalSurfaceSolid,
+                            // what winBg paints -- and not a lighter step of the
+                            // chip shade: a mix toward white would read as a lit
+                            // chip floating on the row (which the earlier
+                            // attempt at a lighter active tab did), while the
+                            // window's own colour reads as a hole in the strip
+                            // that the toolbar shows through.
+                            // What still says "open" when the bar behind the
+                            // chips is a different colour: the bar on its LEFT
+                            // and the bottom squared flat onto the baseline.
+                            //
+                            // No applyAlpha here: the window behind these chips
+                            // is OPAQUE (winBg in filemanager.qml), so a 0.92
+                            // chip only ever blended with the surface it is
+                            // drawn on -- the same colour, at the cost of an
+                            // off-by-scale step.
+                            readonly property color tabSurface: Appearance.colors.colTerminalSurfaceSolid
+                            readonly property color tabShade: CF.ColorUtils.mix(
+                                "#000000", tabSurface, index % 2 === 0 ? 0.35 : 0.62)
+                            readonly property bool tabActive: index === root.activeTab
+                            // Whatever the alternation gives this chip is what
+                            // it keeps when it becomes the open one: a tab is
+                            // not a status light. (Hover stays a hover -- the
+                            // bridge below reads this very property, so the
+                            // join follows even that.)
+                            // The open chip IS the toolbar's colour and keeps
+                            // it under the pointer: a hover lift here would
+                            // break the one continuous surface that makes it
+                            // read as open. The closed chips keep their hover.
+                            color: tabActive
+                                ? tabSurface
+                                : (tabHover.containsMouse
+                                    ? CF.ColorUtils.mix(Appearance.colors.colOnLayer0, tabShade, 0.14)
+                                    : tabShade)
+                            // A tab title is cut at the tab's own wall: the
+                            // 150 px cap is the tab's width, and the title stops
+                            // there (elided) instead of running on through the
+                            // close glyph and the next tab -- MEASURED before
+                            // this: a 124 px slot painting 381 px at 0.3
+                            // opacity, over two other tabs and the "+".
+                            // Squares the chip's BOTTOM: a Rectangle rounds
+                            // all four corners, and a browser tab is round on
+                            // top and flat where it meets the line. This
+                            // fills the two bottom corner arcs with the chip's
+                            // own colour, so the bottom edge runs straight
+                            // into the baseline instead of hovering over it
+                            // with rounded feet.
+                            Rectangle {
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.bottom: parent.bottom
+                                height: Appearance.rounding.small
+                                color: parent.color
+                            }
+                            CutLabel {
+                                id: tabText
+                                anchors.left: parent.left
+                                // 12, not 8: the open tab's bar lives down the
+                                // left edge now, and the title needs air between
+                                // itself and it. The same 12 on EVERY chip, so a
+                                // tab's width does not jump when it is the one
+                                // that is open.
+                                anchors.leftMargin: 12
+                                anchors.verticalCenter: parent.verticalCenter
+                                // parent.width - 39 = 12 of left margin, 6 of
+                                // right, the 13 px glyph, and 8 px of AIR
+                                // between the title and the glyph -- the gap
+                                // that was asked for. The old -26 left the text
+                                // ending one pixel from the X, so a long name
+                                // ran straight into the close button.
+                                width: parent.width - 39
+                                text: root.tabLabel(modelData)
+                                font.pixelSize: Appearance.font.pixelSize.smaller
+                                color: Appearance.colors.colOnLayer0
+                            }
+                            MaterialSymbol {
+                                id: tabCloseGlyph
+                                anchors.right: parent.right
+                                anchors.rightMargin: 6
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: "close"
+                                iconSize: 13
+                                // The glyph stays on the neutral tone for every
+                                // chip -- the open one is told apart by its bar
+                                // and its join to the bar below, not by
+                                // recolouring its furniture. Under the pointer
+                                // it brightens instead, because it is a real
+                                // target now (see tabClose).
+                                color: tabClose.containsMouse
+                                    ? Appearance.colors.colOnLayer0
+                                    : Appearance.m3colors.m3outline
+                            }
+                            // The open tab's one accent: a bar down the LEFT
+                            // edge, asked 2026-10-27 in place of the one along
+                            // the top. It is held off both ends (5 px of air
+                            // above and below, and 4 px of air in front of the
+                            // title beyond that) so it reads as a mark beside
+                            // the name rather than as the chip's own edge.
+                            //
+                            // It is the whole of the difference now that the
+                            // open folder keeps the shade it would have had
+                            // closed -- this, the flat bottom on the line, and
+                            // the curve below it into the bar.
+                            Rectangle {
+                                visible: root.tabsAvailable && tabActive
+                                anchors.left: parent.left
+                                anchors.leftMargin: 4
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 3
+                                // 26 - 10: the chip's own height less 5 px of
+                                // air at each end, never so short that it reads
+                                // as a dot.
+                                height: Math.max(6, parent.height - 10)
+                                radius: 1.5
+                                color: Appearance.colors.colPrimary
+                            }
+                            MouseArea {
+                                id: tabHover
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: mouse => {
+                                    if (mouse.button === Qt.LeftButton) root.selectTab(index);
+                                    else root.closeTab(index);
+                                }
+                            }
+                            // ── The X, which had no click of its own ──────────
+                            // The chip's MouseArea covers the WHOLE chip, so a
+                            // click on the close glyph was a left click on the
+                            // tab -- it selected the tab it was meant to close,
+                            // and the X read as decoration. This is that
+                            // target: a band down the right edge, drawn last so
+                            // it takes the click before the chip does (later
+                            // siblings are on top), wide enough to hit without
+                            // aiming and clear of the title's wall (the text
+                            // stops 39 px from the right, this band starts 24).
+                            // The last tab is still refused by closeTab -- there
+                            // would be nothing left on screen.
+                            MouseArea {
+                                id: tabClose
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                anchors.bottom: parent.bottom
+                                width: 24
+                                hoverEnabled: true
+                                acceptedButtons: Qt.LeftButton
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.closeTab(index)
+                            }
+                        }
+                    }
+                }
+            }
+            // Capped at the lane's own height: an unconstrained button can
+            // make the row taller than the chips, the row then centres them,
+            // and a centred chip has air under it -- which is exactly the
+            // floating the baseline was asked to fix.
+            IconButton { id: newTabBtn; symbol: "add"; tip: Translation.tr("New tab"); visible: root.tabsAvailable; Layout.maximumHeight: 26; onActivated: root.newTab("") }
+        }
 
         // ── Address bar ────────────────────────────────────────────────
         Rectangle {
@@ -4489,7 +5129,14 @@ Item {
             // bottom of the header there is nothing pinning this row to the
             // window's top edge any more, and a path glued to it read as
             // cropped rather than as quiet.
-            Layout.topMargin: 10
+            //
+            // 6, was 10: the tab strip above asked for 4 more of top air, and
+            // the strip + this bar share a FIXED chrome budget -- the file
+            // list below is sized to the pixel (the scroll bar's "the folder
+            // that fits shows no hairline" assertion flips if the list loses
+            // even 4 px), so the 4 come out of here, where the bar still has
+            // its own air inside its 82 px.
+            Layout.topMargin: root.addressBarTopMargin
             Layout.leftMargin: 6
             Layout.rightMargin: 6
             radius: Appearance.rounding.small
@@ -4498,6 +5145,102 @@ Item {
             // rather than with a box.
             color: "transparent"
             FocusRing { area: "address" }
+
+            // ── The baseline the tabs sit on ────────────────────────
+            // A browser's tab bar is a LINE that the chips stand ON, not a
+            // strip of floating pills. The chips are squared flat at the
+            // bottom for it (the filler in the delegate); this draws the
+            // hairline across the address bar's top edge -- which IS the
+            // strip's bottom, six pixels of the bar's top margin apart --
+            // and the bridge below breaks it under the selected tab so that
+            // tab reads as open INTO the bar, the way a real browser joins
+            // its active tab to the toolbar. Anchored here rather than in
+            // the strip because a RowLayout positions every child it has,
+            // and the bridge needs a free x to track the tab by.
+            Rectangle {
+                id: tabBaseline
+                visible: root.tabsAvailable
+                anchors.bottom: parent.top
+                anchors.bottomMargin: root.addressBarTopMargin
+                // THE width. A Rectangle with no anchors and no size is 0 px
+                // wide, so the hairline this comment block describes was drawn
+                // as a zero-width rect at the right y -- invisible, which is
+                // most of why the chips read as floating over nothing. Its
+                // extent is the bar's own: the chips sit inside the same 6 px
+                // inset, so the line runs edge to edge under them.
+                anchors.left: parent.left
+                anchors.right: parent.right
+                height: 1
+                color: Appearance.colors.colOutlineVariant
+            }
+            Rectangle {
+                id: tabBridge
+                visible: false
+                anchors.bottom: parent.top
+                // ONE pixel: the hairline's own height. This used to be a 7 px
+                // box (the line plus the bar's 6 px of top air) that curved the
+                // chip down into the toolbar, and the report was that the open
+                // tab then "reached over" into the bar -- a dark tongue hanging
+                // over the address bar, which is not what a browser does. What
+                // it does is paint the tab in the toolbar's colour and erase
+                // the line under it, so the two are one surface. The chip is
+                // already that colour (see `color` above) and the 6 px of air
+                // under the line is the window's own surface, so the only thing
+                // left to do here is break the hairline for the chip's span.
+                anchors.bottomMargin: root.addressBarTopMargin
+                height: 1
+                x: 0
+                width: 0
+                // The colour IS the open chip's own, read off the delegate in
+                // a binding rather than assigned from updateTabBridge below:
+                // a property read of another item IS a dependency, so the join
+                // can never drift from the chip.
+                color: {
+                    const d = tabsRepeater.itemAt(root.activeTab);
+                    return d ? d.color : "transparent";
+                }
+            }
+            function updateTabBridge() {
+                // The selected chip's x-range, mapped into this bar's own
+                // coordinates (both boxes are the same fill-width,6 px-inset
+                // width, so the x's line up), clipped to the lane's visible
+                // span: flicked out of view, the break goes with it.
+                if (!root.tabsAvailable || root.activeTab < 0) {
+                    tabBridge.visible = false;
+                    return;
+                }
+                const d = tabsRepeater.itemAt(root.activeTab);
+                if (!d) { tabBridge.visible = false; return; }
+                const p = d.mapToItem(addressBar, 0, 0);
+                const l = tabLane.mapToItem(addressBar, 0, 0);
+                const x0 = Math.max(p.x, l.x);
+                const x1 = Math.min(p.x + d.width, l.x + tabLane.width);
+                if (x1 - x0 < 2) { tabBridge.visible = false; return; }
+                tabBridge.x = x0;
+                tabBridge.width = x1 - x0;
+                // (No colour here: tabBridge's is a binding on the delegate's
+                // own -- assigning it from a function would break the binding
+                // that keeps the join on the chip through a hover.)
+                tabBridge.visible = true;
+            }
+            Connections {
+                target: tabLane
+                function onContentXChanged() { addressBar.updateTabBridge() }
+                function onWidthChanged() { addressBar.updateTabBridge() }
+            }
+            Connections {
+                target: root
+                function onActiveTabChanged() { addressBar.updateTabBridge() }
+                function onTabsChanged() { addressBar.updateTabBridge() }
+            }
+            Connections {
+                // A chip's own width moves with its title (a rename, a longer
+                // folder name) and every tab before it shifts when one closes:
+                // the bridge tracks the ROW's extent, not only the tab list.
+                target: tabsRow
+                function onChildrenRectChanged() { addressBar.updateTabBridge() }
+            }
+            Component.onCompleted: Qt.callLater(addressBar.updateTabBridge)
 
             ColumnLayout {
             anchors.fill: parent
@@ -4941,7 +5684,10 @@ Item {
                 QuietCommand {
                     label: Translation.tr("Paste")
                     tip: Translation.tr("Paste")
-                    enabled: root.clipboard.length > 0
+                    // Always enabled: the desktop clipboard is adopted on
+                    // demand (see pasteInto), so the local list is no longer
+                    // what decides whether a paste can happen at all.
+                    enabled: true
                     visible: !root.pickerMode
                     onActivated: root.pasteInto(root.currentFolderPath())
                 }
@@ -5032,63 +5778,10 @@ Item {
                     onActivated: root.showHidden = !root.showHidden
                 }
                 Item { Layout.fillWidth: true }
-                // Tabs, once there is more than one: the strip is what makes
-                // them discoverable and is where they are closed (middle-click
-                // or right-click, as in a browser).
-                RowLayout {
-                    visible: root.tabsAvailable && root.tabs.length > 1
-                    spacing: 4
-                    Repeater {
-                        model: root.tabs
-                        delegate: Rectangle {
-                            required property var modelData
-                            required property int index
-                            Layout.preferredHeight: 26
-                            implicitWidth: Math.min(150, tabText.implicitWidth + 26)
-                            radius: Appearance.rounding.small
-                            color: index === root.activeTab
-                                ? CF.ColorUtils.transparentize(Appearance.colors.colPrimary, 0.78)
-                                : (tabHover.containsMouse
-                                    ? CF.ColorUtils.transparentize(Appearance.colors.colOnLayer0, 0.88) : "transparent")
-                            // A tab title is cut at the tab's own wall: the
-                            // 150 px cap is the tab's width, and the title stops
-                            // there (elided) instead of running on through the
-                            // close glyph and the next tab -- MEASURED before
-                            // this: a 124 px slot painting 381 px at 0.3
-                            // opacity, over two other tabs and the "+".
-                            CutLabel {
-                                id: tabText
-                                anchors.left: parent.left
-                                anchors.leftMargin: 8
-                                anchors.verticalCenter: parent.verticalCenter
-                                width: parent.width - 26
-                                text: root.tabLabel(modelData)
-                                font.pixelSize: Appearance.font.pixelSize.smaller
-                                color: Appearance.colors.colOnLayer0
-                            }
-                            MaterialSymbol {
-                                anchors.right: parent.right
-                                anchors.rightMargin: 6
-                                anchors.verticalCenter: parent.verticalCenter
-                                text: "close"
-                                iconSize: 13
-                                color: Appearance.m3colors.m3outline
-                            }
-                            MouseArea {
-                                id: tabHover
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: mouse => {
-                                    if (mouse.button === Qt.LeftButton) root.selectTab(index);
-                                    else root.closeTab(index);
-                                }
-                            }
-                        }
-                    }
-                }
-                IconButton { id: newTabBtn; symbol: "add"; tip: Translation.tr("New tab"); visible: root.tabsAvailable; onActivated: root.newTab("") }
+                // The tabs moved to their own strip at the very top of the
+                // window (2026-10-27, requested: browser-style tabs always
+                // visible with a "+" to add). The strip is one row above the
+                // address bar now; this row keeps only its spacer.
             }
         }
 
@@ -5123,6 +5816,35 @@ Item {
                         id: navColumn
                         width: parent.width
                         spacing: 2
+
+                        // ── Pinned ────────────────────────────────────────
+                        // Folders pinned from their own menu ("Pin to
+                        // sidebar"). Above Quick access because a pin is a
+                        // choice and the built-in list is not: the rail
+                        // opens with what you put there. The heading waits
+                        // for the first pin -- a heading with nothing under
+                        // it is not a section.
+                        NavHeading {
+                            visible: root.pinnedPlaces.length > 0
+                            text: Translation.tr("Pinned")
+                        }
+                        Repeater {
+                            id: pinnedRepeater
+                            model: root.pinnedPlaces
+                            delegate: NavRow {
+                                id: pinnedRow
+                                required property var modelData
+                                label: root.pinnedLabel(modelData)
+                                symbol: "folder"
+                                path: modelData
+                                active: !root.atThisPc && root.folderPath === modelData
+                                onActivated: root.navigateTo(modelData)
+                                // Right-click: the folder's OWN menu, the
+                                // same one a row in the pane gets -- Unpin is
+                                // one of its rows, next to Open in new tab.
+                                onContextRequested: (x, y) => root.openMenuAt(pinnedRow, x, y, modelData)
+                            }
+                        }
 
                         NavHeading { text: Translation.tr("Quick access") }
                         Repeater {
@@ -6091,8 +6813,10 @@ Item {
                 Rectangle {
                     id: previewCard
                     Layout.preferredWidth: visible
-                        ? (root.previewBelow ? contentGrid.width : root.previewPaneWidth) : 0
-                    Layout.preferredHeight: (visible && root.previewBelow) ? root.previewStackHeight : 0
+                        ? (root.previewBelow ? contentGrid.width
+                            : Math.min(root.previewPaneWidth, root.previewPaneMaxWidth)) : 0
+                    Layout.preferredHeight: (visible && root.previewBelow)
+                        ? Math.min(root.previewStackHeight, root.previewPaneMaxHeight) : 0
                     Layout.fillWidth: root.previewBelow
                     Layout.fillHeight: !root.previewBelow
                     visible: root.previewPane && !root.pickerMode
@@ -7249,10 +7973,36 @@ Item {
     }
 
     // ── Rename dialog (preselected, Enter commits, Escape cancels) ──────
+    //
+    // How wide the name box would have to be for the name it is holding to FIT.
+    // The field itself cannot answer this: a TextInput reports the width it was
+    // HANDED, not the width its text wants, so a dialog sized for "notes.txt"
+    // believes a sixty-character download name fits in it too -- and then scrolls
+    // that name out of its own box, painting the rest over the frame and across
+    // the list behind the dialog. Measured here, from the same string in the same
+    // font, so the box can be given the room instead.
+    TextMetrics {
+        id: renameNameMetrics
+        font.family: Appearance.font.family.main
+        font.pixelSize: Appearance?.font.pixelSize.small ?? 15
+        text: String(root.renameDraft ?? "")
+    }
+    // 28 is the popup's own padding (14 a side), 16 the name field's text
+    // margins, 6 the gap to the extension box, 92 that box. Capped at the window
+    // so a pathological name cannot grow the dialog off the screen -- and the
+    // field clips, so what is left over is cut at the frame rather than painted
+    // across the desktop.
+    function renamePromptWidth() {
+        const needed = 28 + 16 + 6 + Math.ceil(renameNameMetrics.advanceWidth)
+            + (root.renameExtShown ? 92 : 0);
+        const wanted = Math.max(380, needed);
+        const room = root.width - 40;
+        return room > wanted ? wanted : Math.max(380, room);
+    }
     Popup {
         id: renamePopup
         anchors.centerIn: parent
-        width: 380
+        width: root.renamePromptWidth()
         padding: 14
         visible: root.renaming
         modal: true
@@ -7286,6 +8036,13 @@ Item {
                     id: renameFieldFrame
                     Layout.fillWidth: true
                     Layout.preferredHeight: 30
+                    // The one place the name may NOT go past its box. A
+                    // TextInput keeps its cursor visible by scrolling its text,
+                    // and with clipping off (the default) the part that scrolled
+                    // out of the left edge is still painted -- outside the field,
+                    // outside the dialog, over whatever is behind it. A label cut
+                    // at its wall is the treatment every other label here uses.
+                    clip: true
                     radius: Appearance.rounding.small
                     color: Appearance.colors.colLayer1
                     border.width: 1
@@ -7789,7 +8546,13 @@ Item {
     }
     Shortcut {
         sequence: "Ctrl+V"
-        enabled: root.clipboard.length > 0 && !root.pickerMode
+        // Deliberately NOT gated on the local clipboard any more: a freshly
+        // opened window (its own process, empty list) has to answer Ctrl+V
+        // with a paste from the DESKTOP clipboard, so pasteInto itself does
+        // the gating -- it adopts, and no-ops only when nothing is copied
+        // anywhere. The old `clipboard.length > 0` gate made the cross-drive
+        // copy/paste silently dead in every new window.
+        enabled: !root.pickerMode
         onActivated: root.pasteInto(root.currentFolderPath())
     }
     Shortcut {
@@ -8158,9 +8921,17 @@ Item {
             color: headingHover.containsMouse
                 ? CF.ColorUtils.transparentize(Appearance.colors.colOnLayer0, 0.88) : "transparent"
         }
-        StyledText {
+        // A CutLabel with a RIGHT WALL, not an anchored StyledText: "Quick
+        // access" is wider than the pane at this width (measured 204 px of
+        // text in a 196 px box), and an unconstrained text paints past its
+        // own box -- over its neighbours, which the suite reports as overBox.
+        // The wall sits left of the chevron / Refresh glyph so the cut never
+        // eats a control.
+        CutLabel {
             anchors.left: parent.left
             anchors.leftMargin: 8
+            anchors.right: parent.right
+            anchors.rightMargin: (heading.expandable || heading.extra) ? 26 : 8
             anchors.verticalCenter: parent.verticalCenter
             text: heading.text
             font.pixelSize: Appearance.font.pixelSize.smallest
@@ -8217,6 +8988,11 @@ Item {
         // drawn" is a question only the row can answer.
         readonly property bool hovered: navHover.containsMouse
         signal activated()
+        // Right-click, so a row can offer its own menu without every caller
+        // bolting a second MouseArea onto the row: the pinned folder's Unpin
+        // arrives this way. Coordinates are the row's own; the caller maps
+        // them up to the window (openMenuAt).
+        signal contextRequested(real x, real y)
         // Read by the key layer: this is the row the ARROWS are on inside the
         // nav stop (see refreshFocusHighlight).
         property bool keyFocused: false
@@ -8277,9 +9053,25 @@ Item {
         MouseArea {
             id: navHover
             anchors.fill: parent
+            // z: 2, above the RowLayout's z: 1: the row's layout is lifted
+            // over navMark so the wash can never sit on the label, but that
+            // lift must not put any layer between the POINTER and this
+            // control. The suite asks what stands under its cursor; a label
+            // standing there is an answer of "not the row", which is what
+            // it reports as blocked. Labels take no input (they pass clicks
+            // through), so lifting the MouseArea above them changes nothing
+            // a user can feel -- it only makes the topmost item here be the
+            // thing that actually answers.
+            z: 2
             hoverEnabled: true
+            acceptedButtons: Qt.LeftButton | Qt.RightButton
             cursorShape: Qt.PointingHandCursor
-            onClicked: navRow.activated()
+            onClicked: mouse => {
+                if (mouse.button === Qt.RightButton)
+                    navRow.contextRequested(mouse.x, mouse.y);
+                else
+                    navRow.activated();
+            }
         }
         // A place is a destination too: dropping a file on "Home" puts it at
         // the top of your home folder, which is one gesture instead of two.
@@ -8449,6 +9241,11 @@ Item {
             id: volHover
             anchors.fill: parent
             anchors.rightMargin: 28   // leave the eject control its own clicks
+            // z: 2, above the RowLayout's z: 1, for the same reason as a
+            // place row: the label may sit over the wash, never over the
+            // thing that answers the pointer. The suite's cursor walks the
+            // topmost item; that must be this control.
+            z: 2
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
             acceptedButtons: Qt.LeftButton | Qt.RightButton
@@ -8704,6 +9501,38 @@ Item {
     }
 
     // ── Places (Quick access) ───────────────────────────────────────────
+    // ── Pinned folders ────────────────────────────────────────────────────
+    // The rail's own section, fed straight from the shared state (declared
+    // in Persistent as fileManagerPinnedPlaces): every window sees the same
+    // pins, a pin made in one is a pin the next launch opens with, and it
+    // survives a reboot with the rest of the state file. Paths in pin order.
+    readonly property var pinnedPlaces: {
+        const list = Persistent.states.fileManagerPinnedPlaces ?? [];
+        return list.filter(p => typeof p === "string" && p.length > 0 && p !== root.thisPc);
+    }
+    function isPinnedFolder(p) {
+        const q = String(p ?? "");
+        return q.length > 0 && root.pinnedPlaces.indexOf(q) !== -1;
+    }
+    function togglePinFolder(p) {
+        const q = String(p ?? "");
+        if (q.length === 0 || q === root.thisPc) return;
+        const list = Persistent.states.fileManagerPinnedPlaces ?? [];
+        // A NEW array either way: the adapter notices the assignment, and an
+        // in-place splice on its own list is the write that never happens.
+        Persistent.states.fileManagerPinnedPlaces = root.isPinnedFolder(q)
+            ? list.filter(x => x !== q)
+            : list.concat([q]);
+    }
+    // A pin is named by its last path component, the same way a tab is:
+    // "/" is the whole name it has.
+    function pinnedLabel(p) {
+        const q = String(p ?? "");
+        if (q === "/") return "/";
+        const base = q.slice(q.lastIndexOf("/") + 1);
+        return base.length > 0 ? base : q;
+    }
+
     readonly property var quickPlaces: [
         { label: Translation.tr("Home"), icon: "home", path: root.homeDir },
         { label: Translation.tr("Desktop"), icon: "desktop_windows", path: root.homeDir + "/Desktop" },
@@ -9383,6 +10212,32 @@ Item {
         }
         return false;
     }
+    // Does every ancestor's RECT cover this asker's centre? The walk that
+    // resolves a cursor starts at the root and descends only through items
+    // whose bounds contain the point (that is topChildAt), so an asker whose
+    // centre falls outside some ancestor -- the last sidebar row scrolled a
+    // few pixels below its flickable's fold, whose mapped centre lands in the
+    // root layout's spacing gap where NOTHING exists -- is not hoverable at
+    // that pixel by any pointer. Qt resolves cursors through the same
+    // containment, so such an ask must be left out of the probe: otherwise a
+    // sidebar whose content overflows reports its own clipped-off last row as
+    // "blocked" by empty space, at window sizes where the content fits it
+    // does not appear at all.
+    function centreWithinAncestors(item, at) {
+        let node = item.parent;
+        while (node && node !== root) {
+            try {
+                const a = node.mapToItem(root, 0, 0);
+                if (at.x < a.x || at.y < a.y
+                    || at.x > a.x + node.width || at.y > a.y + node.height)
+                    return false;
+            } catch (e) {
+                return false;       // a popup chain, in its own window
+            }
+            node = node.parent;
+        }
+        return true;
+    }
     // EVERY item that asks the pointer to look like something, and whether the
     // pointer would actually be over it -- the ask is resolved from the topmost
     // item at that point, so an ask that is covered is an ask that never
@@ -9411,7 +10266,8 @@ Item {
                     } catch (e) {
                         at = null;                 // a popup, in its own window
                     }
-                    if (at && at.x >= 0 && at.y >= 0 && at.x <= root.width && at.y <= root.height) {
+                    if (at && at.x >= 0 && at.y >= 0 && at.x <= root.width && at.y <= root.height
+                        && root.centreWithinAncestors(kid, at)) {
                         let top = root, px = at.x, py = at.y;
                         for (let guard = 0; guard < 40; guard++) {
                             const kid2 = root.topChildAt(top, px, py);
@@ -9425,6 +10281,8 @@ Item {
                         const topAsks = top.cursorShape !== undefined ? top.cursorShape
                             : (top.cursorIfHovered !== undefined ? top.cursorIfHovered : null);
                         out.push({
+                            x: Math.round(at.x),
+                            y: Math.round(at.y),
                             who: String(kid).split("(")[0],
                             asks: asks,
                             // The layer that answered instead, and whether it had
@@ -10202,8 +11060,13 @@ Item {
     Connections {
         target: Persistent
         function onReadyChanged() {
-            if (Persistent.ready)
+            if (Persistent.ready) {
                 root.viewMode = root.savedViewFor(root.path);
+                // The saved tabs arrive with the same file: restore them
+                // the moment it lands (Component.onCompleted tries first,
+                // for when it already had).
+                root.restoreTabs();
+            }
         }
     }
     Component.onCompleted: {
@@ -10215,6 +11078,9 @@ Item {
         root.viewMode = root.savedViewFor(root.path);
         root.tabs = [root.tabSnapshot()];
         root.activeTab = 0;
+        // The saved tabs, if the state file beat us here; otherwise the
+        // Connections above restore them the moment it arrives.
+        if (Persistent.ready) root.restoreTabs();
         root.refreshVolumes();
         udisksProbe.running = true;
         mtpMounterProbe.running = true;

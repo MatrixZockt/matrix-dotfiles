@@ -195,9 +195,18 @@ Window {
     // screen), and, since every launch now starts its own window rather than
     // looking for a copy to raise, a process nobody could ever reach again.
     function quitApp() {
+        // TEMP DIAGNOSTIC: which path is ending this process? The suite keeps
+        // losing instances and every path funnels through here, so the JS stack
+        // names the caller (onClosing vs the IPC quit vs quitRequested).
+        print("[FM-QUIT] quitApp from: " + (new Error().stack || "?"));
+        // The last tab change (or pin) may still be inside Persistent's 100 ms
+        // write debounce, and this process is about to stop existing: hand the
+        // write over NOW, or closing the window loses the tabs it should keep.
+        Persistent.flush();
         childReaper.running = true;
     }
     onClosing: function(close) {
+        print("[FM-QUIT] onClosing: the window was closed (compositor/titlebar/Escape-to-close)");
         close.accepted = true;
         root.quitApp();
     }
@@ -234,6 +243,7 @@ Window {
             content.openPath(path);
         }
         function quit(mode: string): void {
+            print("[FM-QUIT] IPC quit mode=" + mode);
             root.quitApp();
         }
         // ── Probe hooks ───────────────────────────────────────────────────
@@ -375,6 +385,15 @@ Window {
         // name and extension boxes, so a script commits what a person typing
         // that name would commit -- "notes.md" keeps its .md either way.
         function probeRenameCommit(name: string): void { content.probeSetPromptName(name); content.commitRename(); }
+        // Zip and unzip, driven the way the menu drives them: the same set the
+        // rows act on (one name here, the whole selection there) and the same
+        // helpers, so a check exercises the real path rather than a copy of it.
+        function probeCompress(name: string): void {
+            content.compressSelection([content.currentFolderPath() + "/" + name]);
+        }
+        function probeExtract(name: string): void {
+            content.extractArchive(content.currentFolderPath() + "/" + name, false);
+        }
         function probeTrash(name: string): void { content.trashItems([content.currentFolderPath() + "/" + name]); }
         function probeHardDelete(name: string): void {
             content.deleteItems([content.currentFolderPath() + "/" + name]);

@@ -20,6 +20,18 @@ Singleton {
         root.states.hyprlandInstanceSignature = Quickshell.env("HYPRLAND_INSTANCE_SIGNATURE") || ""
     }
 
+    // Write whatever the 100 ms debounce below still holds, now.
+    //
+    // The debounce is right for a change and wrong for the moment a process
+    // ENDS: the file manager closes its whole process on window close, and a
+    // closing window that only asked a timer to write lost the last thing it
+    // changed -- the tab it was on, the folder just pinned. quitApp() calls
+    // this before it goes.
+    function flush() {
+        fileWriteTimer.stop()
+        persistentStatesFileView.writeAdapter()
+    }
+
     Timer {
         id: fileReloadTimer
         interval: 100
@@ -219,6 +231,22 @@ Singleton {
             // app lives and is silently dropped on the next write.
             property var fileManagerHiddenPlaces: []
             property var fileManagerPinnedPlaces: []
+
+            // The file manager's TABS, so that closing the window -- or the
+            // PC -- and opening it again lands on the same tabs. Paths and
+            // the active index, and nothing else: a tab comes back where it
+            // was with its history fresh, which is exactly "the window resets
+            // but the tabs stay as they are".
+            //
+            // One shared set: the manager opens one window per process (see
+            // filemanager.qml), so the tabs written last are the ones the next
+            // window restores. A declared key, for the reason the comment on
+            // fileManagerPinnedPlaces gives -- an undeclared one is dropped on
+            // the next write.
+            property JsonObject fileManagerTabs: JsonObject {
+                property var paths: []
+                property int active: 0
+            }
 
             // Each folder's own details/tiles choice, as [path, view] pairs.
             //

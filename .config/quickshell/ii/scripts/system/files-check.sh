@@ -72,6 +72,30 @@ else:
     print('True' if v is True else 'False' if v is False else json.dumps(v) if isinstance(v,(list,dict)) else v)" 2>/dev/null; }
 
 c() { local pid; pid="$(find_pid "$TOKEN")"; [ -n "$pid" ] || { echo "NO INSTANCE"; return 1; }; qs ipc --pid "$pid" call files "$@"; }
+# ── The tab set a run starts from ───────────────────────────────────────
+# Tabs now OUTLIVE the process: the window restores the set it was closed with
+# and rewrites it as it goes, and the dialog MIRRORS that set (the same tabs,
+# switchable from in there). So a run no longer starts from one tab -- it
+# starts from whatever the last run, or the person's own window, left on disk.
+# Every count in this file is written against a single starting tab ("two tabs"
+# after one tabNew, "closing leaves one"), so each instance has its set closed
+# back to one before those checks run, the same way a run puts the size knob
+# back before it ends.
+#
+# Defined here rather than next to `cw`, because the DIALOG is the first
+# instance in the run and it needs this before the window half of the file has
+# even been parsed. Closing the last tab is refused by the app itself (closeTab:
+# there would be nothing left on screen), so this can only ever stop at one.
+reset_tabs_with() {          # $1 = the instance's caller: c (dialog) or cw (window)
+    local call="$1" n tries
+    for tries in 1 2 3 4 5 6 7 8 9 10; do
+        n="$("$call" tabCount 2>/dev/null)"
+        [ -n "$n" ] || return 0
+        [ "$n" -le 1 ] && return 0
+        "$call" tabClose "$((n - 1))" >/dev/null 2>&1
+        sleep 0.25
+    done
+}
 state() { c probeState; }
 count() { state | json '["count"]'; }
 path() { c probePath; }
@@ -105,6 +129,9 @@ ensure() {
     start_picker "$TOKEN" "$op" "$dirflag" >/dev/null || return 1
     sleep 2
     c probeGo "$SCRATCH" >/dev/null
+    # A dialog comes back mirroring the saved tab set: put the count back where
+    # the checks below expect it.
+    reset_tabs_with c
     sleep 1.2
 }
 
@@ -891,6 +918,13 @@ pointer_to_root() {        # $1 $2 = a point in the WINDOW's coordinates
     # cursor reports 500,500. ydotool stays for the CLICKS -- nothing else here
     # can press a button -- and remains the fallback for the move, so a machine
     # whose compositor does not speak this is no worse off than it was.
+    #
+    # The warp alone and NOTHING else here: a real (ydotool) motion between a
+    # press and its release cancels the implicit grab the drag tests hold
+    # (measured 2026-10-27 -- a calibrated move added to this function fixed
+    # the hover readings and broke every held-button drag: thumb stuck, list
+    # at contentY 0). Hover needs real motion to see its enter/leave; that
+    # lives in hover_at_root, which is the only caller that needs it.
     lx="$(python3 -c "print(round($CO_X + $1))")"
     ly="$(python3 -c "print(round($CO_Y + $2))")"
     hyprctl dispatch "hl.dsp.cursor.move({x=$lx,y=$ly})" >/dev/null 2>&1
@@ -911,8 +945,28 @@ hover_at_root() {          # ... and what the bar says about it
     # point, same window, False on the first placement and True on the second,
     # with nothing else changed. Three tries, and a bar that never answers still
     # answers False when they are up: this is a retry, not a relaxation.
-    local tries answered
+    local tries answered kx ky lx ly
     pointer_to_root "$1" "$2"
+    # A REAL motion next, at the same point within its calibration, and then the
+    # warp again to put the cursor exactly back: a warp synthesizes no
+    # enter/leave, so hover state read after a warp alone is the state from
+    # wherever the pointer WAS (measured 2026-10-27 -- warped off the hairline
+    # and the bar still read hovered=True, warped to the far corner and it
+    # never cleared). The calibrated ydotool move is real input: the
+    # compositor re-evaluates what is under the pointer and delivers the
+    # enter/leave the warp cannot. This is the one caller that needs them --
+    # pointer_to_root stays warp-only, because a real motion while a button is
+    # held cancels the implicit grab the drag tests rely on.
+    read -r kx ky <<<"$UNITS"
+    if [ -n "${kx:-}" ] && [ -n "${ky:-}" ]; then
+        lx="$(python3 -c "print(round($CO_X + $1))")"
+        ly="$(python3 -c "print(round($CO_Y + $2))")"
+        ydotool mousemove --absolute \
+            -x "$(python3 -c "print(round($lx/$kx))")" \
+            -y "$(python3 -c "print(round($ly/$ky))")" >/dev/null 2>&1
+        sleep 0.3
+        pointer_to_root "$1" "$2"
+    fi
     for tries in 1 2 3; do
         answered="$(c probeScrollBars | python3 -c '
 import json, sys
@@ -1143,7 +1197,19 @@ if [ -n "${UNITS:-}" ] && [ -n "${CO_X:-}" ]; then
         CARD="$FRESH"
         read -r CO_X CO_Y <<<"$CARD"
     fi
-    c probeGo "$SCRATCH" >/dev/null; sleep 1.2
+    # A folder of its own with almost nothing in it. (700,400) has to be
+    # EMPTY SPACE for this to be the background menu, and the real fixture
+    # (fm-scratch-test, ~17 rows) fills the pane well past that point:
+    # right-clicking a ROW opens the ROW menu, which has no "Hidden files"
+    # row in it, and both assertions below fail about the wrong menu. The tab
+    # strip at the top of the window (2026-10-27) made it concrete -- it
+    # pushed the list down ~34px, so a point that used to fall just below the
+    # last row landed on it. Two files cannot reach y=400 at any strip height.
+    MENUDIR="$HOME/fm-menu-test"
+    rm -rf "$MENUDIR"; mkdir -p "$MENUDIR"
+    printf 'x\n' > "$MENUDIR/one.txt"
+    printf 'y\n' > "$MENUDIR/two.txt"
+    c probeGo "$MENUDIR" >/dev/null; sleep 1.2
     c probeHidden 0 >/dev/null; sleep 0.5
     if right_click_menu 700 400; then
         R="$(c probeMenuRect)"
@@ -1158,7 +1224,11 @@ for it in json.load(sys.stdin):
     if it["id"] == "toggleHidden":
         print(y + h // 2); break
     y += h + 1')"
-        boo "and that box reaches the row 471px down the list" "$ROWY" "471"
+        # 502, not the 471 this asserted before: "Pin to sidebar" joined this
+        # menu above the sort block (a row and its separator, +31px) and every
+        # row below it moved down by exactly that -- recomputed from the live
+        # menu 2026-10-27, when the number was still the pre-pin 471.
+        boo "and that box reaches the row 502px down the list" "$ROWY" "502"
         AT="$(printf '%s' "$R" | json '["at"]')"
         AX="$(printf '%s' "$AT" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0])')"
         AY="$(printf '%s' "$AT" | python3 -c 'import json,sys; print(json.load(sys.stdin)[1])')"
@@ -1327,10 +1397,26 @@ UX="$(echo "$DIV" | json '["bandX"]')"; UY="$(echo "$DIV" | json '["bandY"]')"
 boo "and the pointer there is handed the up-down arrow instead" \
     "$(c probeHit $((UX + 40)) $((UY + 4)) | json '[-1]["cursorShape"]')" "5"
 H0="$(echo "$DIV" | json '["size"]')"
+# Room first: the pane may be sitting AT its ceiling -- a saved size from a
+# taller window, clamped when this one resized -- and a drag that starts at
+# the ceiling cannot grow (it asks 390+70 and the clamp answers the ceiling,
+# which is exactly how this assertion read "306" twice in a row). So the
+# session before this one shrinks it by the same 70 -- legal from any start
+# above the floor -- and the growth is asserted from THERE, capped at the
+# ceiling the divider itself reports for the geometry where even the shrunk
+# pane has under 70 of headroom left.
+c probePreviewDragBegin >/dev/null; sleep 0.3
+c probePreviewDragStep 70 >/dev/null; sleep 0.8
+c probePreviewDragEnd >/dev/null; sleep 0.3
+DIV="$(c probePreviewDivider)"
+H1="$(echo "$DIV" | json '["size"]')"
+MAXH="$(echo "$DIV" | json '["max"]')"
 c probePreviewDragBegin >/dev/null; sleep 0.3
 c probePreviewDragStep -70 >/dev/null; sleep 0.8
 DIV="$(c probePreviewDivider)"; LAYOUT="$(c probeLayout)"
-boo "the pane grows by the drag" "$(echo "$DIV" | json '["size"]')" "$((H0 + 70))"
+EXPECT=$((H1 + 70))
+[ "${MAXH:-0}" -gt 0 ] && [ "$EXPECT" -gt "$MAXH" ] && EXPECT="$MAXH"
+boo "the pane grows by the drag" "$(echo "$DIV" | json '["size"]')" "$EXPECT"
 boo "and the list above it keeps its own floor" \
     "$(echo "$LAYOUT" | python3 -c 'import json,sys
 print("yes" if json.load(sys.stdin)["list"]["height"] >= 240 else "no")')" "yes"
@@ -1350,6 +1436,10 @@ sleep 1
 echo "── picker instance: listing, search, sort ───────────────────────────"
 TOKEN="fmsuite1"
 start_picker "$TOKEN" open false || exit 1
+# The dialog mirrors the saved tab set, so the first bring-up of the run starts
+# from whatever is on disk: closed back to one before the tab checks below
+# (which count from a single starting tab) are asked.
+reset_tabs_with c
 sleep 2.5
 S="$(state)"
 boo "picker mode is on" "$(echo "$S" | json '["pickerMode"]')" "True"
@@ -1436,7 +1526,11 @@ VC="$(vc_after details)"
 boo "the file-open screen's bar carries the view controls" "$(printf '%s' "$VC" | json '["view"]')" "True"
 boo "…and the hidden-files eye" "$(printf '%s' "$VC" | json '["hidden"]')" "True"
 boo "…but not the commands that act on files (New)" "$(printf '%s' "$VC" | json '["newFile"]')" "False"
-boo "…nor the tab strip" "$(printf '%s' "$VC" | json '["tabs"]')" "False"
+# The dialog MIRRORS the app's tabs (asked 2026-10-27: the same set, switchable
+# from in here) -- so the strip is present, not absent, and the assertion says
+# which way round it is.
+boo "…and the app's own tab strip, mirrored in the dialog" \
+    "$(printf '%s' "$VC" | json '["tabs"]')" "True"
 # …and the keyboard reaches them. The toolbar became a Tab stop in a dialog
 # when it stopped being a row of file commands; a control only the pointer can
 # use would be half a control.
@@ -1920,6 +2014,9 @@ start_window_if_needed() {
     echo "  ..    the window instance is gone; starting it again"
     start_window || return 1
     sleep 1.5
+    # A relaunch comes back with the tabs the previous instance had saved:
+    # put the count back where the checks below expect it.
+    reset_tabs_with cw
 }
 cw() {
     local pid; pid="$(find_pid)"
@@ -1934,6 +2031,9 @@ cw() {
 # status bar.)
 trap 'cw probeResize 0 0 >/dev/null 2>&1 || true' EXIT
 start_window_if_needed || exit 1
+# The launch above is the first one in the run, so it does NOT go through
+# start_window_if_needed's relaunch branch: the restored set is closed here.
+reset_tabs_with cw
 NAVD="$(cw probeNavDrawn)"
 boo "the drive rows are drawn in the pane's order, top to bottom" \
     "$(echo "$NAVD" | json '["ordered"]')" "True"
@@ -2104,6 +2204,13 @@ cw tabNew "$TABDIR" >/dev/null 2>&1; sleep 1.2
 cw tabSelect 0 >/dev/null 2>&1; sleep 0.8
 for w in 1100 900 660 520 440; do
     start_window_if_needed >/dev/null 2>&1
+    # That bring-back opens its default folder with whatever tabs it restored,
+    # not this fixture: the long name is navigated back before every reading,
+    # so a close between two widths reads the fixture instead of an unrelated
+    # listing -- which is what made every width report "nothing was measured"
+    # and every cut assertion answer "no".
+    cw tabSelect 0 >/dev/null 2>&1; sleep 0.3
+    cw probeGo "$LAYERDIR" >/dev/null; sleep 1.0
     cw probeView details >/dev/null; sleep 0.4
     cw probeResize "$w" 720 >/dev/null; sleep 0.6
     READ="$(cw probeTextOverlap 1)"
@@ -2148,6 +2255,10 @@ rmdir "$TABDIR" 2>/dev/null || true
 cw probeView tiles >/dev/null; sleep 0.5
 for w in 1100 660 440; do
     start_window_if_needed >/dev/null 2>&1
+    # Same bring-back, same fixture problem: re-walk into the long-name folder
+    # and re-ask for the grid before every reading.
+    cw probeGo "$LAYERDIR" >/dev/null; sleep 0.8
+    cw probeView tiles >/dev/null; sleep 0.4
     cw probeResize "$w" 720 >/dev/null; sleep 0.6
     READ="$(cw probeTextOverlap 1)"
     boo "in the grid at ${w}px no two labels share pixels at comparable weight" \
@@ -2528,6 +2639,10 @@ for w in 1400 1080 900 760 660; do
     # does the compositor); that is not this section's answer, so it is brought
     # back rather than reported as a failure at one width and a pass at the next.
     start_window_if_needed >/dev/null 2>&1
+    # That brought-back window is at its own defaults: the pane is asked for
+    # again, or every width AFTER a close reads its geometry as "nowhere"
+    # (probeLayout answers with a preview that was never enabled).
+    cw probePreviewPane 1 >/dev/null; sleep 0.4
     cw probeResize "$w" 720 >/dev/null; sleep 0.6
     GEOM="$(cw probeLayout | python3 -c '
 import json, sys
@@ -2996,13 +3111,18 @@ else:
         "$(printf '%s' "$LEVEL" | grep -c '^level=.*matches=yes')" "1"
     boo "the device click was asked for at all" \
         "$(printf '%s' "$LEVEL" | grep -c 'device level=')" "1"
-    # REQUESTED 2026-10-14: louder than it was, so it is heard over music. The
-    # SAMPLE cannot be raised any further -- its attack is already at -1 dBFS,
-    # measured above -- so the boost is a playback factor, and this is where
-    # that claim is checked rather than asserted in a comment: the click plays
-    # ABOVE the row, while a chime (the same code, no gain) plays at it.
-    has "and it plays above the row, so a transient is not lost under music" \
-        "$LEVEL" "gain=1.500 boosted=yes"
+    # REQUESTED 2026-10-14: louder than it was, so it is heard over music.
+    # The first answer was a playback FACTOR (gain=1.5/1.8) -- and it was a
+    # lie the whole time: pw-play --volume clamps at 1.0 (measured 2026-10-26,
+    # --volume 1.8 produced a stream at 65536/100%), so the log promised +3.5
+    # dB the ear never got, which is the complaint again in a new costume.
+    # The fix moved the loudness into the SAMPLE (peak asserted above, -1.0
+    # dBFS) and clamps the factor where no caller can believe in a boost the
+    # player throws away. What is checked here is therefore the honest line:
+    # a factor the player obeys (<= 1.0), no claimed boost, and a level that
+    # IS the row -- with the sample carrying the transient over the music.
+    has "and the level the log claims is the level the player was given (no boost it would only clamp away)" \
+        "$LEVEL" "boosted=no matches=yes"
 fi
 
 

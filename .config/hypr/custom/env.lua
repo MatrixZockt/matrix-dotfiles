@@ -121,3 +121,18 @@ hl.env("STEAM_FORCE_DESKTOPUI_SCALING", tostring(xScale))
 -- driver to Intel's iHD makes every session app decode on the same GPU the
 -- compositor renders on. Read once at Hyprland start -- lands on next login.
 hl.env("LIBVA_DRIVER_NAME", "iHD")
+
+-- Cursor: the same Bibata pair every wrapper forces, set at the session root
+-- so every child of the compositor carries it (Wayland clients, xwayland,
+-- portals, and the X11 clients spawned from this session).
+hl.env("XCURSOR_THEME", "Bibata-Modern-Ice")
+hl.env("XCURSOR_SIZE", "24")
+-- XCURSOR_PATH with a shim dir first. Claude (and Chromium generally)
+-- hardcodes an "Adwaita" cursor-theme request internally -- proven with an
+-- LD_PRELOAD probe of XcursorLibraryLoadCursor / XcursorSetTheme -- so it
+-- renders its stock black arrow regardless of the environment. The shim
+-- ~/.local/share/cursor-shims/Adwaita is a symlink to the real Bibata theme,
+-- so the *name* "Adwaita" now resolves to the user's cursor everywhere.
+-- Path is applied after theme state in libXcursor, so it covers every app.
+hl.env("XCURSOR_PATH", (os.getenv("HOME") or "/home/user") .. "/.local/share/cursor-shims:~/.local/share/icons:~/.icons:/usr/share/icons:/usr/share/pixmaps")
+hl.env("HYPRCURSOR_THEME", "Bibata-Modern-Ice")

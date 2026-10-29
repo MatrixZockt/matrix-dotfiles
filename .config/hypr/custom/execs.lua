@@ -141,6 +141,24 @@ hl.exec_cmd("$HOME/.config/hypr/custom/scripts/workspace-sanity.sh")
 -- in hyprland/env.lua is what actually resolves the cursor, and it is read at
 -- process start, so the theme is fixed for the session by design.
 --
+-- ── Re-asserted on every config load (2026-10-28): "mouse still not fixed" ──
+--
+-- That no-op claim was measured with grim silhouettes and does not hold for
+-- what the pointer RENDERS: an XFixes capture over every X11 client on this
+-- session (tradingview, WhatsApp, discord, Claude, Freebuff) found the
+-- compositor serving a NON-Bibata arrow -- 24x24, hotspot (3,1), fnv1a
+-- 7dade83d1d33d863 -- while the theme every config names is Bibata-Modern-Ice
+-- at hotspot (5,1). One `hyprctl setcursor Bibata-Modern-Ice 24` and the same
+-- capture reads 5,1 / fnv1a 0303dcbb4c889593 for ALL five apps, identical to
+-- each other, and it still reads that way after `hyprctl reload`.
+--
+-- So setcursor is the compositor's half of the same decision env.lua makes for
+-- clients, and it is cheap: one spawn per config LOAD (login and reload), not
+-- per keypress or per event. Env alone cannot fix a pointer the compositor
+-- already resolved wrong, and setcursor alone cannot fix a client that never
+-- got XCURSOR_THEME -- which is why both live here.
+hl.exec_cmd("hyprctl setcursor Bibata-Modern-Ice 24")
+--
 
 -- Polkit authentication agent.
 --

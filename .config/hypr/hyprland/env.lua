@@ -75,5 +75,12 @@ hl.env("XDG_MENU_PREFIX", "plasma-")
 -- switch is written by scripts/colors/sync-desktop-theme.sh.
 hl.env("XCURSOR_THEME", "Bibata-Modern-Ice")
 
+-- The SIZE half of the same pointer decision, pinned 2026-10-28. Nothing in
+-- this config ever set XCURSOR_SIZE -- the 24 the session carried was arriving
+-- from nobody's config at all, so any launch path that missed it resolved the
+-- right theme at a guessed size and read as a different cursor next to a
+-- 24px one. Theme and size are one decision; both live here now.
+hl.env("XCURSOR_SIZE", "24")
+
 -- Virtual environment
 hl.env("ILLOGICAL_IMPULSE_VIRTUAL_ENV", home_dir .. "/.local/state/quickshell/.venv")

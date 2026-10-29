@@ -413,7 +413,27 @@ hl.config({
         zoom_factor = 1,
         zoom_rigid = false,
         zoom_disable_aa = true,
-        hotspot_padding = 1
+        hotspot_padding = 1,
+
+        -- REQUESTED (2026-10-27): "when opening something like a side option
+        -- the mouse snaps to it. i want to keep control of the mouse so it
+        -- doesnt just snap everytime i open some menu".
+        --
+        -- Every programmatic focus in this config is a `focus` DISPATCH -- a
+        -- popup being promoted, a shell window opening, a tray window coming
+        -- back, the close-drag aiming at the window under the pointer -- and
+        -- this build warps the pointer to the CENTRE of whatever it focuses.
+        -- Measured, not assumed: pointer parked at 200,200, focus a 200x161
+        -- popup at 0,0, pointer lands at 100,80. Opening a menu under the hand
+        -- therefore read as the mouse being taken away mid-reach.
+        --
+        -- `no_warps` is that switch. It costs nothing this desktop uses:
+        -- warp_on_change_workspace and warp_on_toggle_special are already
+        -- 0/false here, so the only warp it removes is the focus one. Explicit
+        -- pointer MOVES (hl.dsp.cursor.move -- the gestures' cursorHold, the
+        -- sidebar's pin dodge) are dispatches rather than warps and still work;
+        -- verified with this flag on.
+        no_warps = true
     },
 
     -- THIS VALUE IS OVERRIDDEN, deliberately, by custom/general.lua (loaded

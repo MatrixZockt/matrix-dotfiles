@@ -531,28 +531,31 @@ hl.bind("ALT + SHIFT + Tab", hl.dsp.global("quickshell:switcherPrev"),
 
 -- Releasing ALT is what commits, and it commits *immediately*: the IPC call
 -- below switches to whatever is highlighted and closes the panel in the same
--- beat. These are bare-modifier release binds, the same pattern the base config
--- uses for SUPER, and they are inert when the switcher is not open.
+-- beat. This is a bare-modifier release bind, the same pattern the base config
+-- uses for SUPER, and it is inert when the switcher is not open.
 --
--- Releasing TAB while ALT is still down keeps the panel (so you can Tab on), but
--- releasing TAB once ALT is already up dismisses it -- the "let go of everything"
--- case, for when you change your mind.
-local altHeld = false
+-- Releasing TAB while ALT is still down keeps the panel, so you can Tab on --
+-- and that is simply what "nothing happened" means here. There is deliberately
+-- NOTHING bound to TAB.
+--
+-- There used to be a third bind: `ALT + Tab` with `ignore_mods`, `transparent`
+-- and `release`, whose one job was the "let go of everything" case -- release
+-- TAB after ALT is already up and the panel is dismissed. It is gone, and it is
+-- not coming back. `ignore_mods` makes a chord match with NO modifiers held as
+-- well (that is exactly why the bare SUPER_L/SUPER_R binds use it), so that
+-- bind was a Hyprland bind on a bare TAB: the compositor looking at a key that
+-- belongs to whatever is focused. TAB has to reach the application untouched --
+-- a form field, a spreadsheet cell, an editor's indent all depend on it, and
+-- none of them may depend on whether the compositor is holding the edge of a
+-- key for a panel that is not even open. Nothing is lost: letting go of TAB
+-- while ALT is down still keeps the panel (no bind, no action), and letting go
+-- of ALT is what commits either way -- which is the only thing a TAB release
+-- could have been waiting for.
 for _, altKey in ipairs({ "ALT_L", "ALT_R" }) do
     hl.bind(altKey, function()
-        altHeld = true
-    end, { ignore_mods = true, transparent = true })
-    hl.bind(altKey, function()
-        altHeld = false
         hl.exec_cmd(shellIpc("switcher activate"))
     end, { ignore_mods = true, transparent = true, release = true })
 end
-
-hl.bind("ALT + Tab", function()
-    if not altHeld then
-        hl.exec_cmd(shellIpc("switcher cancel"))
-    end
-end, { ignore_mods = true, transparent = true, release = true })
 -- ALT+ALT (tap ALT twice) dismisses without switching, if you change your mind.
 hl.bind("ALT + ALT_L", hl.dsp.global("quickshell:switcherCancel"),
     { ignore_mods = true, transparent = true })
@@ -1211,3 +1214,18 @@ for raw in SUPER_CHORD_LIST:gmatch("[^,\n]+") do
             { description = "Shell: SUPER chord (cancels the bare-SUPER action)" })
     end
 end
+
+--#! Shell
+-- TAB belongs to the focused application: it moves between form fields, indents
+-- code, steps through a table's cells. Nothing on this desktop may own the bare
+-- key. The one bind that used to is described above -- an `ignore_mods` release
+-- bind, which by definition also matched with no modifiers held.
+--
+-- This is the standing guarantee, re-asserted on every load instead of trusted
+-- to the absence of a mistake. It runs LAST in this file, so any bare-TAB bind
+-- registered before it -- here, in custom/general.lua, or in the vendored base
+-- config -- is dropped before the compositor starts answering keys. It is a
+-- no-op when there is nothing to remove, and it cannot touch the modifier
+-- chords above: Alt+Tab and SUPER+Tab are binds under a different key string,
+-- not this one.
+hl.unbind("Tab")

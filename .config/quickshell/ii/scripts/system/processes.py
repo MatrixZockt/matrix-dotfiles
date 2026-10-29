@@ -139,7 +139,20 @@ def app_name(argv0, fallback):
     """
     if not argv0:
         return fallback
+    # argv[0] is normally the program's PATH, and the name is its last
+    # component -- spaces and all: "/home/user/My Projects/.../esbuild" is
+    # ONE argument whose basename is "esbuild". Splitting that on whitespace
+    # is what named a whole folder of the machine "My".
+    #
+    # But a re-exec'd child -- Chromium's zygote, and anything that rewrites the
+    # cmdline into a process title -- has its WHOLE command line in argv[0]: one
+    # NUL-terminated string, arguments after the program separated by spaces.
+    # There the first space IS the boundary. Without this every Electron helper
+    # comes back as "Claude --standard-schemes=…" or "Freebuff --shared-files=…"
+    # instead of the program's name.
     name = os.path.basename(argv0.rstrip("/")) or fallback
+    if any(ch.isspace() for ch in name):
+        name = os.path.basename(argv0.split()[0].rstrip("/")) or fallback
     # AppImages mount under /tmp/.mount_*, and interpreters run scripts by path;
     # what matters is the last component either way, which basename already gave
     # us. A ".exe" suffix is the one decoration worth removing.
@@ -171,7 +184,16 @@ def describe(pid, previous, current, delta_total, boot):
     state = status.get("State", "?").split()[0]
     memory = int(status.get("VmRSS", "0 kB").split()[0]) * 1024
 
-    words = raw.replace(b"\x00", b" ").decode("utf-8", "replace").split()
+    # /proc/<pid>/cmdline is NUL-separated: one NUL per argv boundary. This
+    # used to turn every NUL into a space and then split on whitespace, which
+    # splits an ARGUMENT that contains a space -- and argv[0] very often does,
+    # because a program installed under "~/My Projects" has a space in its own
+    # path. Every such process was then named after the first path segment:
+    # /home/user/My Projects/.../esbuild came back as "My", so the task
+    # manager listed one 36-row application called "My" and the name column
+    # said nothing about what was running. Split on the NULs instead: those are
+    # the argv boundaries, and a space inside an argument stays inside it.
+    words = [part.decode("utf-8", "replace") for part in raw.split(b"\x00") if part]
     command = " ".join(words) or name
 
     fields = process_stat_fields(stat_line)

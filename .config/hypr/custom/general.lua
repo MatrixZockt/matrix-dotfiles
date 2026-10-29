@@ -872,6 +872,42 @@ local function padFingersStateFile()
     return dir .. "/ii-touchpad-fingers.json"
 end
 
+-- ── Is a SHELL POPUP up right now? (the close-drag has no window to close) ──
+-- The four-finger swipe DOWN is the close-drag: it grabs a WINDOW and drags
+-- it towards the bottom of the screen. A popup on this desktop -- the task
+-- manager, the launcher, the desktop grid, a bar card, a sidebar -- is a
+-- Quickshell LAYER SURFACE, not a window, so the gesture used to reach
+-- straight past it and drag (and close) the window standing BEHIND it.
+-- Reported 2026-10-27: "popup windows like taskmanager etc are still not being
+-- closed when having them open in the front".
+--
+-- The shell publishes whether one is up -- the same handshake the desktop grid
+-- and the island card already use -- and republishes it every 3s while one is
+-- up, so the 10s staleness rule cannot swallow a popup that has been open for
+-- a while:
+--
+--   $XDG_RUNTIME_DIR/ii-popup-open.json  {"open":true,"ts":...}
+--
+-- A missing, old or unreadable file reads as CLOSED, which is the safe
+-- direction: the close-drag keeps closing real windows, and a crashed shell can
+-- never leave a swipe unable to close one.
+local function shellPopupStateFile()
+    local dir = os.getenv("XDG_RUNTIME_DIR")
+    if not dir or dir == "" then dir = "/tmp" end
+    return dir .. "/ii-popup-open.json"
+end
+
+local function shellPopupOpen()
+    local file = io.open(shellPopupStateFile(), "r")
+    if not file then return false end -- no file = nothing open
+    local text = file:read("*a") or ""
+    file:close()
+    if text:match('"open"%s*:%s*true') == nil then return false end
+    local ts = tonumber(text:match('"ts"%s*:%s*([0-9%.]+)'))
+    if ts and (os.time() - math.floor(ts)) > 10 then return false end -- stale = closed
+    return true
+end
+
 local function fourFingersConfirmed()
     local file = io.open(padFingersStateFile(), "r")
     if not file then return false end
@@ -2805,13 +2841,14 @@ hl.gesture({
 --   * The little "this closes the app" hint you see while dragging is the
 --     shell's own chip (GlobalStates); it keys off the window actually moving
 --     past the screen edge, which the follow path produces.
--- (isTrayAppCls lived here. Its one reader was the fullscreen branch of the
--- close-drag's start: it kept a close-to-tray app fullscreen instead of
--- flashing it out of fullscreen for the length of a swipe. Since 2026-10-24 no
--- fullscreen window is un-fullscreened by that gesture at all, which is that
--- behaviour for every class, so the config.json table it read is no longer
--- consulted by anything. Deleted rather than left as a trap: a function whose
--- only reader is gone reads like a live behaviour and is not one.)
+-- (isTrayAppCls's FIRST reader was the fullscreen branch of the close-drag's
+-- start: it kept a close-to-tray app fullscreen instead of flashing it out of
+-- fullscreen for a swipe. That reader is gone for good -- since 2026-10-24 no
+-- fullscreen window is un-fullscreened by the gesture at all -- but the
+-- function is BACK as of 2026-10-27: smartClose() at the close-drag's finish
+-- reads it again, for the report "whatsapp doesnt open / close from the
+-- system tray icon when closing with 4 finger swipe like thunderbird discord
+-- etc do. Fix it". Both functions live under the vault section below.)
 
 local closeDrag = nil
 -- windowsMove's live values cannot be read back (hl.get_config returns nil for
@@ -2854,15 +2891,92 @@ end
 
 -- ═══ Tray-managed apps: closed into the vault, not into the void ════════
 --
--- ═══ No per-app tray mechanism, by request ═════════════════════════════
+-- RESTORED 2026-10-27, minimal and on the user's word: "whatsapp doesnt open
+-- / close from the system tray icon when closing with 4 finger swipe like
+-- thunderbird discord etc do. Fix it". The SHELL half of this mechanism was
+-- never removed -- TrayApps.qml still parks and restores windows (verified
+-- live the day this came back: its watcher parked a stray WhatsApp launch,
+-- and `qs -c ii ipc call trayapps toggle "WhatsApp Desktop"` walked the window
+-- back out), and config.json still carries the opt-in that its "Minimize to
+-- tray" switch writes: tray.closeToTray = { "WhatsApp Desktop": true,
+-- "org.mozilla.Thunderbird": false }. Only the compositor's half -- the swipe
+-- actually parking instead of killing -- was missing, so every 4-finger close
+-- threw WhatsApp away: window gone, and the shell's icon for it is window-
+-- backed, so the icon went with it and there was nothing left to click.
 --
--- REMOVED, deliberately and completely. Everything between here and the old
--- `rectOf` helper used to implement "closing some apps minimises them to a
--- tray instead of closing": a special workspace to park windows on, a
--- per-app class list published by the shell as JSON, a compositor sweep that
--- watched the desktop and pulled windows off it, a permit file with a TTL, a
--- shell-side re-assert on a timer, and a park-verify-retry-close routine for
--- the close gesture.
+-- What came back is exactly two functions and one call, all lifted from the
+-- pre-2026-10-22 file where they had run for weeks:
+--
+--   * isTrayAppCls(cls) -- reads tray.closeToTray out of the real config.json.
+--     Opt-in per class: only a class set true can take this branch, and any
+--     read failure answers false, towards closing.
+--   * smartClose(addr)  -- focus the window, ONE move dispatch to
+--     `special:tray`, return true. Focus-scoped like every window dispatcher
+--     in this build (below), and with no verification loop of any kind: if
+--     the move ever failed the window stays ON SCREEN, which is the safe
+--     direction -- it can never hide a window nobody can get back.
+--
+-- What stays removed is everything the essay below records: the compositor
+-- sweep, the permit file with its TTL, the shell re-assert on a timer, and
+-- the park-verify-retry-close fallback (the piece that turned a park into a
+-- QUIT). Those were a second watcher fighting the shell; TrayApps' own
+-- watcher is the only one now, and this gesture neither verifies nor retries
+-- nor falls back -- it parks, or it closes. Nothing in between.
+--
+-- SUPER+Q (custom/keybinds.lua) deliberately still closes for real: the
+-- keybind is the hard close, the gesture is the minimize, and File > Quit in
+-- the app still quits the app.
+
+-- Is this window class opted into close-to-tray? Reads the REAL config.json
+-- -- the file TrayApps persists its "Minimize to tray" switches into, and the
+-- same file the shell's closeToTrayEnabled() reads: one source of truth for
+-- both halves of the handshake. A class absent from the map is false, and so
+-- is an unreadable file or a missing key: every failure path must fail
+-- towards CLOSING the window.
+function isTrayAppCls(cls)
+    if not cls or cls == "" then return false end
+    local ok, payload = pcall(function()
+        local f = io.open(os.getenv("HOME") .. "/.config/illogical-impulse/config.json", "r")
+        if f then local s = f:read("*a"); f:close(); return s end
+        return nil
+    end)
+    if not (ok and payload) then return false end
+    local object = payload:match('"closeToTray"%s*:%s*({[^}]*})')
+    if not object then return false end
+    local escaped = cls:gsub("([^%w])", "%%%1")
+    return object:match('"' .. escaped .. '"%s*:%s*true') ~= nil
+end
+
+-- Park this window on the tray vault instead of closing it. Returns true when
+-- the window was parked (the caller must NOT also close it), false when the
+-- class is not opted in (the caller closes normally).
+-- Do NOT call focusAddr() here: it is a `local function` declared further
+-- down, so at this position in the file it resolves to a nil global and the
+-- throw would abort the whole finish path -- no park, no close. Focus inline
+-- via the window we already looked up.
+function smartClose(addr)
+    local w = findWindow(addr)
+    if not w then return false end
+    local cls = w.class or w.initialClass or ""
+    if not isTrayAppCls(cls) then return false end
+    -- The shell re-asserts the tray icon from the parked window (its
+    -- liveRegistry is window-backed), and the icon's click runs
+    -- TrayApps.toggle -> show(), which moves the window back and attaches it.
+    hl.dispatch(hl.dsp.focus({ window = w }))
+    hl.dispatch(hl.dsp.window.move({ workspace = "special:tray", follow = false }))
+    return true
+end
+
+-- ═══ No per-app sweep mechanism, by request (2026-10-22) ════════════════
+--
+-- The sweep-and-veto half below was REMOVED, deliberately, and stays out (the
+-- park/restore above is the shell's own still-running vault plus this
+-- gesture's one-line move -- none of the machinery this essay is about).
+-- What was removed: everything between here and the old `rectOf` helper that
+-- implemented "closing some apps minimises them to a tray instead of
+-- closing": a compositor sweep that watched the desktop and pulled windows
+-- off it, a permit file with a TTL, a shell-side re-assert on a timer, and a
+-- park-verify-retry-close routine for the close gesture.
 --
 -- It is gone because it never worked, and because the way it failed was the
 -- real problem. It did not fail as one bug: it failed as a SHAPE. Making one
@@ -3449,6 +3563,80 @@ local function anchoredTransition(addr, forceTile)
     hl.timer(begin, { timeout = 16, type = "oneshot" })
 end
 
+-- ── Which window a swipe belongs to: the one under the POINTER ───────────
+-- REQUESTED (2026-10-27): "popup windows can be closed with 4 finger swipe
+-- down and not the window behind it -- the action is triggered for the desktop
+-- app which the mouse is on (which is selected)".
+--
+-- It used to be hl.get_active_window(): the swipe dismissed whatever held
+-- FOCUS. A popup is exactly the case where that is the wrong window -- a
+-- dialog, or an app's second window that this config floats and centres (the
+-- popup classifier above) -- because a popup can be up while focus still sits
+-- on the window BEHIND it, and then the swipe closed the window the popup was
+-- covering. The pointer is the honest answer to "which window am I
+-- dismissing": it is the one the user is pointing at, and it is what the
+-- gesture means on every other desktop.
+--
+-- Fails OPEN: an unreadable pointer, or no window under it (the bar, a shell
+-- panel, the gap between two floats), returns nil and the caller keeps the
+-- focused window -- exactly the behaviour that was there before.
+--
+-- Fullscreen counts (it is what the pointer is on when one is up), and a float
+-- beats a tile, because the float is drawn above the tiled layer -- which is
+-- the whole reason a popup is a popup. Among equals the most recently focused
+-- window wins, which is the closest thing this API offers to z-order.
+local function windowUnderCursor()
+    -- Every read here is guarded, for the reason cursorHold's note gives: this
+    -- runs inside a gesture callback, and an exception on any line of it is the
+    -- whole close-drag failing, not a missing log line. A pointer position or
+    -- window list this build cannot produce has to read as "unknown", which
+    -- the caller treats as "keep the focused window".
+    local okPos, x, y = pcall(cursorXY)
+    if not okPos or not x or not y then return nil end
+    local okMon, mon = pcall(hl.get_monitor_at_cursor)
+    if not okMon then mon = nil end
+    -- Only the workspaces the pointer's monitor is SHOWING. A window on any
+    -- other workspace is not on screen however neatly its old rect contains
+    -- the point: hidden workspaces keep their geometry.
+    local wsId, spId = nil, nil
+    if mon then
+        if mon.active_workspace then wsId = mon.active_workspace.id end
+        if mon.active_special_workspace then spId = mon.active_special_workspace.id end
+    end
+    local okWins, wins = pcall(hl.get_windows)
+    if not okWins or type(wins) ~= "table" then return nil end
+    local best, bestRank, bestOrder = nil, -1, -1e9
+    for _, w in ipairs(wins) do
+        if w.mapped ~= false and w.hidden ~= true and w.at and w.size then
+            local wid = w.workspace and w.workspace.id
+            local shown = (w.pinned and true)
+                or (wid ~= nil and (wid == wsId or wid == spId))
+                or (not wsId and not spId)
+            if shown then
+                local wx = tonumber(w.at.x) or 0
+                local wy = tonumber(w.at.y) or 0
+                local ww = tonumber(w.size.x) or 0
+                local wh = tonumber(w.size.y) or 0
+                if ww > 0 and wh > 0
+                    and x >= wx and x <= wx + ww
+                    and y >= wy and y <= wy + wh then
+                    local rank = 1
+                    if (tonumber(w.fullscreen) or 0) ~= 0 then
+                        rank = 3
+                    elseif w.floating then
+                        rank = 2
+                    end
+                    local order = tonumber(w.focus_history_id) or 0
+                    if rank > bestRank or (rank == bestRank and order > bestOrder) then
+                        best, bestRank, bestOrder = w, rank, order
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
 hl.gesture({
     fingers = 4,
     direction = "down",
@@ -3480,11 +3668,44 @@ hl.gesture({
                 closeDrag = nil
                 return
             end
-            local win = hl.get_active_window()
+            -- A shell popup is up: THIS swipe belongs to it. The compositor
+            -- cannot close a layer surface, so it asks the shell -- one global,
+            -- `quickshell:popupDismiss` (Bar.qml) -- and touches NO window.
+            -- Grabbing the window behind the popup is exactly the report:
+            -- "popup windows like taskmanager etc are still not being closed
+            -- when having them open in the front".
+            if shellPopupOpen() then
+                hl.dispatch(hl.dsp.global("quickshell:popupDismiss"))
+                closeDrag = nil
+                trace("4f-down start: a shell popup is up -> quickshell:popupDismiss")
+                return
+            end
+            -- The window the POINTER is on, falling back to the focused one
+            -- (see windowUnderCursor above for why the pointer decides).
+            --
+            -- The focus call below is not cosmetic: on this build every
+            -- dispatcher here -- float, move, close -- acts on the FOCUSED
+            -- window, so a target that is not focused would be dragged, and
+            -- then closed, as the window BEHIND it. That was the reported bug.
+            local focused = hl.get_active_window()
+            local target = windowUnderCursor()
+            local win = target or focused
             if not win then
                 trace("4f-down start: no active window")
                 closeDrag = nil
                 return
+            end
+            if target and target.address
+                and (not focused or focused.address ~= target.address) then
+                -- focusAddr warps the pointer onto the window it focuses
+                -- (input.follow_mouse), so hold the pointer where the user
+                -- left it -- the same guard the geometry swipes use.
+                local restoreCursor = cursorHold()
+                focusAddr(target.address)
+                restoreCursor()
+                tracef("4f-down start: pointer target %s, focus was %s",
+                    tostring(target.class or "?"),
+                    tostring(focused and focused.class or "(none)"))
             end
             tracef("4f-down start: %s fs=%.0f floating=%s",
                 tostring(win.class or "?"), tonumber(win.fullscreen) or 0,
@@ -3531,45 +3752,44 @@ hl.gesture({
             -- the keys are recorded once so the next swipe names them.
             trace("4f-down start: " .. describeGestureEvent(e))
             if closeDrag.wasFullscreen then
-                -- FULLSCREEN STAYS FULLSCREEN (2026-10-24, requested:
-                -- "when dragging things on desktop apps they go from fullscreen
-                -- to attached windows. I dont want that").
+                -- FULLSCREEN FOLLOWS THE FINGERS (2026-10-27, requested:
+                -- "4finger swipe down animation doesnt move the desktop app
+                -- down depending on the finger movement, when in fullscreen").
                 --
-                -- The branch that used to stand here DETACHED the window so it
-                -- could follow the fingers: toggle fullscreen off, float it
-                -- explicitly, resize and move it back onto the monitor rect in
-                -- the same frame so the first follow frame looked unchanged,
-                -- and remember `weUnfullscreened` so finish() could put it back.
+                -- Third revision of this branch, and the two earlier ones are
+                -- why it is shaped the way it is:
                 --
-                -- Two costs came with that. The visible one is the report: for
-                -- as long as the fingers were down, a fullscreen app WAS a
-                -- floating -- "attached" -- window, and any swipe showed it, not
-                -- only one that committed. The lasting one is when the restore
-                -- did not land: the trace has the pair -- a fullscreen window at
-                -- 19:45:37 whose swipe ended moved=0 commit=false, and the next
-                -- gesture at 19:45:39 starting on the same window with
-                -- `floating=true`, i.e. fullscreen off and the app loose on the
-                -- desktop.
+                --   * 2026-10-24 it DETACHED at the START of every swipe --
+                --     fullscreen off, float, resize and move back onto its own
+                --     rect so the first frame looked unchanged. The report was
+                --     "when dragging things on desktop apps they go from
+                --     fullscreen to attached windows. I dont want that": a
+                --     fullscreen app BECAME an attached window for as long as
+                --     the fingers were down, on every swipe including the
+                --     phantom ones this pad produces.
+                --   * 2026-10-24, second pass: the gesture stopped moving a
+                --     fullscreen window at all (`follow = false`). Nothing
+                --     flashed -- and the fingers moved nothing, which is the
+                --     report that brought us here: the app is dragged and the
+                --     app does not move.
                 --
-                -- So a fullscreen window is not moved by this gesture at all.
-                -- `follow = false` means update() dispatches no move, and the
-                -- swipe is a distance-only dismiss: far enough and the window
-                -- closes, short and nothing at all happens to it. It keeps its
-                -- size, position and fullscreen state for the whole gesture, so
-                -- there is nothing to restore -- and the belt in finish() puts it
-                -- back if anything else ever takes it out.
+                -- The detach is not gone, it has MOVED: update() performs it
+                -- the moment the drag becomes DELIBERATE (past the dead
+                -- travel), so a short push, a palm or a phantom never converts
+                -- the window and there is nothing to see or to restore. A real
+                -- drag converts it for exactly as long as the fingers are down,
+                -- and finish() puts the fullscreen back when the swipe does not
+                -- commit (the `weUnfullscreened` restore, which keeps the
+                -- window floating through the spring-back and only toggles at
+                -- the end -- no tiled frame is ever on screen).
                 --
-                -- The tray-app exception that used to live here (skip the
-                -- unfullscreen dance for a tray app so a fullscreen one would
-                -- not flash) has nothing left to do and is gone with this
-                -- branch; so is the config.json table it was the last reader of.
-                --
-                -- The shell's "this closes the app" chip keys off the window
-                -- actually moving past the screen edge, so a fullscreen swipe
-                -- gets no chip now. That is the price of the window not moving,
-                -- and the window not moving is the request.
-                closeDrag.follow = false
+                -- Everything below is then the floating-window path, which is
+                -- the point: once detached, a fullscreen window drags exactly
+                -- like any other, 1:1 with the fingers.
+                closeDrag.follow = true
                 closeDrag.weUnfullscreened = false
+                closeDrag.detached = false
+                hl.animation({ leaf = "windowsMove", enabled = false, speed = 1 })
             elseif win.floating then
                 -- Floating already: follow the fingers 1:1. Kill the move
                 -- animation so per-frame dispatches land instantly. (speed is
@@ -3643,6 +3863,48 @@ hl.gesture({
             -- noise and has to look like nothing happened. A real drag simply
             -- starts a few pixels later, where the fingers already are.
             if d.dy < d.screenH * 0.06 then return end
+            -- ── The fullscreen detach, at the moment the drag is real ─────────
+            -- See the branch in start() for the history. A fullscreen window
+            -- cannot be translated -- the compositor owns its rect -- so to
+            -- follow the fingers it has to stop being fullscreen first. Doing
+            -- that HERE rather than at the start is the whole fix: a short push
+            -- or palm noise (everything under the dead travel above) never
+            -- touches the window, and a real drag gets the movement it asks
+            -- for.
+            --
+            -- The rect is captured and re-applied immediately, so the frame the
+            -- fingers start moving from is the frame the user was looking at:
+            -- un-fullscreen (a tiled frame, for one dispatch), float, then the
+            -- exact size and position it already had. finish() restores the
+            -- fullscreen if the swipe does not commit.
+            if d.wasFullscreen and not d.detached then
+                d.detached = true
+                local w = findWindow(d.addr)
+                if w then
+                    local at, sz = w.at or {}, w.size or {}
+                    -- 1 = maximized, 2 = fullscreen on this build; unsetting the
+                    -- wrong mode would stack the two states (see demoteFullscreen).
+                    d.fsMode = ((tonumber(w.fullscreen) or 0) == 1) and "maximized" or "fullscreen"
+                    local dw, dh = tonumber(sz.x), tonumber(sz.y)
+                    local dx, dy0 = tonumber(at.x) or 0, tonumber(at.y) or 0
+                    d.weUnfullscreened = true
+                    -- Focus first: every verb below acts on the focused window
+                    -- on this build. The pointer target was focused at start,
+                    -- but a focus dispatch is queued, so state it again here --
+                    -- it cannot warp the pointer any more, `cursor.no_warps` is
+                    -- on (see hyprland/general.lua).
+                    focusAddr(d.addr)
+                    hl.animation({ leaf = "windowsMove", enabled = false, speed = 1 })
+                    hl.dispatch(hl.dsp.window.fullscreen({ mode = d.fsMode, action = "unset" }))
+                    hl.dispatch(hl.dsp.window.float({ action = "set" }))
+                    if dw and dh then
+                        hl.dispatch(hl.dsp.window.resize({ x = dw, y = dh }))
+                        hl.dispatch(hl.dsp.window.move({ x = dx, y = dy0 }))
+                    end
+                    tracef("4f-down detach: %s left fullscreen to follow the fingers (%s)",
+                        tostring(w.class or "?"), tostring(d.fsMode))
+                end
+            end
             -- …and the moment it becomes deliberate, catch the window up in one
             -- dispatch, so the dead travel is not a permanent offset between
             -- the fingers and the window: after this the two are 1:1 again.
@@ -3833,9 +4095,15 @@ hl.gesture({
                     tonumber(moved) or 0, tonumber(screenH) or 0,
                     tonumber(d.dy) or 0, tonumber(speed) or 0)
                 --
-                -- EVERY APP IS CLOSED THE SAME WAY NOW. There is no per-app
-                -- branch here: no vault, no tray hide, no "close to tray"
-                -- list, no special case of any kind. One gesture, one verb.
+                -- CLOSES, EXCEPT THE CLASSES THAT OPTED INTO THE TRAY (see
+                -- the restored branch below). The paragraphs after that are
+                -- the record of why the per-app mechanism was OUT from
+                -- 2026-10-22 until now, and they still bind what is allowed
+                -- back: no sweep, no permit file, no verify/retry, no
+                -- fallback that could turn a park into a quit -- and only a
+                -- class named true in config.json's tray.closeToTray (WhatsApp
+                -- Desktop today) can take the branch at all. What returned on
+                -- 2026-10-27 is one config-gated call, not the machinery.
                 --
                 -- The per-app tray mechanism was removed at the user's
                 -- request, after it failed to deliver the one thing it was
@@ -3869,21 +4137,35 @@ hl.gesture({
                 -- `{ address = ... }` here would close whatever holds focus
                 -- if anything stole it mid-drag.
                 focusAddr(d.addr)
-                -- NO TRAY BRANCH, for the reason the paragraph above gives.
+                -- Per-app minimize-to-tray, restored 2026-10-27 (the full
+                -- why sits in the vault section above): a class opted in
+                -- through config.json's tray.closeToTray -- WhatsApp Desktop
+                -- is the only one today, Thunderbird is off by the user's own
+                -- setting -- is PARKED on `special:tray` here instead of
+                -- closed, so the shell's tray icon for it survives the swipe
+                -- and is the way back in. Every other class still closes,
+                -- and the 2026-10-22 hazards stay out: no verify, no retry,
+                -- no fallback sits in this branch -- a park that does not
+                -- land leaves the window ON SCREEN (the safe direction),
+                -- never hidden with no way back.
                 --
-                -- The block that used to sit here parked a close-to-tray
-                -- window into `special:tray` instead of closing it, and it
-                -- outlived the mechanism it belonged to: the vault was
-                -- retired, the comment above says so, and this call was left
-                -- behind. What that cost is the 2026-10-22 report -- "about
-                -- 100 compose windows" -- because a swipe over a Thunderbird
-                -- compose window did not close it, it HID it somewhere the
-                -- user could not see, so every retry added another one.
-                --
-                -- Worse than cosmetic: with no shell running there is no tray
-                -- icon and no way back to the vault, so a parked window is a
-                -- window the user cannot reach at all. A close gesture has to
-                -- close things.
+                -- A tray app is about to be PARKED, not closed -- and the
+                -- drag may have floated it (the tiled-start dance). Park it
+                -- ATTACHED: a floating window in the vault is what every
+                -- later tray-icon open then restored (the "opens as popup"
+                -- regression). The float dispatcher is focus-scoped and
+                -- focusAddr above already aimed the focus, so unset WITHOUT
+                -- naming an address. Non-tray apps skip this: they close
+                -- below, and the spring-back already knows how to un-float a
+                -- window that survived.
+                if d.weFloated or d.weUnfullscreened then
+                    local w = findWindow(d.addr)
+                    if w and isTrayAppCls(w.class or w.initialClass or "") then
+                        focusAddr(d.addr)
+                        hl.dispatch(hl.dsp.window.float({ action = "unset" }))
+                    end
+                end
+                if smartClose(d.addr) then return end
                 hl.dispatch(hl.dsp.window.close())
                 -- A close that asks for confirmation ("Save before
                 -- quitting?") does not actually close: the window survived,
@@ -3906,7 +4188,11 @@ hl.gesture({
                     if d.weUnfullscreened then
                         hl.timer(function()
                             focusAddr(d.addr)
-                            hl.dispatch(hl.dsp.window.fullscreen({ mode = "fullscreen", action = "toggle" }))
+                            -- The MODE the window had, not always "fullscreen":
+                            -- a maximized window restored with the wrong mode
+                            -- stacks the two states (see demoteFullscreen).
+                            hl.dispatch(hl.dsp.window.fullscreen({
+                                mode = d.fsMode or "fullscreen", action = "toggle" }))
                         end, { timeout = 350, type = "oneshot" })
                     elseif d.weFloated then
                         hl.timer(function()
@@ -3918,6 +4204,14 @@ hl.gesture({
                 return
             end
             if d.follow then
+                -- NOTHING MOVED and nothing was converted: the swipe never
+                -- became a drag -- a palm, a phantom, or a push that stayed
+                -- inside the dead travel. There is nothing to spring back to,
+                -- so nothing is dispatched: focusing and moving here put two
+                -- dispatches behind every noise gesture, and the move-back
+                -- would shove the window the wrong way (case 1 of
+                -- close-drag-check.lua holds this).
+                if not d.armed and not d.weFloated and not d.weUnfullscreened then return end
                 -- Spring back: re-enable the animation FIRST so this single
                 -- move tweens smoothly to the origin, then hand the state
                 -- back (the timer keeps nothing alive -- it is one-shot).
@@ -3933,7 +4227,14 @@ hl.gesture({
                 -- function -- here and in the close-survived path above --
                 -- focuses explicitly first.
                 focusAddr(d.addr)
-                if d.dy > 0 then
+                -- ONLY if the fingers actually moved something (`d.armed`). A
+                -- swipe that never reached the dead travel moved nothing, and
+                -- a move-back here would shove the window UP the distance the
+                -- fingers travelled -- the exact shape of the bug that appeared
+                -- when a fullscreen window joined this path: a 60px palm swipe
+                -- dispatched `move y=-60` against a window that had never moved
+                -- down (caught by case 1 of close-drag-check.lua).
+                if d.armed and d.dy > 0 then
                     hl.dispatch(hl.dsp.window.move({ x = 0, y = -d.dy, relative = true }))
                 end
                 -- A window we floated for the drag goes back to the tiler once
@@ -3957,7 +4258,8 @@ hl.gesture({
                     -- when the tween had not finished.)
                     hl.timer(function()
                         focusAddr(d.addr)
-                        hl.dispatch(hl.dsp.window.fullscreen({ mode = "fullscreen", action = "toggle" }))
+                        hl.dispatch(hl.dsp.window.fullscreen({
+                            mode = d.fsMode or "fullscreen", action = "toggle" }))
                     end, { timeout = 350, type = "oneshot" })
                 elseif d.weFloated then
                     -- Re-tile EXPLICITLY (action = "unset"), never a toggle:
@@ -3984,22 +4286,32 @@ hl.gesture({
             end
             -- ── A fullscreen window leaves this gesture fullscreen ──────────
             --
-            -- The start path no longer detaches one (see there), so in the
-            -- normal case there is nothing to restore -- this is the belt.
-            -- If the window was fullscreen when the fingers landed, did not
-            -- close, and is not fullscreen now, something took it out: a
-            -- detach left behind by an earlier revision (the trace has exactly
-            -- that at 19:45:37-19:45:39), a client that dropped its own
+            -- This is the belt, and it must NOT run when the gesture's own
+            -- detach is what took the fullscreen out (`weUnfullscreened`): the
+            -- spring-back above has already queued that restore on its 350ms
+            -- timer, and a second one here toggles fullscreen back ON right
+            -- away -- then the queued timer toggles it OFF again when it
+            -- fires, leaving the window FLOATING at whatever point the
+            -- spring-back tween had reached. That is the 2026-10-27 report
+            -- "when moving down with 4 fingers on a fullscreen app and then
+            -- canceling it remains weirdly suspended": the window sat mid-
+            -- screen, floating, under a fullscreen that had been restored and
+            -- then taken away again a third of a second later.
+            --
+            -- What is left for the belt: a window that WAS fullscreen when the
+            -- fingers landed, did not close, and is not fullscreen now WITHOUT
+            -- our own detach having run -- a client that dropped its own
             -- fullscreen on the way past, or a restore that never landed. A
             -- window the user was watching fullscreen is put back the way they
             -- left it. Only the toggle is needed, and the float flag is left
             -- alone on purpose: unsetting it first would show a tiled frame on
             -- the way back (the flash documented in the spring-back above).
-            if not commit and d.wasFullscreen then
+            if not commit and d.wasFullscreen and not d.weUnfullscreened then
                 local wend = findWindow(d.addr)
                 if wend and (wend.fullscreen or 0) == 0 then
                     focusAddr(d.addr)
-                    hl.dispatch(hl.dsp.window.fullscreen({ mode = "fullscreen", action = "toggle" }))
+                    hl.dispatch(hl.dsp.window.fullscreen({
+                        mode = d.fsMode or "fullscreen", action = "toggle" }))
                     tracef("4f-down restore: %s was fullscreen, put back",
                         tostring(wend.class or "?"))
                 end

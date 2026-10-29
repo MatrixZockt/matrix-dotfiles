@@ -3208,6 +3208,27 @@ Scope {
             GlobalStates.barOpen = false;
         }
     }
+
+    // The compositor's FOUR-FINGER SWIPE DOWN, when a shell popup is up.
+    //
+    // The close-drag can only close WINDOWS, and a popup here (task manager,
+    // launcher, grid, a bar card, a sidebar) is a layer surface -- so without
+    // this the swipe reached past it and closed the window behind it
+    // (reported 2026-10-27). The compositor reads
+    // `$XDG_RUNTIME_DIR/ii-popup-open.json` at gesture start; when it says a
+    // popup is up it dispatches this global and touches no window at all.
+    //
+    // Registered in the bar rather than in shell.qml for the reason the
+    // shortcuts above are: GlobalShortcut needs a ShellRoot context, and the
+    // bar's PanelWindow is always loaded.
+    GlobalShortcut {
+        name: "popupDismiss"
+        description: "Closes the shell popup in front (four-finger swipe down over a popup)"
+
+        onPressed: {
+            GlobalStates.dismissPopupForGesture();
+        }
+    }
 }
 
 

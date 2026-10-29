@@ -28,6 +28,7 @@ import Quickshell
 import Quickshell.Hyprland
 import Quickshell.Io
 import Quickshell.Wayland
+import qs
 import qs.modules.common
 import qs.modules.common.functions
 // The task manager UI is imported by RELATIVE PATH, exactly as settings.qml
@@ -39,7 +40,41 @@ import "../../taskmanager" as TaskManagerUI
 Scope {
     id: root
 
+    // MIRRORED into the shell's shared flag, not kept private.
+    //
+    // This surface is on the Overlay layer, so the compositor cannot close it:
+    // there is no window to close. The four-finger swipe DOWN reaches it by
+    // asking the shell to dismiss its popup (GlobalStates.dismissPopupForGesture
+    // -> quickshell:popupDismiss), and that request answers
+    // `GlobalStates.taskManagerOpen`. One flag, so the swipe, the backdrop
+    // click, Escape and the IPC all close the same state -- a private `open`
+    // here would have left the overlay invisible to the gesture (the bug
+    // reported 2026-10-27: "popup windows like taskmanager etc are still not
+    // being closed when having them open in the front").
+    // (A `property alias` to the singleton is NOT possible -- "Invalid alias
+    // reference. Unable to find id GlobalStates": an alias needs an id in
+    // scope, and a singleton type name is not one. So the two are kept in step
+    // by hand, with a guard on each side, which is the same contract without
+    // the loader refusing the whole shell over it.)
     property bool open: false
+
+    onOpenChanged: {
+        // Closed from outside (the four-finger swipe asks the shell to put its
+        // popup away, which answers the shared flag): drop the deep-link key
+        // exactly as close() does, or the next open would land on the old page.
+        if (!root.open && root.requestedKey !== "")
+            root.requestedKey = "";
+        if (GlobalStates.taskManagerOpen !== root.open)
+            GlobalStates.taskManagerOpen = root.open;
+    }
+
+    Connections {
+        target: GlobalStates
+        function onTaskManagerOpenChanged() {
+            if (root.open !== GlobalStates.taskManagerOpen)
+                root.open = GlobalStates.taskManagerOpen;
+        }
+    }
     // A key the caller can hand over (the launcher's "memory", a settings
     // tile naming a device), so the deep links keep working on this skin.
     property string requestedKey: ""

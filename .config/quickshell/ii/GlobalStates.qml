@@ -301,6 +301,18 @@ Singleton {
     property bool osdVolumeOpen: false
     property bool oskOpen: false
     property bool overlayOpen: false
+    // The task manager overlay (modules/ii/taskManager/TaskManagerOverlay.qml).
+    //
+    // It owns this flag rather than a private one, because it is an OVERLAY
+    // layer surface, not a window: the compositor's close-drag cannot touch it
+    // (there is no window to close), so the four-finger swipe DOWN has to
+    // reach it the only way the compositor can reach a layer surface -- by
+    // asking the shell to close its popup. That request answers this flag, so
+    // the overlay's own `open` is an alias of it (TaskManagerOverlay.qml).
+    //
+    // Reported 2026-10-27: "popup windows like taskmanager etc are still not
+    // being closed when having them open in the front".
+    property bool taskManagerOpen: false
     property bool overviewOpen: false
     // The SUPER-tap app search overlay (design/search-overlay-preview.html):
     // a 379px card hanging from the bar's centre island -- tabs, app grid,
@@ -469,7 +481,8 @@ Singleton {
         "regionSelectorOpen",
         "crosshairOpen",
         "trayOverflowOpen",
-        "overlayOpen"
+        "overlayOpen",
+        "taskManagerOpen"        // the task-manager overlay (not a window)
     ]
 
     /// True while any temporary popup is on screen, right now.
@@ -490,8 +503,67 @@ Singleton {
         || root.sessionOpen || root.wallpaperSelectorOpen || root.wallpaperStageOpen
         || root.sidebarRightPopupOpen || root.screenTranslatorOpen
         || root.regionSelectorOpen || root.crosshairOpen || root.trayOverflowOpen
-        || root.overlayOpen
+        || root.overlayOpen || root.taskManagerOpen
         || GlobalFocusGrab.liveDismissable.length > 0
+
+    // ── Telling the compositor a popup is up (the four-finger swipe DOWN) ──
+    //
+    // The close-drag is the compositor's, and it can only ever act on a WINDOW.
+    // A popup that is a layer surface -- the task manager, the launcher, the
+    // grid, a bar card, a sidebar -- is not one, so before this handshake the
+    // swipe over one of them did the worst possible thing: it grabbed the
+    // window BEHIND the popup and dragged/closes that, which is the report
+    // "popup windows like taskmanager etc are still not being closed when
+    // having them open in the front".
+    //
+    // So the shell publishes "a popup is up" and the gesture reads it at its
+    // start, exactly like the grid's own handshake (DesktopOverview.qml) and
+    // the now-bar card's:
+    //
+    //   $XDG_RUNTIME_DIR/ii-popup-open.json  {"open":true,"ts":1761...}
+    //
+    // A missing or stale file reads as CLOSED, which is the safe direction: the
+    // close-drag keeps closing real windows, and a crashed shell can never pin
+    // the gesture away from them.
+    readonly property string popupStatePath:
+        `${Quickshell.env("XDG_RUNTIME_DIR") || "/tmp"}/ii-popup-open.json`
+    property real popupStateTs: 0
+
+    function publishPopupState(): void {
+        root.popupStateTs = Date.now() / 1000;
+        popupStateWriter.running = false;
+        popupStateWriter.running = true;
+    }
+
+    Process {
+        id: popupStateWriter
+        command: ["sh", "-c",
+            `printf '{"open":${root.transientPopupOpen},"ts":${root.popupStateTs}}' > '${root.popupStatePath}'`]
+    }
+
+    // Re-published whenever the answer changes, and by a keepalive while one is
+    // up (a popup held open longer than the reader's 10s staleness window must
+    // not start reading as closed). Nothing is written while nothing is open
+    // beyond the single "false" that the change itself publishes.
+    onTransientPopupOpenChanged: root.publishPopupState()
+
+    Timer {
+        interval: 3000
+        repeat: true
+        running: root.transientPopupOpen
+        onTriggered: root.publishPopupState()
+    }
+
+    /// The shell's half of the four-finger swipe DOWN: put away whatever popup
+    /// is in front. True when something was actually up.
+    ///
+    /// One entry point on purpose -- the compositor asks by name
+    /// (`quickshell:popupDismiss`), so every popup that opts into
+    /// `transientPopupFlags` is dismissable by the gesture without the
+    /// compositor knowing any of them.
+    function dismissPopupForGesture(): bool {
+        return root.closeTransientPopups();
+    }
 
     /// Put every temporary popup away; true when one was actually up.
     ///

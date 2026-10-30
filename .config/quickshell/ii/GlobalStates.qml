@@ -1182,6 +1182,43 @@ property bool loadingFailFlash: false
         return `'${String(word).replace(/'/g, `'\\''`)}'`;
     }
 
+    // ── Which of the app's windows IS the app? ──────────────────────────────
+    //
+    // Every matcher below finds WINDOWS, and a window is not an app. The class
+    // is shared by everything an app opens: Thunderbird stamps
+    // org.mozilla.Thunderbird on its 3-pane main window AND on every message
+    // opened in its own window, each tiled on whatever workspace it was opened
+    // from. "Open Thunderbird" therefore picked the first tiled match in list
+    // order, which was the email -- the launcher switched to the workspace the
+    // EMAIL was on and focused it, so it read as "it did not come back to
+    // Thunderbird at all" while the app itself sat on another desktop.
+    //
+    // The preference order, each rung with its reason:
+    //   1. the app's own window, TILED -- the normal case, and the one that
+    //      has to work across workspaces: focusRunningApp switches the view to
+    //      whatever window this returns, so this is what makes "open it" snap
+    //      to the desktop the app is on;
+    //   2. the app's own window, FLOATING -- a parked close-to-tray window
+    //      floats in the vault, and focusRunningApp reveals it. Still ahead of
+    //      a tiled CHILD window: the app outranks a message it opened;
+    //   3. any tiled match -- the old rule, unchanged, for a class with no
+    //      main/child distinction (isPrimaryWindow answers true for every
+    //      window of such an app, so rungs 1 and 2 handed it the same window
+    //      the tier rule below would);
+    //   4. any floating match -- a dialog, or the app behind one. A dialog
+    //      shares its app's class, and "open Firefox" must not land on an
+    //      open Save dialog, which is why 3 exists at all.
+    function pickAppWindow(hits) {
+        if (!hits || hits.length === 0)
+            return null;
+        const tiled = hits.filter(w => w.floating !== true);
+        return tiled.find(w => TrayApps.isPrimaryWindow(w))
+            ?? hits.find(w => TrayApps.isPrimaryWindow(w))
+            ?? tiled[0]
+            ?? hits[0]
+            ?? null;
+    }
+
     // Find the window of an app whose DesktopEntry we are about to launch.
     // The reliable signals are on the entry itself: its id (a desktop file's
     // name, which Wayland windows echo as their class on this setup) and its
@@ -1197,8 +1234,8 @@ property bool loadingFailFlash: false
             return null;
 
         const windows = HyprlandData.windowList ?? [];
-        let nameHit = null;
-        let floatHit = null;
+        const exactHits = [];
+        const nameHits = [];
         for (let i = 0; i < windows.length; i++) {
             const w = windows[i];
             if (w.mapped === false)
@@ -1206,22 +1243,16 @@ property bool loadingFailFlash: false
             const cls = String(w.class ?? "").toLowerCase();
             const exact = (id.length > 0 && cls === id) || (start.length > 0 && cls === start);
             if (exact) {
-                // Same class, several windows: a dialog of the app sits
-                // beside its main window, and both answer this match. The
-                // tiled one is the app; the floating one is whatever it is
-                // currently asking the user about. Returning the first match
-                // in list order meant "open Firefox" could land on an open
-                // Save dialog.
-                if (w.floating !== true)
-                    return w;
-                if (!floatHit)
-                    floatHit = w;
+                exactHits.push(w);
                 continue;
             }
-            if (!nameHit && name.length > 0 && root.classSegmentMatch(String(w.class ?? ""), name))
-                nameHit = w;
+            if (name.length > 0 && root.classSegmentMatch(String(w.class ?? ""), name))
+                nameHits.push(w);
         }
-        return floatHit ?? nameHit;
+        // The class path first (an exact class match cannot be a coincidence),
+        // then the name path. WHICH window of that class is pickAppWindow's
+        // job: see its note -- this is the Thunderbird/email case.
+        return root.pickAppWindow(exactHits) ?? root.pickAppWindow(nameHits);
     }
 
     // Search-result objects (LauncherSearchResult) launch through here: app
@@ -1296,20 +1327,14 @@ property bool loadingFailFlash: false
             return null;
 
         const windows = HyprlandData.windowList ?? [];
-        let nameHit = null;
-        let floatHit = null;
+        const clsHits = [];
+        const nameHits = [];
         for (let i = 0; i < windows.length; i++) {
             const w = windows[i];
             if (w.mapped === false)
                 continue;
             if (cls && String(w.class ?? "").toLowerCase() === cls.toLowerCase()) {
-                // Tiled window of the same class wins over a floating one:
-                // a dialog shares the app's class, and the app is what the
-                // launcher entry means. See findRunningEntry.
-                if (w.floating !== true)
-                    return w;
-                if (!floatHit)
-                    floatHit = w;
+                clsHits.push(w);
                 continue;
             }
             // Name path uses SEGMENT equality, not substring: a label matches
@@ -1317,10 +1342,10 @@ property bool loadingFailFlash: false
             // ("brave" matches "brave-browser"; "code" must NOT match
             // "@codebuff/freebuff-desktop" -- a plain substring test did
             // exactly that in testing).
-            if (!nameHit && name.length > 0 && root.classSegmentMatch(String(w.class ?? ""), name))
-                nameHit = w;
+            if (name.length > 0 && root.classSegmentMatch(String(w.class ?? ""), name))
+                nameHits.push(w);
         }
-        return floatHit ?? nameHit;
+        return root.pickAppWindow(clsHits) ?? root.pickAppWindow(nameHits);
     }
 
     function classSegmentMatch(windowClass, name) {

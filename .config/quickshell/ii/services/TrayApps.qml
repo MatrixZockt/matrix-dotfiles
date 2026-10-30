@@ -69,6 +69,43 @@ Singleton {
         return (HyprlandData.windowList ?? []).filter(w => w.class === cls);
     }
 
+    // ── Which window of the class IS the app ────────────────────────────────
+    // A class is not a window: Thunderbird gives its compose window and any
+    // message opened in its own window the SAME class as the 3-pane main
+    // window (org.mozilla.Thunderbird -- measured with three live windows of
+    // that one class). Close-to-tray is an APP-level permission, so without
+    // this distinction the close gesture parked a compose window in the vault
+    // instead of closing it -- a draft off screen with nothing to tell it
+    // apart from the app in the tray, which is the "it closes my emails to the
+    // tray too" report.
+    //
+    // The rule is per class and the MAIN window is the one named positively;
+    // anything else of that class is a CHILD window (a document the app
+    // opened) and behaves like any other window: it closes when closed, and
+    // the tray neither counts it as the app being on screen nor swallows it
+    // when the app is put away. So an open draft simply stays open with the
+    // main window in the tray, which is what a draft is for.
+    //
+    // Thunderbird's tail is the discriminator it provides itself: the main
+    // window ends in "- Mozilla Thunderbird", every child window ends in
+    // "- Thunderbird" ("Write: <subject> - Thunderbird" for a compose,
+    // "<subject> - Thunderbird" for a message in its own window). A title
+    // matching nothing is NOT the main window -- the same fail-towards-
+    // behaving-normally direction as closeToTrayEnabled's unreadable read.
+    function isPrimaryWindow(w) {
+        if (!w)
+            return false;
+        if (w.class === "org.mozilla.Thunderbird")
+            return /-\s*Mozilla Thunderbird\s*$/.test(w.title ?? "");
+        return true;
+    }
+
+    // The class's main windows (0 or 1 in practice; a class that opens a
+    // second top-level window of its own stays the app).
+    function primaryWindowsOf(cls) {
+        return root.windowsOf(cls).filter(w => root.isPrimaryWindow(w));
+    }
+
     // Any window of the class exists, parked or visible.
     // For the shell's registry-backed tray apps (WhatsApp, Thunderbird) this
     // is the only visibility check: the tray icon exists while the app has a
@@ -103,15 +140,23 @@ Singleton {
         }
     }
 
-    // Every window of the class is in the tray vault. Deliberately ALL, not
-    // ANY: an app with one window parked and one on screen is on screen, and
-    // Notifications relies on that ("Deliberately not done for a VISIBLE tray
-    // app"). No windows -> false: there is nothing to restore.
+    // The app's MAIN window is in the tray vault. Deliberately ALL of the
+    // primaries, not ANY (see isPrimaryWindow): an app with one window parked
+    // and one on screen is on screen, and Notifications relies on that
+    // ("Deliberately not done for a VISIBLE tray app"). No primary window ->
+    // false: there is either nothing to restore, or only child windows are
+    // alive, and those are not the app to bring back.
+    //
+    // Child windows do NOT count here, which is the point: with the main
+    // window parked and a draft still open, the app IS put away -- the tray
+    // icon has to stay (it is the only way back to the main window) and
+    // Notifications has to treat the app as hidden, although the draft is on
+    // screen and unaffected.
     function isHidden(cls) {
-        const wins = root.windowsOf(cls);
-        if (wins.length === 0)
+        const prim = root.primaryWindowsOf(cls);
+        if (prim.length === 0)
             return false;
-        return wins.every(w => w.workspace && w.workspace.name === "special:tray");
+        return prim.every(w => w.workspace && w.workspace.name === "special:tray");
     }
 
     // Registry entries whose app currently has a window -- the tray's
@@ -198,7 +243,12 @@ Singleton {
             return;
         if (reason)
             console.log(`[TrayApps] ${new Date().toISOString().slice(11, 23)} park(${cls}) reason=${reason} intent=${root.trayIntent[cls] === true}`);
-        const wins = root.windowsOf(cls)
+        // MAIN windows only (isPrimaryWindow): parking the app must not drag
+        // the app's own documents along. A compose or message window left
+        // open stays open -- it is a window the user is working in, and
+        // sweeping it away is how a draft ends up hidden in the vault with no
+        // obvious way back.
+        const wins = root.primaryWindowsOf(cls)
             .filter(w => !w.workspace || w.workspace.name !== "special:tray");
         for (const w of wins) {
             // A window must not enter the vault FULLSCREEN. The close gesture
@@ -660,7 +710,13 @@ Singleton {
                 root.goneAt = g;
             }
             seen[cls] = true;
-            const stray = wins.filter(w => !w.workspace || w.workspace.name !== "special:tray");
+            // Children excluded for the same reason park() only moves
+            // primaries: a draft window on screen says nothing about whether
+            // the APP is allowed out, and treating it as a stray is what
+            // pulled an open compose window back into the vault a second
+            // after its main window was put away.
+            const stray = wins.filter(w => root.isPrimaryWindow(w)
+                && (!w.workspace || w.workspace.name !== "special:tray"));
             // DURING THE LAUNCH WINDOW the permission cannot expire, however
             // the list reads: a launch in flight (granted recently, still
             // allowed out) is inside Thunderbird's heavy startup, and that

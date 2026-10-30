@@ -2910,6 +2910,10 @@ end
 --   * isTrayAppCls(cls) -- reads tray.closeToTray out of the real config.json.
 --     Opt-in per class: only a class set true can take this branch, and any
 --     read failure answers false, towards closing.
+--   * isTrayAppMainWindow(w) -- is this the app's OWN window, not one it
+--     opened (a compose, a message)? Only the main window may be parked; see
+--     its comment, and TrayApps.qml's isPrimaryWindow for the shell's half of
+--     the same rule.
 --   * smartClose(addr)  -- focus the window, ONE move dispatch to
 --     `special:tray`, return true. Focus-scoped like every window dispatcher
 --     in this build (below), and with no verification loop of any kind: if
@@ -2947,9 +2951,44 @@ function isTrayAppCls(cls)
     return object:match('"' .. escaped .. '"%s*:%s*true') ~= nil
 end
 
+-- Is this the app's MAIN window -- the one whose close means "put the app
+-- away" -- rather than a window the app opened FOR something?
+--
+-- A class is not a window. Thunderbird reports the same class
+-- (org.mozilla.Thunderbird) for its 3-pane main window, for a compose window
+-- and for a message opened in its own window -- measured live on this machine,
+-- three windows of that one class, one of them a "Write: ..." compose sitting
+-- in the tray vault because a close-drag parked it. Parking is an APP-level
+-- permission, so without this test closing an email put the DRAFT in the tray:
+-- off screen, indistinguishable from the app itself, and the user's report
+-- ("it also does the same with its emails, those should act as actual
+-- closing").
+--
+-- So: only the main window may take the park branch. Every child window of an
+-- opted-in class closes for real, exactly like a window of any other app. The
+-- shell draws the same line (TrayApps.qml's isPrimaryWindow, the other half of
+-- this handshake) so the two can never disagree about which window the app is.
+--
+-- Thunderbird's own title is the discriminator: the main window ends in
+-- "- Mozilla Thunderbird"; a compose ends in "- Thunderbird" ("Write:
+-- <subject> - Thunderbird") and a message window likewise. A title matching
+-- nothing is not the main window, so an unrecognised window CLOSES -- the same
+-- fail-towards-closing direction as isTrayAppCls above.
+function isTrayAppMainWindow(w)
+    if not w then return false end
+    local cls = w.class or w.initialClass or ""
+    if not isTrayAppCls(cls) then return false end
+    if cls == "org.mozilla.Thunderbird" then
+        local title = w.title or ""
+        return title:match("%-%s*Mozilla Thunderbird%s*$") ~= nil
+    end
+    return true
+end
+
 -- Park this window on the tray vault instead of closing it. Returns true when
 -- the window was parked (the caller must NOT also close it), false when the
--- class is not opted in (the caller closes normally).
+-- class is not opted in or this is one of the app's child windows (the caller
+-- closes normally).
 -- Do NOT call focusAddr() here: it is a `local function` declared further
 -- down, so at this position in the file it resolves to a nil global and the
 -- throw would abort the whole finish path -- no park, no close. Focus inline
@@ -2957,8 +2996,9 @@ end
 function smartClose(addr)
     local w = findWindow(addr)
     if not w then return false end
-    local cls = w.class or w.initialClass or ""
-    if not isTrayAppCls(cls) then return false end
+    -- The class opt-in says the app MAY be put away; this says whether this
+    -- window is the app. A compose or message window closes for real.
+    if not isTrayAppMainWindow(w) then return false end
     -- The shell re-asserts the tray icon from the parked window (its
     -- liveRegistry is window-backed), and the icon's click runs
     -- TrayApps.toggle -> show(), which moves the window back and attaches it.
@@ -4138,12 +4178,15 @@ hl.gesture({
                 -- if anything stole it mid-drag.
                 focusAddr(d.addr)
                 -- Per-app minimize-to-tray, restored 2026-10-27 (the full
-                -- why sits in the vault section above): a class opted in
-                -- through config.json's tray.closeToTray -- WhatsApp Desktop
-                -- is the only one today, Thunderbird is off by the user's own
-                -- setting -- is PARKED on `special:tray` here instead of
-                -- closed, so the shell's tray icon for it survives the swipe
-                -- and is the way back in. Every other class still closes,
+                -- why sits in the vault section above): the MAIN window of a
+                -- class opted in through config.json's tray.closeToTray
+                -- (WhatsApp Desktop and Thunderbird) is PARKED on
+                -- `special:tray` here instead of closed, so the shell's tray
+                -- icon for it survives the swipe and is the way back in.
+                -- A window the app OPENED -- a compose, a message in its own
+                -- window -- is not the app (isTrayAppMainWindow), so swiping
+                -- one CLOSES it like any other document window. Every other
+                -- class still closes,
                 -- and the 2026-10-22 hazards stay out: no verify, no retry,
                 -- no fallback sits in this branch -- a park that does not
                 -- land leaves the window ON SCREEN (the safe direction),

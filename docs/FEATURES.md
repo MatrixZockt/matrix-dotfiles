@@ -107,10 +107,17 @@ windows rather than a grid of all workspaces.
   the same gesture keeps its old job (fullscreen toggle). Four fingers down closes it.
 - **Quote wallpapers**: a generated wall of typographic quotes with an optional clock
   overlay, previewed in `design/quote-wallpaper-preview.html`.
-- **No wallpapers ship with this repo.** The grid opens on an **Add wallpaper**
-  button instead of a blank list: it opens your file picker, applies the picture you
-  choose and keeps it in your own collection. Video wallpapers are supported with a
-  restore helper (`custom/scripts/__restore_video_wallpaper.sh`).
+- **Wallpapers are not kept in this repo.** No picture ships and nothing in
+  `~/Pictures/Wallpapers` is committed (that folder is gitignored), so a fresh clone
+  has an empty collection. An empty grid is replaced by an **Add wallpaper** button:
+  it opens your file picker, applies the picture you choose immediately, and copies it
+  into your own collection so the carousel has it next time. The carousel, the swipes,
+  the random pick and the auto-switch all work as before — they just have your
+  pictures in them instead of mine. Video wallpapers are supported with a restore
+  helper (`custom/scripts/__restore_video_wallpaper.sh`).
+- The one image the shell does ship is a neutral placeholder wallpaper
+  (`assets/images/default_wallpaper.png`), there only to give a fresh install
+  something to draw before you pick a real one.
 
 ### Sidebars
 

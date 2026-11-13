@@ -10,6 +10,13 @@ import Qt5Compat.GraphicalEffects
 import Quickshell
 import Quickshell.Io
 
+// The selector's grid, address bar and toolbar.
+//
+// WALLPAPERS ARE NOT KEPT IN THIS REPOSITORY. A fresh clone therefore has an
+// empty collection and the grid would be a blank rectangle, so the empty state
+// (see the Add wallpaper column further down) replaces it with a button: it
+// opens the picker and applies the picture you choose, and Wallpapers.qml copies
+// it into your own ~/Pictures/Wallpapers so the carousel has it next time.
 MouseArea {
     id: root
     property int columns: 4

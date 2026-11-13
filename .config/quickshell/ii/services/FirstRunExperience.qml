@@ -11,6 +11,9 @@ Singleton {
     property string firstRunFileContent: "This file is just here to confirm you've been greeted :>"
     property string firstRunNotifSummary: "Welcome!"
     property string firstRunNotifBody: "Hit Super+/ for a list of keybinds"
+    // The ONE picture that ships (a neutral placeholder), used only to give a fresh
+    // install something on the desktop. It is not a wallpaper collection entry and
+    // not a sample of a real desktop: wallpapers are never kept in this repo.
     property string defaultWallpaperPath: FileUtils.trimFileProtocol(`${Directories.assetsPath}/images/default_wallpaper.png`)
     property string welcomeQmlPath: FileUtils.trimFileProtocol(Quickshell.shellPath("welcome.qml"))
 

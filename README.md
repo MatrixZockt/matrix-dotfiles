@@ -53,8 +53,11 @@ Built for Hyprland 0.56+ with the Lua config and the illogical-impulse package s
 
 **Not in this repo, on purpose:** wallpapers and other third-party art, anything
 specific to one machine's hardware, and every secret, hostname or personal path.
-The wallpaper selector therefore opens empty and offers an **Add wallpaper** button
-that applies a picture you choose and keeps it in your own collection.
+Wallpapers are not kept here at all — no picture ships and `~/Pictures/Wallpapers` is
+gitignored — so the selector opens empty and offers an **Add wallpaper** button: it
+opens your file picker, applies the picture right away, and keeps your own copy for
+the carousel. Everything around it (carousel, swipes, random pick, auto-switch) works
+the same, with your pictures in it.
 
 ## Documentation
 

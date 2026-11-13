@@ -12,6 +12,13 @@ pragma ComponentBehavior: Bound
 /**
  * Provides a list of wallpapers and an "apply" action that calls the existing
  * switchwall.sh script. Pretty much a limited file browsing service.
+ *
+ * NO WALLPAPERS ARE SHIPPED OR KEPT IN THIS REPOSITORY. The collection is the
+ * user's own `~/Pictures/Wallpapers` (untracked, see .gitignore) and it starts
+ * empty on a fresh clone. An empty folder is not a dead end: the selector shows
+ * an "Add wallpaper" button (WallpaperSelectorContent.qml) that opens the picker,
+ * applies the chosen picture straight away through the same apply path, and keeps
+ * a copy in the collection so the carousel has something to scroll next time.
  */
 Singleton {
     id: root
@@ -46,6 +53,10 @@ Singleton {
     // ~/Downloads (or anywhere temporary) can be deleted right after --
     // the applied wallpaper, the history entry and the config all point at
     // the shell's own copy, never at the borrowed original.
+    //
+    // The collection is the USER's, not the repo's: this folder is gitignored and
+    // nothing in it is ever committed, because the wallpapers themselves are not
+    // part of what this configuration ships.
     readonly property string collectionDir: `${FileUtils.trimFileProtocol(Directories.pictures)}/Wallpapers`
 
     // ── The live clock wallpaper ────────────────────────────────────────

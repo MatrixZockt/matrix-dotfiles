@@ -3,7 +3,7 @@
 Auto-generated from the **running** Hyprland instance (`hyprctl binds -j`),
 so this is what your keys actually do right now.
 
-Total binds: **328**
+Total binds: **327**
 
 Regenerate with:
 
@@ -236,12 +236,6 @@ make keybinds
 | Keys | Action |
 | --- | --- |
 | `MMB` | Swallow middle click (no PRIMARY paste) — (lua action) |
-
-## System
-
-| Keys | Action |
-| --- | --- |
-| `SHIFT + SUPER + G` | GPU mode (iGPU <-> the discrete GPU for new apps) — (lua action) |
 
 ## Utilities
 

@@ -1078,33 +1078,6 @@ hl.unbind("SUPER + ALT + Page_up")
 hl.unbind("CTRL + SUPER + SHIFT + Right")
 hl.unbind("CTRL + SUPER + SHIFT + Left")
 
-
--- GPU mode: SUPER + SHIFT + G. One switch for "should newly launched apps use
--- the NVIDIA dGPU?", instead of a setting per application.
---
--- Not SUPER+G: that is the quickshell overlay toggle (hyprland/keybinds.lua),
--- and stealing it would break the widget overlay. SHIFT+G is free and keeps
--- the mnemonic.
---
--- Off (the default) is what lets the dGPU sleep: the desktop is drawn by the
--- Intel iGPU, so an idle laptop stays idle. On is what you want for an hour of
--- something that actually needs the dGPU -- games and anything drawing through
--- GLX or Vulkan, plus every CUDA workload, which uses the dGPU either way.
---
--- The switch is applied at LAUNCH time to the two places apps actually come
--- from: the launcher (quickshell's open.sh, one chokepoint for every menu
--- entry) and interactive terminals (config.fish, which is deliberately NOT
--- conf.d -- conf.d runs on the way to exec'ing the compositor, which is how an
--- earlier GPU attempt made this session unbootable). Between them that is
--- every app you start; a command exec'd straight from a keybind is the one
--- gap, and `gpu-run` covers that.
---
--- Already-running apps are not moved; start new ones after flipping.
-hl.unbind("SUPER + SHIFT + G")
-hl.bind("SUPER + SHIFT + G",
-    hl.dsp.exec_cmd("gpu-mode toggle"),
-    { description = "System: GPU mode (iGPU <-> the discrete GPU for new apps)" })
-
 -- ── Every SUPER chord must silence the bare-SUPER action ──────────────
 --
 -- A bare SUPER tap opens the app search card ON RELEASE, and that release

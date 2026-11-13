@@ -64,23 +64,6 @@ fi
 # The command is a shell line on purpose: entries in the launcher are shell
 # lines (`kitty -1 --hold=yes fish -i -c 'passwd'`), and re-splitting them here
 # would break the ones that quote their own arguments.
-#
-# GPU mode: if the session's GPU switch is on, hand the app to gpu-run, which
-# puts the NVIDIA dGPU in its environment.
-#
-# This is the ONE place every app in the launcher goes through -- the shell
-# calls it from GlobalStates.qml, one call per click -- so honouring the switch
-# here covers every application without a single .desktop file being edited.
-# That is the whole point: the policy is one switch, not one setting per app.
-#
-# `gpu-run` is exec'd, not sourced, so the app's own environment is built by
-# it rather than patched afterwards, and an app that re-executes itself
-# (Chromium, Electron, Freebuff's updater) keeps the variables because it
-# inherited them the normal way.
-gpu_state="${XDG_CONFIG_HOME:-$HOME/.config}/gpu-mode/state"
-if [ -f "$gpu_state" ] && [ "$(cat "$gpu_state" 2>/dev/null)" = on ]; then
-    command="gpu-run $command"
-fi
 
 # The stamp is the guard for the shell's own error report. Everything this
 # script starts carries II_OPENED_BY_II in its environment, inherited by the

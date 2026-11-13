@@ -201,4 +201,6 @@ Done. Next steps on a fresh machine:
 
   2. Reload Hyprland:   make reload
   3. See what broke:    make check
+  4. Optional: extras/optional/ is NOT installed (local llama-server unit and scripts).
+     Copy it by hand if you want it; see the README.
 EOF

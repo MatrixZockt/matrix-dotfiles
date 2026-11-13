@@ -77,7 +77,7 @@
 #     3. qs -c ii ipc call failsafe flash …  (bar blink + corner card)
 #
 #   The power escalation this used to do -- performance profile, 120/160 W cap,
-#   turbo, GPU Dynamic Boost -- is still there behind FAILSAFE_ESCALATE=1, but
+#   turbo and a raised power cap -- is still there behind FAILSAFE_ESCALATE=1, but
 #   it is OFF by default on purpose (2026-10-26, owner's rule): a 100% CPU
 #   event is a thing to NAME and REMOVE, not a thing to power through. Raising
 #   the ceiling turns a spike into heat, fan noise and battery drain and leaves
@@ -351,8 +351,7 @@ apply_performance() {
     # re-notifying each time about a boost that is already on. Nothing to do
     # is the correct answer here.
     if [ "${engaged:-0}" = "1" ] \
-        && [ "$(powerprofilesctl get 2>/dev/null)" = "performance" ] \
-        && systemctl is-active --quiet nvidia-powerd.service; then
+        && [ "$(powerprofilesctl get 2>/dev/null)" = "performance" ]; then
         log "still pegged (${busy}% busy, ${lag}% lag, ${streak} samples), boost already on — holding"
         last_action=$(date +%s)
         return 0
@@ -383,7 +382,7 @@ apply_performance() {
     # whatever the owner is doing. With FAILSAFE_DRY_RUN=1 the decision and
     # its reason are logged and nothing is written.
     if [ "${FAILSAFE_DRY_RUN:-0}" = "1" ]; then
-        log "DRY-RUN would set the CPU to performance and enable GPU Dynamic Boost"
+        log "DRY-RUN would set the CPU to performance"
         engaged=1
         engaged_at=$(date +%s)
         quiet_since=0
@@ -403,18 +402,11 @@ apply_performance() {
     if [ -x "$HOME/.local/bin/power-autoswitch" ]; then
         "$HOME/.local/bin/power-autoswitch" --converge 2>&1 | sed 's/^/[converge] /' >&2 || true
     fi
-    if systemctl is-active --quiet nvidia-powerd.service; then
-        log "gpu dynamic boost already active"
-    else
-        systemctl start nvidia-powerd.service 2>/dev/null \
-            && log "gpu dynamic boost started" \
-            || log "WARN: could not start nvidia-powerd (needs admin? it is boot-enabled, so this should not happen)"
-    fi
     engaged=1
     engaged_at=$(date +%s)
     quiet_since=0
     notify -i "local_fire_department" "Performance mode engaged" \
-        "CPU pegged at ${busy}% for ${streak}x${INTERVAL}s -- ${lag}. Switched CPU to Performance and enabled GPU Dynamic Boost."
+        "CPU pegged at ${busy}% for ${streak}x${INTERVAL}s -- ${lag}. Switched CPU to Performance."
     blink fire "Power failsafe: CPU pegged and lagging — switched to Performance"
     last_action=$(date +%s)
 }
@@ -439,7 +431,7 @@ stand_down() {
         *)           target=balanced ;;
     esac
     if [ "${FAILSAFE_DRY_RUN:-0}" = "1" ]; then
-        log "DRY-RUN would stand down to ${target} and stop GPU Dynamic Boost"
+        log "DRY-RUN would stand down to ${target}"
         engaged=0
         quiet_since=0
         last_action=0
@@ -462,11 +454,6 @@ stand_down() {
     else
         log "cpu profile already $target (the user's mode: $mode)"
     fi
-    if systemctl is-active --quiet nvidia-powerd.service; then
-        systemctl stop nvidia-powerd.service 2>/dev/null \
-            && log "gpu dynamic boost stopped" \
-            || log "WARN: could not stop nvidia-powerd"
-    fi
     engaged=0
     quiet_since=0
     # The cooldown guards rapid fire-fire repeats, but a stand-down needed 90
@@ -484,7 +471,7 @@ stand_down() {
 log "watching the CPU only: fires after ${CONSECUTIVE} samples at >=${CPU_BUSY}% busy AND (>=${CPU_LAG}% PSI lag OR (<=${CLOCK_LINE} MHz AND >=${CPU_LAG_FLOOR}% PSI), interval ${INTERVAL}s, cooldown ${COOLDOWN}s"
 log "ignoring memory, io and GPU: they are not the CPU being pegged"
 if [ "${FAILSAFE_ESCALATE:-0}" = "1" ]; then
-    log "action: ESCALATE (opt-in) -- performance profile + GPU Dynamic Boost; auto-restore after ${RESTORE_QUIET}s calm"
+    log "action: ESCALATE (opt-in) -- performance profile; auto-restore after ${RESTORE_QUIET}s calm"
 else
     log "action: ALARM ONLY -- log, notify and blink; no profile, cap, turbo or GPU change (FAILSAFE_ESCALATE=1 opts in)"
 fi

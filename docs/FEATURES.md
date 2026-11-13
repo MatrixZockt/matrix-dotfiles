@@ -215,9 +215,11 @@ The shell provides the polkit authentication surface (`modules/ii/polkit/`), sta
 - **Dictation**: local speech-to-text through a daemon plus a focus-aware inserter, so
   transcribed text lands in whatever window is focused.
   (`services/Dictation.qml`, `custom/scripts/dictate*.sh|py`)
-- **Local AI**: a `llama-server` integration with a console and per-model settings,
-  backed by `extras/systemd/user/llama-server-local.service`.
-  (`services/Ai.qml`, `services/LlamaService.qml`, `bar/LlamaSettings.qml`)
+- **Local AI (optional, not installed)**: a `llama-server` integration with a console
+  and per-model settings. The shell side is always there; the unit and the six helper
+  scripts live in `extras/optional/` and are only copied in if you run a local model
+  yourself. (`services/LlamaService.qml`, `bar/LlamaSettings.qml`; install from
+  `extras/optional/bin` and `extras/optional/systemd/user`)
 - **Trading tab**: a market panel with a candle chart widget.
   (`bar/TradingTab.qml`, `common/widgets/CandleChart.qml`)
 
@@ -288,10 +290,9 @@ tray behaviour for Thunderbird.
   GPU ahead of the iGPU, so charts read the dGPU first without hardcoding a model.
   (`services/HardwareStats.qml`)
 - **Power modes**: three profiles with an autoswitch service and a failsafe
-  (`extras/bin/power-autoswitch`, `power-failsafe`, `ppd-nvidia-boost`, units in
-  `extras/systemd/user/`).
-- **GPU launch helpers** (`gpu-mode`, `gpu-run`) run a program on the discrete GPU or
-  the integrated one.
+  (`extras/bin/power-autoswitch`, `power-failsafe`, units in `extras/systemd/user/`).
+  Nothing vendor-specific is installed: the services read what the machine has and
+  stay quiet when it does not apply.
 - **Lid guard** and **CPU watchdog** watch for a machine that is about to sleep in the
   wrong state or a process that is pegging the CPU, and escalate rather than staying
   silent. (`custom/scripts/lid-guard.sh`, watchdog service)

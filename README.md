@@ -39,17 +39,54 @@ a symlink into this repo, so an edit is one reload away and git is the undo butt
 - Every surface documented in [docs/FEATURES.md](docs/FEATURES.md) with the file
   that implements it.
 
+## Before you start
+
+This is not a standalone config. It is a layer on top of
+[end-4/dots-hyprland](https://github.com/end-4/dots-hyprland), which brings Hyprland,
+Quickshell and the whole illogical-impulse shell. Install that base first, or this
+repo has nothing to run inside of:
+
+```bash
+git clone https://github.com/end-4/dots-hyprland ~/dots-hyprland
+cd ~/dots-hyprland && ./setup install
+```
+
 ## Quick start
 
 ```bash
 git clone https://github.com/MatrixZockt/matrix-dotfiles ~/hyprland
 cd ~/hyprland
+make deps        # runtime packages, plus the three AUR fonts this config expects
 ./install.sh     # link this repo into ~/.config and install the small helpers
 make reload      # restart Hyprland with it
 ```
 
-Built for Hyprland 0.56+ with the Lua config and the illogical-impulse package set;
-`./install.sh --dry-run` prints what it would do before it does it.
+Order matters: base, then `make deps`, then this repo's installer.
+`./install.sh --dry-run` prints what it would do and changes nothing.
+
+### What it needs
+
+- **An Arch-family distro** (CachyOS, Arch, EndeavourOS). `make deps` uses `pacman`
+  and `paru` for the fonts; on Fedora, Ubuntu or openSUSE install the same packages
+  by hand. Nothing here is Arch-specific apart from that script.
+- **Hyprland 0.56 or newer**, with the Lua config (`hyprland.lua`, not
+  `hyprland.conf`). Older releases will not read this tree.
+- **Quickshell**, plus the packages the illogical-impulse base installs.
+
+No wallpapers, hardware settings or machine-specific values are shipped, so nothing
+has to be deleted after a clone.
+
+### Optional extras
+
+`extras/optional/` holds the one feature that is deliberately **not** installed: the
+local llama-server unit and its six helper scripts. Copy them in yourself if you run a
+local model:
+
+```bash
+cp extras/optional/bin/llama-* ~/.local/bin/
+cp extras/optional/systemd/user/llama-server-local.service ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now llama-server-local
+```
 
 **Not in this repo, on purpose:** wallpapers and other third-party art, anything
 specific to one machine's hardware, and every secret, hostname or personal path.
@@ -100,12 +137,13 @@ More figures: [how the config loads](docs/images/config-layers.png) ·
 ├── extras/                    copied into ~ by install.sh (entries, icons, bin/)
 │   ├── applications/          .desktop files (freebuff, appimage-run handler)
 │   ├── bin/                   the ~/.local/bin helpers the config calls:
-│   │                          appimage-run, the power
-│   │                          stack (power-autoswitch, power-failsafe,
-│   │                          ppd-nvidia-boost), the GPU launch helpers,
-│   │                          the local llama server, session-env/session-doctor
+│   │                          appimage-run, the power stack
+│   │                          (power-autoswitch, power-failsafe),
+│   │                          session-env/session-doctor
 │   ├── etc/polkit-1/          rules for passwordless mount/lid changes
 │   ├── sbin/                  ii-recover (session recovery helper)
+│   ├── optional/              NOT installed: the local llama-server unit and
+│   │                          its scripts, for whoever wants them
 │   ├── share/polkit-1/        polkit actions for the helpers above
 │   ├── systemd/user/          the user units that back all of the above
 │   └── icons/                 hicolor icons for the entries above

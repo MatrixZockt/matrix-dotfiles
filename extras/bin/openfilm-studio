@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# OpenFilm, from the SUPER menu.
+#
+# OpenFilm is not a desktop application: it is an npm CLI (`npx -y
+# openfilm@latest`, the same command the skill at ~/.claude/skills/openfilm
+# names) whose Studio is a local page it starts, printing the address and
+# opening the browser if no page connects. So a menu entry has to do what the
+# CLI does, not what a binary would: start Studio and hand the person the page.
+#
+# `open` with no folder is the right verb for a launcher. Its own help:
+# "the project around the current folder, else the one opened last, else
+# Studio's projects (where the person can start one)". The current folder is
+# never turned into a project, so running from $HOME cannot litter a film
+# there -- and a click always lands somewhere useful instead of creating an
+# empty one.
+#
+# `-y` matters: without it npx asks "Ok to proceed?" on a terminal that a menu
+# launch does not have, and the click would hang forever.
+#
+# The first run downloads the package into npx's cache (a few seconds); after
+# that the entry starts Studio immediately. `npx -y openfilm@latest update`
+# fetches a newer OpenFilm when one exists.
+set -u
+
+export PATH="${PATH:+$PATH:}/usr/bin:/bin"
+
+cd "$HOME" || exit 1
+
+exec npx -y openfilm@latest open "$@"

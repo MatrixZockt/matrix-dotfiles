@@ -25,7 +25,7 @@
 --
 -- The tiled case -- which the gesture is for -- must still float and follow.
 
-local CONFIG = arg[1] or "/home/user/.config/hypr/custom/general.lua"
+local CONFIG = arg[1] or (os.getenv("HOME") or "") .. "/.config/hypr/custom/general.lua"
 local GESTURES = {}
 local DISPATCHES = {}
 -- Declared HERE, above `proxy`, because the proxy's call handler sets it: a
@@ -149,7 +149,8 @@ end
 
 -- `require("custom.popup")` is resolved from the config root, exactly as the
 -- compositor does it.
-package.path = "/home/user/.config/hypr/?.lua;/home/user/.config/hypr/?/init.lua;" .. package.path
+package.path = (os.getenv("HOME") or "") .. "/.config/hypr/?.lua;"
+    .. (os.getenv("HOME") or "") .. "/.config/hypr/?/init.lua;" .. package.path
 local ok, err = pcall(dofile, CONFIG)
 if not ok then
     io.stderr:write("config load failed: " .. tostring(err) .. "\n")

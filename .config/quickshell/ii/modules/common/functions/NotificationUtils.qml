@@ -95,6 +95,77 @@ Singleton {
         return Qt.formatDateTime(messageTime, "MMMM dd");
     }
 
+    /**
+     * One comparable spelling of an app, for matching a notification's sender
+     * against the mute list.
+     *
+     * The same app arrives in three spellings -- `appName` ("WhatsApp
+     * Desktop"), `desktopEntry` ("whatsapp-linux-desktop.desktop") and
+     * `appIcon` (a full path into the icon theme) -- and no two of them are
+     * equal. Reducing each to words: basename (identities arrive as paths), no
+     * file extension, lowercase, every run of punctuation or space collapsed to
+     * a single space.
+     *
+     * Shared by the daemon (services/Notifications.qml), which decides whether
+     * to stay silent, and the Settings page, which draws the switch: if the two
+     * disagreed about what "the same app" means, the row would say Muted while
+     * the card kept arriving.
+     *
+     * @param { string } value
+     * @returns { string }
+     */
+    function normalizeAppIdentity(value) {
+        if (typeof value !== "string" || value.length === 0)
+            return "";
+        return value.split("/").pop()
+            .replace(/\.desktop$/i, "")
+            .replace(/\.(png|svg|xpm|ico|jpe?g|gif)$/i, "")
+            .toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    }
+
+    /**
+     * Is any spelling of this sender on the mute list?
+     *
+     * Whole-identity equality, not substring: muting "discord" must not mute
+     * an unrelated app whose name merely contains the word, and muting
+     * "Discord Canary" must not mute "Discord".
+     *
+     * @param { string[] } identities
+     * @param { string[] } mutedApps
+     * @returns { boolean }
+     */
+    function isIdentityMuted(identities, mutedApps) {
+        const muted = (mutedApps ?? [])
+            .map((a) => root.normalizeAppIdentity(a))
+            .filter((t) => t.length > 0);
+        if (muted.length === 0)
+            return false;
+        for (const raw of (identities ?? [])) {
+            const token = root.normalizeAppIdentity(raw);
+            if (token.length > 0 && muted.indexOf(token) >= 0)
+                return true;
+        }
+        return false;
+    }
+
+    /**
+     * The mute list with one app's state changed. Copy-on-write: the config
+     * adapter only sees a new array, and the identity that was already on the
+     * list is replaced rather than duplicated.
+     *
+     * @param { string[] } mutedApps
+     * @param { string } appName
+     * @param { boolean } muted
+     * @returns { string[] }
+     */
+    function withAppMuted(mutedApps, appName, muted) {
+        const key = root.normalizeAppIdentity(appName);
+        const list = (mutedApps ?? []).filter((a) => root.normalizeAppIdentity(a) !== key);
+        if (muted && key.length > 0)
+            list.push(appName);
+        return list;
+    }
+
     function processNotificationBody(body, appName) {
         let processedBody = body
         

@@ -1,0 +1,443 @@
+#!/bin/bash
+# Freebuff DESKTOP (GUI) reliable launcher — one click, one window.
+#
+# Named `freebuff-desktop`, NOT `freebuff`, on purpose. This file used to be
+# called `freebuff` and sat in ~/.local/bin, which is ahead of /usr/bin on
+# PATH -- so it shadowed the real Freebuff CLI that npm installed at
+# /usr/bin/freebuff. Typing `freebuff` in a terminal then either focused this
+# window or launched the GUI, and the CLI could never be started at all while
+# the desktop app was up. Nothing to do with Freebuff refusing to run two
+# instances: the CLI and the GUI are independent and both run fine together
+# (verified). The names were simply colliding.
+#
+# Why this exists: Freebuff is an Electron app whose GPU process
+# SIGABRTs on this machine (NVIDIA/intel Wayland, iGPU buffer ENOMEM
+# under early-boot pressure). Each failed click spawned a crashing
+# instance and the window took five attempts to appear. Software
+# rendering is instant, stable, and as a bonus stops the app from
+# pinning the NVIDIA dGPU open (zero /dev/nvidia* fds).
+#
+#  * already running  -> focus the existing window (Hyprland), exit
+#  * not running      -> launch with the stable flag set, pass args thru
+#
+# For the terminal agent, use `freebuff` (the CLI) -- do not point that at
+# this file.
+
+APP="$HOME/Applications/Freebuff.AppImage"
+# Self-heal after an update: the app replaces its versioned AppImage, which
+# left this symlink pointing at a file that no longer exists (2026-11-06).
+# If that happens, use the newest versioned AppImage instead.
+if [ ! -e "$APP" ]; then
+    newest=$(ls -1t "$HOME"/Applications/Freebuff-*-linux-x86_64.AppImage 2>/dev/null | head -n1)
+    [ -n "$newest" ] && APP="$newest"
+fi
+CLASS="@codebuff/freebuff-desktop"
+
+# Bring an already-running instance forward.
+#
+# NOT `hyprctl dispatch focuswindow class:...`: this Hyprland is the Lua-config
+# build, and the legacy dispatcher string is parsed as Lua, where
+# `focuswindow class:@codebuff/...` is a syntax error ("')' expected near
+# 'class'"). Every legacy `hyprctl dispatch` form is affected -- `workspace 3`
+# included. The call failed, the error was swallowed by the redirect, and the
+# launcher exited non-zero having done nothing -- so clicking the app while it
+# was already open appeared to do nothing at all. The working form is the Lua
+# dispatcher `hl.dsp.focus(...)`, which takes real values rather than a
+# selector string.
+focus_existing() {
+    command -v hyprctl >/dev/null 2>&1 || return 1
+    # Both steps are needed, in this order. `focus({ window = w })` alone only
+    # works when the window is on the workspace you are already on; the window
+    # on another workspace is simply not focused and the call is a no-op. The
+    # workspace focus first, then the window.
+    #
+    # The exit status is the only usable signal here: `hyprctl eval` prints a
+    # bare "ok" and never the script's return value, so grepping its output
+    # for a sentinel can never match.
+    hyprctl eval '
+        local target
+        for _, w in ipairs(hl.get_windows() or {}) do
+            -- Class differs per backend: `@codebuff/freebuff-desktop` on
+            -- Wayland, plain `Freebuff` through XWayland (WM_CLASS). Match the
+            -- common word so clicking the icon focuses it either way.
+            if (w.class or ""):lower():find("freebuff", 1, true) then target = w break end
+        end
+        if not target then return end
+        hl.dispatch(hl.dsp.focus({ workspace = target.workspace.id }))
+        hl.dispatch(hl.dsp.focus({ window = target }))
+    ' >/dev/null 2>&1
+}
+
+# ── Already running? ───────────────────────────────────────────────────────
+#
+# This used to be `pgrep -f '@codebufffreebuff-desktop'`, and that string
+# exists in NO process on this machine: the Wayland class is
+# `@codebuff/freebuff-desktop` (with the slash), the X11 class is `Freebuff`,
+# and the binary is `.../freebuff`. The test therefore never matched, so every
+# click of the icon started ANOTHER instance on top of a live one -- which is
+# exactly the reported "it opens in another tab / on a random workspace": the
+# new process's window maps wherever the compositor puts a second window, and
+# the older one is still up somewhere else. Two Electron instances of a chat
+# app also fight for the same profile locks, which is its own kind of slow.
+#
+# So: look at WINDOWS, which is what the user sees, and treat a running-but-not-
+# yet-mapped process as "wait", never as "start another one". The old 580x255
+# splash is excluded by width so a launching app is still waited for.
+window_on_screen() {
+    command -v hyprctl >/dev/null 2>&1 || return 1
+    hyprctl clients -j 2>/dev/null | python3 -c '
+import json,sys
+try: cs = json.load(sys.stdin)
+except Exception: sys.exit(1)
+sys.exit(0 if any("freebuff" in (c.get("class") or "").lower()
+                  and c["size"][0] >= 700 for c in cs) else 1)'
+}
+
+# The Wayland-class twin of the check above, used only by the native-Wayland
+# attempt below: that attempt must prove that ITS OWN window appeared, not that
+# some window (an already-running X11 instance, say) is on screen.
+wayland_window_up() {
+    command -v hyprctl >/dev/null 2>&1 || return 1
+    hyprctl clients -j 2>/dev/null | python3 -c '
+import json,sys
+try: cs = json.load(sys.stdin)
+except Exception: sys.exit(1)
+sys.exit(0 if any("freebuff" in (c.get("class") or "").lower()
+                  and c.get("xwayland") is False
+                  and c["size"][0] >= 700 for c in cs) else 1)'
+}
+
+if window_on_screen; then
+    focus_existing || true
+    exit 0
+fi
+
+if pgrep -x freebuff >/dev/null 2>&1; then
+    # It is starting. Wait for its window instead of racing a second copy
+    # against it: this is the click-during-startup case that used to produce a
+    # duplicate window on another workspace and a "Couldn't open Freebuff"
+    # toast for an app that was seconds from drawing.
+    for _ in $(seq 1 90); do
+        sleep 1
+        if window_on_screen; then
+            focus_existing || true
+            exit 0
+        fi
+        pgrep -x freebuff >/dev/null 2>&1 || break
+    done
+fi
+
+# ── Rendering backend ────────────────────────────────────────────────────
+# Read this before changing the flags again: the choice is not cosmetic, the
+# wrong one stops the app from opening at all.
+#
+# MEASURED on this machine (2560x1600 panel at scale 1.5, so every window is
+# rasterised at 3840x2400 physical pixels):
+#
+#   native Wayland + GPU (any flavour)  -> app STUCK on the 580x255 splash,
+#       main window never appears. Logs `gbm_pixmap_wayland.cc: Cannot create
+#       bo with format=RGBA_8888 and usage=SCANOUT` and `intel: the execbuf
+#       ioctl keeps returning ENOMEM`. Reproduced four ways: bare
+#       --ozone-platform=wayland, --render-node-override=renderD129 (Intel),
+#       the same plus --disable-gpu-sandbox, and --use-angle=vulkan.
+#   native Wayland + --disable-gpu      -> works, crisp (renders at 1.5x),
+#       but draws everything on the CPU.
+#   XWayland + GPU                      -> works, REAL hardware (GPU process
+#       holds only renderD129 and loads libGLX_mesa/iris, no swiftshader, no
+#       GBM errors), pixels identical to the software window. Cost: this
+#       config sets `xwayland:force_zero_scaling`, so an X11 window is capped
+#       at 2560x1600 and upscaled 1.5x to the panel -- text comes out softer.
+#
+# So there is no crisp hardware path on this box, and `--disable-gpu` is what
+# keeps the app usable. Do not "optimise" it away again without checking that
+# the main window still opens.
+#
+# UPDATE: XWayland is now the DEFAULT (2026-10-20), because the softness above
+# was not the backend's fault -- it was `xwayland:force_zero_scaling`, which
+# capped the X server at 2560x1600 and stretched every X window 1.5x. That is
+# now false (custom/general.lua), so the app draws at 1.5x itself and lands 1:1
+# on the panel: GPU accelerated and sharp. `FREEBUFF_DESKTOP_RENDER=soft` gets
+# the both-legs-on-the-CPU Wayland build back if the GPU path ever misbehaves.
+# `auto` (the default since 2026-11-12) tries native Wayland + GPU first and
+# falls back to XWayland + GPU and then to the Wayland software build. `x11`
+# and `soft` pin one of those, which is what to use when narrowing down a
+# rendering problem.
+RENDER="${FREEBUFF_DESKTOP_RENDER:-auto}"
+
+# ── How many pixels the app paints (2026-11-12) ──────────────────────────────
+#
+# 1.5: the panel's own scale, and the only value that looks right here.
+#
+# WHY THIS IS 1.5 AND NOT 1, since 1 was tried first and is genuinely cheaper:
+# at 1.5 the app rasterises a 1705x1020 window at 2557x1530 -- 2.5 million
+# pixels of text per frame -- while at 1 it paints 0.85 million and lets the
+# compositor stretch that to the panel, 2.25x less work, exactly what Claude
+# does (845x1010 at scale 1). It was set to 1 for a few hours on 2026-11-12 and
+# the owner's verdict was the one that matters: the text is drawn small and
+# upscaled, so it reads soft, and a soft UI that is cheap is not an
+# improvement. Crispness wins; the 2.25x is the price of it on a 1.5x panel.
+#
+# Chromium on Wayland takes the scale from the compositor anyway, so this flag
+# is only the explicit number -- 1 is kept reachable for a machine where the
+# trade goes the other way:
+#
+#     FREEBUFF_DESKTOP_SCALE=1 freebuff-desktop
+SCALE="${FREEBUFF_DESKTOP_SCALE:-1.5}"
+
+# Xwayland is started by the compositor and its display number is not stable,
+# and DISPLAY is not exported in every session, so find a live socket instead
+# of trusting the variable.
+# A socket file is not proof of a server. This desk has a stale
+# /tmp/.X11-unix/X0 lying around, and a stale socket answers nothing: picking
+# it by name produced `Missing X server or $DISPLAY` and the app exited before
+# drawing a single pixel. So ask each candidate for real.
+x_display_answers() {
+    [ -S "/tmp/.X11-unix/X${1#:}" ] || return 1
+    DISPLAY="$1" timeout 2 xrandr --current >/dev/null 2>&1
+}
+
+find_x_display() {
+    local n d
+    if [ -n "${DISPLAY:-}" ] && x_display_answers "$DISPLAY"; then
+        printf '%s' "$DISPLAY"; return 0
+    fi
+    for n in 0 1 2 3; do
+        d=":$n"
+        if x_display_answers "$d"; then printf '%s' "$d"; return 0; fi
+    done
+    return 1
+}
+
+# panel_scale(), which read the monitor's scale out of the compositor, used to
+# live here and fed --force-device-scale-factor. It was removed because the
+# number is now an explicit choice (SCALE at the top of this file) rather than
+# something the launcher looks up: on this panel they happened to agree, so the
+# lookup only ever hid which value was actually in force, and it could not be
+# overridden from the environment without editing the file.
+
+# A window this wide is the app proper, not the 580x255 startup splash.
+main_window_up() { window_on_screen; }
+
+# Put the window on the workspace the user is looking at, and focus it.
+#
+# The app maps ~12s after the click, and by then the user may have moved on;
+# Hyprland places a new window on whatever workspace is active at MAP time, so
+# the window could land somewhere else entirely while the click happened here.
+# Moving it after the fact is the only reliable moment: only a compositor
+# dispatcher can decide this, and only once the window exists. Written as the
+# Lua dispatcher (`hl.dsp.*`), because the legacy `hyprctl dispatch
+# movetoworkspace 3,class:...` string is parsed as Lua on this build and is a
+# syntax error (see the notes on focus_existing).
+bring_to_current() {
+    command -v hyprctl >/dev/null 2>&1 || return 1
+    # `w.size` is an {x,y} table in this Lua API and an array in the JSON one,
+    # so read it defensively -- a Lua error here is thrown away by the redirect
+    # and the window would silently stay where it landed.
+    hyprctl eval '
+        local function width(w)
+            local s = w.size
+            if type(s) == "table" then return s.x or s[1] or 0 end
+            return 0
+        end
+        local cur = hl.get_active_workspace()
+        local target, best = nil, -1
+        for _, w in ipairs(hl.get_windows() or {}) do
+            if (w.class or ""):lower():find("freebuff", 1, true) then
+                local wd = width(w)
+                if wd > best then target, best = w, wd end
+            end
+        end
+        if not target or not cur then return end
+        if best < 700 then return end
+        if target.workspace and target.workspace.id ~= cur.id then
+            hl.dispatch(hl.dsp.focus({ workspace = target.workspace.id }))
+            hl.dispatch(hl.dsp.focus({ window = target }))
+            hl.dispatch(hl.dsp.window.move({ workspace = cur.id, follow = true }))
+        end
+        hl.dispatch(hl.dsp.focus({ window = target }))
+    ' >/dev/null 2>&1
+}
+
+# ── Native Wayland + GPU, tried FIRST (2026-11-12) ────────────────────
+#
+# Why this is worth another attempt when the notes above concluded XWayland was
+# the only working GPU path: the complaint this answers is not frame rate, it is
+# INPUT LATENCY -- "smooth but a slight scroll delay, the whole app feels like I
+# am using it remotely". That is exactly what XWayland costs and native Wayland
+# does not: an X11 client gets no presentation timing from the compositor (this
+# app's log says `GetVSyncParametersIfAvailable() failed` over and over), so
+# Chromium paces its frames off its own guess, while a Wayland client gets real
+# frame callbacks and 1:1 scale. The old GBM/SCANOUT ENOMEM failures were
+# measured in October on a different driver stack and a different set of flags;
+# the current one is an XWayland-only problem, so the attempt is cheap and the
+# fallback below is unchanged and proven.
+#
+# Escape hatches: FREEBUFF_DESKTOP_RENDER=x11 skips this attempt entirely;
+# FREEBUFF_DESKTOP_RENDER=soft goes straight to the CPU build.
+if [ "$RENDER" = "auto" ] && [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    # DISPLAY must NOT be set here: with it in the environment Chromium can pick
+    # X11 even when told wayland, and the point is to have no X server in the
+    # picture at all.
+    unset ELECTRON_OZONE_PLATFORM_HINT
+    unset DISPLAY
+    set -m
+    nice -n 15 "$APP" --ozone-platform=wayland \
+        --force-device-scale-factor="$SCALE" \
+        --enable-gpu-rasterization --ignore-gpu-blocklist \
+        --enable-features=VaapiVideoDecodeLinuxGL,VaapiVideoDecoder \
+        "$@" \
+        >>/tmp/freebuff-desktop.log 2>&1 &
+    app_pid=$!
+    set +m
+    for _ in $(seq 1 45); do
+        sleep 1
+        if wayland_window_up; then
+            bring_to_current || true
+            exit 0
+        fi
+        kill -0 "$app_pid" 2>/dev/null || break
+    done
+    echo "$(date '+%F %T') wayland/GPU launch produced no window; falling back to XWayland" \
+        >>/tmp/freebuff-desktop.log
+    kill -- "-$app_pid" 2>/dev/null
+    sleep 2
+    kill -9 -- "-$app_pid" 2>/dev/null
+fi
+
+# GPU path, second: XWayland, the backend that has actually worked here. Verified
+# below -- no main window means this instance is killed and the Wayland software
+# build starts instead, so a broken GPU stack costs one slow launch rather than
+# a dead app.
+if [ "$RENDER" != "soft" ] && xdisp=$(find_x_display); then
+    export DISPLAY="$xdisp"
+    # Hyprland's env usually carries XAUTHORITY; this one does not, and without
+    # it the client is refused with "Authorization required". An empty
+    # XAUTHORITY also means "look in ~/.Xauthority", so only set it when absent.
+    if [ -z "${XAUTHORITY:-}" ] && [ -f "$HOME/.Xauthority" ]; then
+        export XAUTHORITY="$HOME/.Xauthority"
+    fi
+    # The pointer (added 2026-10-20). An X11 client does NOT inherit the
+    # compositor's XCURSOR_THEME -- `hl.env()` in hyprland/env.lua only reaches
+    # processes Hyprland spawns itself -- so Chromium loaded the stock X cursor
+    # and the pointer changed artwork as soon as it entered the window ("the
+    # cursor is being overwritten inside the app"). Same theme and size
+    # custom/theme.lua gives the rest of the desktop.
+    #
+    # ONE theme, forced, not "whatever was inherited": the inherited value in a
+    # running session can be a name that is not installed (`-NoLine`), and an
+    # uninstalled name is not an error a toolkit reports -- it falls back to the
+    # stock X cursor, so the pointer turned dark inside this window and white
+    # everywhere else. Forcing the installed name is what stops the colour
+    # changing at the window edge, and it no longer follows the light/dark mode
+    # either: the pointer is the same artwork in both.
+    export XCURSOR_THEME=Bibata-Modern-Ice
+    export XCURSOR_SIZE="${XCURSOR_SIZE:-24}"
+    # Shim path so Chromium's hardcoded "Adwaita" cursor request resolves to Bibata.
+    export XCURSOR_PATH=~/.local/share/cursor-shims:~/.local/share/icons:~/.icons:/usr/share/icons:/usr/share/pixmaps
+    # GPU raster + zero-copy + VA-API (added 2026-10-23).
+    #
+    # Compositing was already on renderD129, but Linux Chromium rasterises
+    # page tiles and decodes video on the CPU unless told not to: VA-API
+    # decoding is off by default in every Electron build here. So the app did
+    # put its pixels on the GPU while the CPU still did the drawing and every
+    # video. These four switches move that work across. None of them touch the
+    # backend choice, so the crash modes documented above (native Wayland +
+    # GPU -> SCANOUT/ENOMEM) cannot be reintroduced by them.
+    # nice 15 (2026-10-26): this app is BOTH the window and my own agent
+    # runtime -- every command I run is a child of it. On a 20 W-capped CPU a
+    # burst of those can starve the compositor, and that is not hypothetical:
+    # two full-machine burns made the desktop freeze for the owner while the
+    # shell sat at nice 0 and could not get scheduled. At nice 15 the app and
+    # everything under it yield to the compositor and the shell whenever the
+    # machine is saturated, so the desktop stays answerable. It costs no extra
+    # power and changes nothing when the machine is idle.
+    # NO --remote-debugging-port here (removed 2026-11-12).
+    #
+    # It was added as a temporary DevTools diagnostic and left in. It is not
+    # merely unnecessary, it stops the app from starting: Freebuff refuses the
+    # flag and exits 1 with NO output at all. MEASURED, same profile and the
+    # same other flags, only that one differing:
+    #
+    #   with --remote-debugging-port=9333 (a free port)  -> exit 1, 0 log lines
+    #   without it                                       -> stays up, 97 log lines
+    #
+    # That is the second half of why this machine only ever got the software
+    # build: the launcher started the GPU instance WITH this flag, so the
+    # instance died immediately, and the one-second `kill -0` bug above then
+    # called it "no window" and started the CPU build instead.
+    # ── Job control, not setsid (2026-11-12) ─────────────────────────
+    # This was `setsid nice -n 15 "$APP" ... &`, and THAT is why this machine
+    # never actually got the GPU path: setsid has to fork when its caller is
+    # already a process-group leader, which a script's background job is. So
+    # setsid exited immediately, `$!` below was a DEAD pid, `kill -0` failed
+    # on the very first iteration, and the launcher fell through to the
+    # software build about one second after starting the GPU one.
+    #
+    # MEASURED, from /tmp/freebuff-desktop.log: "x11/GPU launch produced no
+    # window; using software" appears ONE SECOND after the launch (twice:
+    # 2026-11-09 17:22:07 and 2026-11-12 08:47:33) -- never after the 60s the
+    # loop below is supposed to allow. The instance that survived was the
+    # `--ozone-platform=wayland --disable-gpu` one: the whole UI of a
+    # 2560x1600 window at 1.5x rendered on the CPU, which is exactly the
+    # "permanently lagging, as if running on CPU" report this fixes.
+    #
+    # With `set -m` the background job gets its own process group: `$!` is
+    # the app's real pid (nice execs into it), `kill -0` is honest, and
+    # `kill -- "-$app_pid"` below still reaches the whole tree.
+    #
+    # Verified before keeping it: with these flags a fresh instance's GPU
+    # process holds /dev/dri/renderD128, maps iris/libEGL_mesa and maps NO
+    # swiftshader -- real hardware, unlike the software build.
+    # Durable across the app's OWN updater (added 2026-11-12).
+    #
+    # electron-updater installs on quit and re-execs the new AppImage ITSELF,
+    # with NO arguments: measured at 12:48 in this log --
+    #
+    #   [updater] Executing: ~/Applications/Freebuff-0.0.202-...AppImage with args:
+    #
+    # -- and the process that came up had an empty command line, so every flag
+    # was gone and the app fell back to Wayland software rasterising (renderer
+    # 60% CPU) until somebody clicked the icon again. Every update undid the fix.
+    #
+    # Flags cannot survive that, but the ENVIRONMENT can: the updater's re-exec
+    # inherits it, and Electron reads exactly this variable. Verified here by
+    # starting the app with the hint and NO --ozone-platform flag at all: the
+    # window came up as the X11 class `Freebuff` and its GPU process held
+    # /dev/dri/renderD128 with no swiftshader.
+    export ELECTRON_OZONE_PLATFORM_HINT=x11
+    set -m
+    # --enable-zero-copy and CanvasOopRasterization were REMOVED here
+    # (2026-11-12). They were added for video and canvas throughput, which this
+    # app does not need -- it is a text UI -- and both of them add latency to
+    # every frame rather than throughput: zero-copy forces the GPU to share
+    # buffers with the compositor instead of handing over a finished surface,
+    # and out-of-process canvas rasterisation is an extra process hop before a
+    # frame can be composited. "Smooth but laggy", as if the app were remote,
+    # is what that combination feels like. GPU rasterisation itself is kept --
+    # that is the part that takes the drawing off the CPU.
+    nice -n 15 "$APP" --ozone-platform=x11 \
+        --force-device-scale-factor="$SCALE" \
+        --enable-gpu-rasterization --ignore-gpu-blocklist \
+        --enable-features=VaapiVideoDecodeLinuxGL,VaapiVideoDecoder \
+        "$@" \
+        >>/tmp/freebuff-desktop.log 2>&1 &
+    app_pid=$!
+    set +m
+    for _ in $(seq 1 90); do
+        sleep 1
+        if main_window_up; then
+            # Mapped -- put it where the user is, then hand back.
+            bring_to_current || true
+            exit 0
+        fi
+        kill -0 "$app_pid" 2>/dev/null || break
+    done
+    echo "$(date '+%F %T') x11/GPU launch produced no window; using software" \
+        >>/tmp/freebuff-desktop.log
+    kill -- "-$app_pid" 2>/dev/null
+    sleep 2
+    kill -9 -- "-$app_pid" 2>/dev/null
+fi
+
+unset ELECTRON_OZONE_PLATFORM_HINT
+exec nice -n 15 "$APP" --ozone-platform=wayland --disable-gpu "$@"

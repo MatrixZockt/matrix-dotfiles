@@ -41,6 +41,10 @@ __pycache__/
 # on first run for anyone cloning this repo.
 .config/illogical-impulse/config.json
 .config/illogical-impulse/config.json.bak*
+# The lock screen's wallpaper OVERRIDE: written by set-lock-wallpaper.sh when a
+# picture is picked for the lock screen, so it names a file only this machine
+# has. Regenerated on demand; the generated pair below follows the desktop.
+.config/hypr/hyprlock/lock-wallpaper.conf
 # Lock screen pair is generated from the desktop wallpaper/palette:
 # scripts/lock/generate-hyprlock-conf.sh rewrites it, so the copy here is
 # always machine-local.

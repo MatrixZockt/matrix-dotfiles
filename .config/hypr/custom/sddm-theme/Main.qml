@@ -1230,6 +1230,18 @@ import SddmComponents 2.0
         }
     }
 
+    // The battery, read through the theme's own Qt plugin (battery/) and
+    // wrapped in a Loader so a missing plugin cannot take the login screen
+    // down with it -- see BatteryReadout.qml. `-1` means "no battery readout",
+    // which is what a machine without a pack, or a theme installed without the
+    // compiled plugin, gets: the row is simply not drawn.
+    Loader {
+        id: greeterBattery
+        source: "BatteryReadout.qml"
+    }
+    readonly property int batteryPercent: greeterBattery.item ? greeterBattery.item.percent : -1
+    readonly property bool batteryOnAc: greeterBattery.item ? greeterBattery.item.onAc : false
+
     // The RIGHT telemetry is lifted clear of the power buttons rather than
     // sharing the bottom-right corner with them. Both used to anchor at
     // rightMargin ~22-26 and bottomMargin ~18-22, so the two rows were drawn
@@ -1246,6 +1258,22 @@ import SddmComponents 2.0
         // of the login column's resting place.
         anchors.bottomMargin: 22 + (sddm.canPowerOff || sddm.canReboot || sddm.canSuspend ? 46 : 0)
         spacing: 3
+
+        // ── what is left in the battery ─────────────────────────────────
+        // The one fact on this screen that decides what you do next, so it
+        // leads the column rather than trailing it. Live: the plugin re-reads
+        // sysfs every 20 s, so charging while you stand here moves the number.
+        // The lock screen's own copy of this line is in
+        // modules/ii/lock/LockSurface.qml, and it reads the same two files.
+        Text {
+            visible: root.loginSheet && root.batteryPercent >= 0
+            text: "battery " + root.batteryPercent + "%"
+                + (root.batteryOnAc ? "  ac" : "")
+            color: (root.batteryPercent <= 15 && !root.batteryOnAc) ? root.colError : root.colOnSurfaceVariant
+            horizontalAlignment: Text.AlignRight
+            font.family: "JetBrainsMono Nerd Font Mono"
+            font.pixelSize: Math.max(10, Math.round(root.height * 0.0155))
+        }
 
         Text {
             text: "wm hyprland"

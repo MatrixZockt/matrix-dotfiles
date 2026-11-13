@@ -37,6 +37,11 @@ Singleton {
 	property string notesPath: FileUtils.trimFileProtocol(`${Directories.state}/user/notes.txt`)
 	property string conflictCachePath: FileUtils.trimFileProtocol(`${Directories.cache}/conflict-killer`)
     property string notificationsPath: FileUtils.trimFileProtocol(`${Directories.cache}/notifications/notifications.json`)
+    // The daemon's per-app tally: how many notifications each app had shown and
+    // how many a mute suppressed. Written by services/Notifications.qml, read by
+    // the Settings page -- the settings app is a separate process, so this is
+    // the only way the page can see what the daemon actually did.
+    property string notificationsAppsPath: FileUtils.trimFileProtocol(`${Directories.cache}/notifications/apps.json`)
     property string generatedMaterialThemePath: FileUtils.trimFileProtocol(`${Directories.state}/user/generated/colors.json`)
     // Login/lock layout index, GENERATED from the SDDM theme's own layout
     // fragments by scripts/login/generate-layout-index.sh. Read by

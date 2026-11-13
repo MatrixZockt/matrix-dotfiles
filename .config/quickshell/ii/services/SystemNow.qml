@@ -45,7 +45,10 @@ Singleton {
     property string gpuCurPath: ""
     property string gpuMaxPath: ""
     // The load is read from nvidia-smi rather than from a sysfs clock file --
-    // see the discovery script for why the file was the wrong device.
+    // see the discovery script for why the file was the wrong device. nvidia-smi
+    // is the DISCRETE card, though, and it is not the half of this machine that
+    // draws; `intelGpuPct` below is the other half, and gpuMetricPct reports
+    // whichever of the two is actually working.
     property bool gpuIsNvidia: false
     property bool discovered: false
 
@@ -78,6 +81,30 @@ Singleton {
     // binds to it, and renaming it would touch a dozen call sites for no
     // behavioural gain. See sampleCommand for the measurement itself.
     property real gpuClockPct: -1
+    // ── The card that is actually DRAWING ────────────────────────────────
+    //
+    // The number above is the 4070's. On this laptop the 4070 is not the
+    // renderer: Hyprland draws on the Intel iGPU and the discrete card only
+    // scans the panel out (card1-eDP-1 drives the panel, every client renders
+    // on renderD128), so nvidia-smi's utilization.gpu sits at an honest 0%
+    // while the machine is plainly busy. That is how the tile read, and the
+    // owner's complaint is exactly the one a correct reading of the wrong chip
+    // earns: "the GPU shows 0% ... fix it so it shows when the graphics card
+    // is actually working" (2026-11-07). gpuMetricPct below therefore reports
+    // the BUSIEST chip rather than a named one.
+    //
+    // The iGPU cannot answer from sysfs: i915 exposes no rc6_residency_ms on
+    // this kernel, and unlike amdgpu there is no gpu_busy_percent -- the frozen
+    // RC6 counter is the attempt this file already documents above. DRM's
+    // per-process fdinfo does report accumulated engine time, and
+    // scripts/system/gpu-busy.py turns that into a percentage, including the
+    // unit gotcha (max per process, not sum per fd) that made an earlier
+    // attempt read 187% for one process.
+    //
+    // Sampled at 1 Hz by ONE long-lived process, not on the 250 ms tick: a
+    // fresh interpreter costs ~30 ms of start-up and four of those a second
+    // would be a seventh of a core for a gauge. -1 until it has a baseline.
+    property real intelGpuPct: -1
     // The two halves of the capacity fraction, exposed so a view can write
     // "7%" as "3.8 W of 55 W" instead of leaving the reader to wonder what the
     // percentage is a percentage OF. -1 when the driver did not report it.
@@ -180,9 +207,14 @@ Singleton {
     // One policy in one place, because four surfaces draw it: the island's
     // tile and graphs, the bar pocket, the task manager card and the bar's
     // popup all read these three properties.
-    readonly property real gpuMetricPct: root.gpuClockPct
+    readonly property real gpuMetricPct: Math.max(root.gpuClockPct, root.intelGpuPct)
     readonly property var gpuMetricHistory: root.gpuHistory
     readonly property string gpuMetricName: root.gpuName
+    // Which of the two chips the number above belongs to, so that a caption
+    // about the 4070's enforced watt cap is not printed underneath the iGPU's
+    // percentage -- the same class of mistake as the 0% was. Ties go to the
+    // discrete card, which is the one the owner calls "my GPU".
+    readonly property bool gpuMetricDiscrete: root.gpuClockPct >= root.intelGpuPct
 
     // ── Temperature, normalised for the graphs ───────────────────────────
     // A temperature is a real quantity, not a fraction of anything, so a chart
@@ -296,6 +328,26 @@ fi
             root.gpuClockMaxMhz = isNaN(v) ? -1 : v;
         }
         onLoadFailed: root.gpuClockMaxMhz = -1
+    }
+
+    // The iGPU's busy fraction, out of DRM fdinfo. One process for the life of
+    // the shell (see intelGpuPct for why not one per tick), and `-u` because a
+    // piped stdout is buffered: a line delivered when the 4 KB buffer fills is
+    // a gauge that does not move.
+    Process {
+        id: gpuBusyProc
+        running: root.active && root.discovered
+        command: ["python3", "-u", Quickshell.shellPath("scripts/system/gpu-busy.py"), "--loop", "1"]
+        stdout: SplitParser {
+            onRead: line => {
+                const v = parseFloat(String(line ?? "").trim());
+                // -1 is the script's "no baseline yet", and it must not blank a
+                // reading that was already earned: the first line after a shell
+                // restart would otherwise read as an idle GPU.
+                if (!isNaN(v) && v >= 0)
+                    root.intelGpuPct = Math.min(100, v) / 100;
+            }
+        }
     }
 
     // ── Sampling ─────────────────────────────────────────────────────────
@@ -561,8 +613,8 @@ echo "v|$t|$w|$lim|$c|$cc|$mm|$gt|$mu|$mt|$mx|$cavg|$cpeak|$gov|$epp|$pw|$util"
             root.tempLoadHistory = push(root.tempLoadHistory, root.tempLoad(root.tempC));
             pushed = true;
         }
-        if (root.gpuClockPct >= 0) {
-            root.gpuHistory = push(root.gpuHistory, root.gpuClockPct);
+        if (root.gpuMetricPct >= 0) {
+            root.gpuHistory = push(root.gpuHistory, root.gpuMetricPct);
             pushed = true;
         }
         // Only a sample that carried data ends the priming: a tick that read
@@ -615,7 +667,8 @@ echo "v|$t|$w|$lim|$c|$cc|$mm|$gt|$mu|$mt|$mx|$cavg|$cpeak|$gov|$epp|$pw|$util"
         // that opens the card is not a thing a test can perform, and a row
         // rendering "—" looks exactly like a source that never ran.
         function values(): string {
-            return `cpu=${root.pct(root.cpuPct)} ram=${root.pct(root.ramPct)} gpu=${root.pct(root.gpuClockPct)} temp=${root.tempText(root.tempC)}`
+            return `cpu=${root.pct(root.cpuPct)} ram=${root.pct(root.ramPct)} gpu=${root.pct(root.gpuMetricPct)} temp=${root.tempText(root.tempC)}`
+                + ` gpuDiscrete=${root.pct(root.gpuClockPct)} gpuIntegrated=${root.pct(root.intelGpuPct)}`
                 + ` clock=${root.cpuClockText()} policy=${root.cpuPolicyText()}`
                 + ` draw=${root.gpuPowerDrawW < 0 ? "--" : root.gpuPowerDrawW.toFixed(1)}W`
                 + ` limit=${root.gpuPowerLimitW < 0 ? "--" : Math.round(root.gpuPowerLimitW)}W`

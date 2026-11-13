@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Restart Freebuff into the configuration its launcher sets, and say what came up.
+#
+# The app's updater installs on quit and re-execs the new AppImage with NO
+# arguments (measured 12:48: "[updater] Executing: .../Freebuff-0.0.202-…AppImage
+# with args:"), so a plain quit can come back as a windowless-flags instance on
+# Wayland that rasterises the whole UI on the CPU -- the lag. freebuff-desktop
+# now also exports ELECTRON_OZONE_PLATFORM_HINT=x11, which the updater's re-exec
+# inherits, so anything IT starts stays on the GPU path.
+#
+# Run from a terminal OUTSIDE the app (the app cannot restart itself: it would
+# have to kill the window you are typing in).
+set -u
+
+echo "Freebuff: stopping the running instance…"
+pkill -x freebuff 2>/dev/null
+for _ in $(seq 1 60); do
+    pgrep -x freebuff >/dev/null 2>&1 || break
+    sleep 0.25
+done
+if pgrep -x freebuff >/dev/null 2>&1; then
+    echo "  it did not stop; kill it by hand and click the icon"
+    exit 1
+fi
+
+echo "Freebuff: starting it the way the menu does…"
+setsid "$HOME/.local/bin/freebuff-desktop" >/dev/null 2>&1 &
+
+# Wait for the main process, then report the two facts that decide whether the
+# UI is drawn by the GPU or by the CPU.
+main=""
+for _ in $(seq 1 80); do
+    sleep 1
+    main=$(pgrep -x freebuff 2>/dev/null | head -1)
+    [ -n "$main" ] && break
+done
+if [ -z "$main" ]; then
+    echo "  no Freebuff process after 80s — check /tmp/freebuff-desktop.log"
+    exit 1
+fi
+sleep 6
+platform=$(tr '\0' ' ' </proc/"$main"/cmdline 2>/dev/null | grep -o -- '--ozone-platform=[a-z]*' || true)
+[ -z "$platform" ] && platform="(none on the main process)"
+class=$(hyprctl clients -j 2>/dev/null | python3 -c '
+import json,sys
+try: cs = json.load(sys.stdin)
+except Exception: sys.exit()
+m = [c for c in cs if "freebuff" in (c.get("class") or "").lower()]
+print(m[0].get("class") if m else "(no window yet)")')
+echo
+echo "  pid        $main"
+echo "  platform   $platform"
+echo "  window     $class"
+if [ "$class" = "Freebuff" ]; then
+    echo "  -> X11 + GPU path: this is the fast configuration."
+else
+    echo "  -> still Wayland: the launcher's GPU attempt did not take."
+    echo "     Try: FREEBUFF_DESKTOP_RENDER=x11 freebuff-desktop    and read"
+    echo "     /tmp/freebuff-desktop.log for 'produced no window'."
+fi

@@ -73,6 +73,19 @@ Scope {
 
     readonly property bool open: GlobalStates.desktopOverviewOpen
 
+    // Leaving the overview ENDS every gesture. This is the single choke point:
+    // the drop, `Escape`, a press outside the cards and a desktop switch all
+    // close the grid, so enforcing the reset HERE means no exit path can leave
+    // a window carried, a card lifted or a tile mid-drag once the overlay is
+    // gone. Without it a drag that ended because the grid closed kept its
+    // `dragWindow*` state, and the ghost was still in hand next time it opened.
+    onOpenChanged: {
+        if (!root.open) {
+            root.cancelWindowDrag();
+            root.resetDrag();
+        }
+    }
+
     // ── Geometry ──────────────────────────────────────────────────────────
     // The grid: three columns, as many rows as the desktops need. The whole
     // grid is sized from the SURFACE (panel.width), not from a monitor record
@@ -85,7 +98,10 @@ Scope {
     // picked up for free.
     readonly property real gap: 20
     readonly property int columns: 3
-    readonly property real gridWidth: Math.max(480, Math.min(surfaceWidth - 200, 1720))
+    // The grid gives up a strip on the right for the apps dock, so the 200 px
+    // of breathing room it used to keep is now `dockWidth + gap` wider. Without
+    // this the cards ran under the dock and the last column sat behind it.
+    readonly property real gridWidth: Math.max(480, Math.min(surfaceWidth - 200 - (root.dockWidth + root.gap), 1720))
     readonly property real cardWidth: (gridWidth - gap * (columns - 1)) / columns
     readonly property real cardHeight: cardWidth * 0.625 // 16:10, as the preview
 
@@ -150,6 +166,10 @@ Scope {
     // The cells on screen: every desktop that exists, plus exactly one empty
     // "new desktop" slot. A fixed cell count is what made the old grid feel
     // like it had desktops hidden somewhere.
+    // The apps dock is its own column on the right, and the grid gives up
+    // exactly this much width so the two can never overlap (see `layout`).
+    readonly property real dockWidth: 236
+
     readonly property int cellCount: desktopCount + 1
     readonly property int rows: Math.ceil(root.cellCount / root.columns)
 
@@ -209,10 +229,23 @@ Scope {
         return __r;
     }
 
+    // Compositor classes that are not the app's own name.
+    //
+    // `qs` gives EVERY Quickshell window the same app_id -- `org.quickshell` --
+    // so the file manager, which is an ordinary desktop window, arrives here
+    // labelled "Og.quickshell" with a guessed icon. It has a launcher entry of
+    // its own (`ii-files.desktop`: Name "File Manager", Icon "ii-folder"), and
+    // that entry is what the super menu draws, so the class is mapped to it and
+    // both the name and the icon come from the one place the launcher reads.
+    readonly property var shellWindowAliases: ({
+        "org.quickshell": "ii-files"
+    })
+
     // The launcher's name for a class, falling back to the class itself: an
     // app with no desktop entry (an AppImage, a helper) still labels its card.
     function appName(cls) {
-        const entry = AppSearch.list.find(a => String(a.id ?? "").toLowerCase() === cls.toLowerCase());
+        const target = root.shellWindowAliases[String(cls ?? "").toLowerCase()] ?? cls;
+        const entry = AppSearch.list.find(a => String(a.id ?? "").toLowerCase() === String(target).toLowerCase());
         if (entry?.name)
             return String(entry.name);
         // "@codebuff/freebuff-desktop" -> "Freebuff"; "brave-browser" ->
@@ -459,6 +492,12 @@ Scope {
                 // it is the lift that just arrived.
                 if (root.gestureLift)
                     root.carryGestureTo(x, y);
+                else if (root.windowDragActive)
+                    // An app in hand rides NO button now: it stays on the
+                    // pointer until a card is clicked, and a pointer with no
+                    // press behind it delivers no motion. The same read that
+                    // keeps a lifted card on the pointer keeps the app there.
+                    root.trackWindowDrag(x, y);
                 else
                     root.liftFrom(x, y);
             }
@@ -474,7 +513,9 @@ Scope {
         id: liftPoll
         interval: 40
         repeat: true
-        running: root.gestureLift
+        // Also while a window is carried: the carry no longer depends on a
+        // held button, so this is the only thing moving the ghost.
+        running: root.gestureLift || root.windowDragActive
         onTriggered: {
             if (!cursorProbe.running)
                 cursorProbe.running = true;
@@ -565,6 +606,8 @@ Scope {
     // does are the same lookup.
     property string dragWindowAddress: ""   // "" = nothing in hand
     property string dragWindowLabel: ""     // app name, for the chip
+    property string dragWindowIcon: ""   // resolved at pick-up, for the ghost
+    property string dragWindowTitle: ""  // pretty name, for the ghost
     property int dragWindowFrom: -1         // desktop it is being taken from
     property int dragWindowTo: -1           // desktop under the pointer, -1 = none
     property real dragWindowX: 0            // pointer, in veil coordinates
@@ -604,8 +647,20 @@ Scope {
     function pickUpWindow(win, fromId) {
         if (!win?.address)
             return;
+        // The ghost draws its icon and its name from `dragWindowIcon` and
+        // `dragWindowTitle`, and THIS is the only place that can fill them:
+        // `cancelWindowDrag` clears them and nothing else writes them. They
+        // were never set, so the thing in your hand came up as a bare dot on an
+        // empty line -- no name, no icon -- even though the address (and so the
+        // whole drag) was correct. Resolve both here, once, at pick-up time: the
+        // window class is what the dock already resolves for its own tile, so
+        // the carried ghost and the tile it left look like the same app.
+        const cls = String(win?.class ?? "");
+        const pretty = root.appName(cls);
         root.dragWindowAddress = String(win.address);
         root.dragWindowLabel = root.appLabel(win);
+        root.dragWindowIcon = root.iconFor(cls) ?? "";
+        root.dragWindowTitle = pretty.length > 0 ? pretty : root.appLabel(win);
         root.dragWindowFrom = fromId;
         root.dragWindowTo = -1;
     }
@@ -641,8 +696,12 @@ Scope {
     function cancelWindowDrag() {
         root.dragWindowAddress = "";
         root.dragWindowLabel = "";
+        root.dragWindowIcon = "";
+        root.dragWindowTitle = "";
         root.dragWindowFrom = -1;
         root.dragWindowTo = -1;
+        root.dragWindowX = 0;
+        root.dragWindowY = 0;
     }
 
     // The two dispatches a drop performs, as one function so the IPC probe and
@@ -664,17 +723,26 @@ Scope {
 
     // The drop. Same desktop, no target, or nothing in hand = the grab is
     // abandoned and the grid stays up: what "never mind" looks like.
-    function dropWindowDrag() {
-        const to = root.dragWindowTo;
+    // Place the carried window on desktop `to`. ONE function for both ways a
+    // carry can end -- a release over a card, and a click on a card -- so what
+    // the rings promise and what the placement does cannot drift apart.
+    // Returns false when nothing was placed: no target, the desktop it came
+    // from, nothing in hand, or a dispatch that failed.
+    function dropWindowDragOn(to) {
         const addr = root.dragWindowAddress;
         const from = root.dragWindowFrom;
         root.cancelWindowDrag();
-        if (to < 0 || from < 0 || to === from || addr.length === 0)
-            return;
+        if (!(to >= 1) || from < 0 || to === from || addr.length === 0)
+            return false;
         if (!root.moveWindowTo(addr, to))
-            return;
+            return false;
         // The grid has done its job: you asked to go where the window went.
         GlobalStates.desktopOverviewOpen = false;
+        return true;
+    }
+
+    function dropWindowDrag() {
+        return root.dropWindowDragOn(root.dragWindowTo);
     }
 
     function resetDrag() {
@@ -1060,44 +1128,490 @@ Scope {
             }
         }
 
-        // ── The window in your hand ────────────────────────────────────────
-        //
-        // A chip under the pointer naming what is being carried and, once a card
-        // is under it, which desktop it would go to. The rings say WHERE it can
-        // go; this says WHAT is going there. Veil coordinates, same frame the
-        // drop targets are hit-tested in.
-        Item {
-            id: carriedWindow
-            visible: root.windowDragActive
-            x: root.dragWindowX + 14
-            y: root.dragWindowY + 14
-            implicitWidth: carriedLabel.implicitWidth + 24
-            implicitHeight: 34
-            z: 40
 
-            Rectangle {
+        // ── The app in your hand ───────────────────────────────────────────
+        //
+        // While a window is carried, the tile it was picked up from travels
+        // with the pointer: same shape, same icon, same name, and the desktop
+        // it would land on once a card is under it. Without this a drag had no
+        // visible object at all -- the rings on the cards said where it could
+        // go, but nothing said what was going.
+        Rectangle {
+            id: draggedTile
+            visible: root.windowDragActive
+            x: root.dragWindowX + 16
+            y: root.dragWindowY + 16
+            z: 40
+            width: 200
+            height: 46
+            radius: Appearance.rounding.small
+            color: ColorUtils.transparentize(Appearance.colors.colLayer0Base, 0.06)
+            border.width: 1.5
+            border.color: Appearance.colors.colPrimary
+            opacity: 0.97
+
+            RowLayout {
                 anchors.fill: parent
-                radius: height / 2
-                color: Appearance.colors.colPrimary
-                border.width: 1
-                border.color: ColorUtils.transparentize(Appearance.colors.colOnPrimary, 0.3)
-            }
-            Text {
-                id: carriedLabel
-                anchors.centerIn: parent
-                text: root.dragWindowTo >= 0
-                    ? Translation.tr("%1 → desktop %2").arg(root.dragWindowLabel).arg(root.dragWindowTo)
-                    : root.dragWindowLabel
-                color: Appearance.colors.colOnPrimary
-                font.family: Appearance.font.family.main
-                font.pixelSize: Appearance.font.pixelSize.small
-                font.weight: Font.DemiBold
+                anchors.leftMargin: 10
+                anchors.rightMargin: 10
+                spacing: 9
+
+                Image {
+                    Layout.preferredWidth: 18
+                    Layout.preferredHeight: 18
+                    Layout.alignment: Qt.AlignVCenter
+                    source: root.dragWindowIcon
+                    fillMode: Image.PreserveAspectFit
+                    visible: status === Image.Ready
+                }
+
+                Rectangle {
+                    Layout.preferredWidth: 9
+                    Layout.preferredHeight: 9
+                    Layout.alignment: Qt.AlignVCenter
+                    visible: !root.imgReady(root.dragWindowIcon)
+                    radius: 2
+                    color: Appearance.colors.colPrimary
+                }
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignVCenter
+                    spacing: 0
+
+                    Text {
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 0
+                        Layout.minimumWidth: 0
+                        text: root.dragWindowTitle
+                        color: Appearance.colors.colOnSurface
+                        font.family: Appearance.font.family.main
+                        font.pixelSize: Appearance.font.pixelSize.smaller
+                        font.weight: Font.DemiBold
+                        elide: Text.ElideRight
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        visible: root.dragWindowTo >= 0
+                        text: Translation.tr("Desktop %1").arg(root.dragWindowTo)
+                        color: Appearance.colors.colPrimary
+                        font.family: Appearance.font.family.main
+                        font.pixelSize: Appearance.font.pixelSize.tiny
+                        elide: Text.ElideRight
+                    }
+                }
+
+                Column {
+                    Layout.alignment: Qt.AlignVCenter
+                    spacing: 3
+
+                    Repeater {
+                        model: 3
+
+                        delegate: Rectangle {
+                            required property int index
+                            width: 10
+                            height: 2
+                            radius: 1
+                            color: ColorUtils.transparentize(Appearance.colors.colOnSurfaceVariant, 0.35)
+                        }
+                    }
+                }
             }
         }
 
+        // ── The apps of the selected desktop, in a dock beside it ─────────
+        //
+        // The cards can be rearranged by hand and so can the apps inside them,
+        // but the apps are picked up HERE -- off a list that belongs to the
+        // selected desktop -- rather than out of a card's previews.
+        //
+        // A preview is a picture of a window, and a press on one used to turn
+        // into an app grab on the first 6 px of travel, so a desktop could not
+        // be dragged by its own face. And an app you cannot see is an app you
+        // cannot drag: the cards cap their own list at three rows and "+N
+        // more", so the fourth window on a desktop had nowhere to be picked up
+        // from at all. This list has every window, one row each.
+        Item {
+            id: appsDock
+            z: 12
+
+            readonly property var card: {
+                const kids = grid.children;
+                for (let i = 0; i < kids.length; i++) {
+                    if (kids[i] && kids[i].index === root.selectedCell)
+                        return kids[i];
+                }
+                return null;
+            }
+            readonly property bool onNewSlot: appsDock.card ? appsDock.card.isNewSlot : false
+            // On the "+" slot there is no desktop to list, so the dock keeps
+            // showing the one you are on rather than blinking out under the
+            // pointer.
+            readonly property int desktopId: (appsDock.card && !appsDock.onNewSlot)
+                ? appsDock.card.desktopId
+                : root.activeId
+            readonly property var windows: (appsDock.desktopId >= 1)
+                ? (root.windowsByDesktop[appsDock.desktopId] ?? [])
+                : []
+
+            visible: root.open && appsDock.desktopId >= 1
+            // Its OWN space on the right, not a follower: `layout` gives up
+            // `root.dockWidth` and the dock sits in the strip that leaves, so
+            // it holds still while the pointer crosses the grid.
+            anchors.right: parent.right
+            anchors.rightMargin: root.gap
+            anchors.verticalCenter: parent.verticalCenter
+            width: root.dockWidth
+            height: Math.min(layout.height, parent.height - 2 * root.gap)
+            Rectangle {
+                id: dockBackground
+                anchors.fill: parent
+                radius: Appearance.rounding.large
+                color: ColorUtils.transparentize(Appearance.colors.colLayer0Base, 0.34)
+                border.width: 1
+                border.color: ColorUtils.transparentize(Appearance.colors.colOutlineVariant, 0.35)
+            }
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 12
+                spacing: 10
+
+                // Header: which desktop this list belongs to, and how many apps
+                // it holds. One row, both ends spoken for.
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: Translation.tr("Desktop %1").arg(appsDock.desktopId)
+                        color: Appearance.colors.colOnSurface
+                        font.family: Appearance.font.family.title
+                        font.pixelSize: Appearance.font.pixelSize.smaller
+                        font.weight: Font.DemiBold
+                        elide: Text.ElideRight
+                    }
+
+                    Text {
+                        text: String(appsDock.windows.length)
+                        color: Appearance.colors.colSubtext
+                        font.family: Appearance.font.family.numbers
+                        font.pixelSize: Appearance.font.pixelSize.tiny
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 1
+                    color: ColorUtils.transparentize(Appearance.colors.colOutlineVariant, 0.5)
+                }
+
+                // The apps as a list of cards: one tile per window, its icon and
+                // two lines INSIDE the tile, a fixed height each and one gap
+                // between. A scrolling view rather than a column, because the
+                // dock is a fixed block: a desktop with ten windows must scroll
+                // instead of squeezing its rows until the labels sit on top of
+                // each other.
+                Item {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    visible: appsDock.windows.length > 0
+
+                    ListView {
+                        id: dockList
+                        anchors.fill: parent
+                        spacing: 8
+                        clip: true
+                        boundsBehavior: Flickable.StopAtBounds
+                        model: appsDock.windows
+
+                        delegate: Rectangle {
+                            id: dockTile
+                            required property var modelData
+                            readonly property var win: modelData
+                            readonly property var iconSource: root.iconFor(String(dockTile.win?.class ?? "")) ?? ""
+
+                            width: dockList.width
+                            height: 52
+                            radius: Appearance.rounding.small
+                            // The tile is 52 px and the list is narrower than
+                            // the longest window title; clipping here means the
+                            // rows cannot draw past the border, whatever the
+                            // layout hands them.
+                            clip: true
+                            color: dockMouse.carrying
+                                ? ColorUtils.transparentize(Appearance.colors.colPrimary, 0.7)
+                                : (dockMouse.containsMouse
+                                    ? ColorUtils.transparentize(Appearance.colors.colOnSurface, 0.88)
+                                    : ColorUtils.transparentize(Appearance.colors.colOnSurface, 0.93))
+                            border.width: 1
+                            border.color: dockMouse.containsMouse || dockMouse.carrying
+                                ? ColorUtils.transparentize(Appearance.colors.colPrimary, 0.5)
+                                : ColorUtils.transparentize(Appearance.colors.colOutlineVariant, 0.45)
+                            opacity: dockMouse.carrying ? 0.45 : 1
+
+                            Behavior on color {
+                                animation: Appearance.animation.elementMoveFast.colorAnimation.createObject(this)
+                            }
+
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 10
+                                anchors.rightMargin: 8
+                                spacing: 9
+
+                                Image {
+                                    Layout.preferredWidth: 20
+                                    Layout.preferredHeight: 20
+                                    Layout.alignment: Qt.AlignVCenter
+                                    source: dockTile.iconSource
+                                    fillMode: Image.PreserveAspectFit
+                                    visible: status === Image.Ready
+                                }
+
+                                Rectangle {
+                                    Layout.preferredWidth: 10
+                                    Layout.preferredHeight: 10
+                                    Layout.alignment: Qt.AlignVCenter
+                                    visible: !root.imgReady(dockTile.iconSource)
+                                    radius: 2
+                                    color: Appearance.colors.colOutline
+                                }
+
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    Layout.alignment: Qt.AlignVCenter
+                                    spacing: 0
+
+                                    Text {
+                                        Layout.fillWidth: true
+                                        // Same rule as the card's app rows: a
+                                        // RowLayout hands out space from the
+                                        // children's preferred widths, so a long
+                                        // name without a zero floor widened the
+                                        // row instead of eliding -- and the text
+                                        // ran out over the tile's border.
+                                        Layout.preferredWidth: 0
+                                        Layout.minimumWidth: 0
+                                        text: root.appName(String(dockTile.win?.class ?? ""))
+                                        color: Appearance.colors.colOnSurface
+                                        font.family: Appearance.font.family.main
+                                        font.pixelSize: Appearance.font.pixelSize.smaller
+                                        font.weight: Font.DemiBold
+                                        elide: Text.ElideRight
+                                    }
+
+                                    Text {
+                                        Layout.fillWidth: true
+                                        Layout.preferredWidth: 0
+                                        Layout.minimumWidth: 0
+                                        text: String(dockTile.win?.title ?? "")
+                                        color: Appearance.colors.colSubtext
+                                        font.family: Appearance.font.family.main
+                                        font.pixelSize: Appearance.font.pixelSize.tiny
+                                        elide: Text.ElideRight
+                                        visible: text.length > 0
+                                    }
+                                }
+
+                                // A grip: three short ticks, so the tile reads as
+                                // something you pick up rather than a button.
+                                Column {
+                                    Layout.alignment: Qt.AlignVCenter
+                                    spacing: 3
+
+                                    Repeater {
+                                        model: 3
+
+                                        delegate: Rectangle {
+                                            required property int index
+                                            width: 12
+                                            height: 2
+                                            radius: 1
+                                            color: ColorUtils.transparentize(Appearance.colors.colOnSurfaceVariant, 0.35)
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Press and move = that window is carried. The rings
+                            // and the drop are the same ones the cards use
+                            // (pickUpWindow / trackWindowDrag / dropWindowDrag),
+                            // so the two paths cannot drift apart. Hover only
+                            // tints the tile -- no label of its own.
+                            MouseArea {
+                                id: dockMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.OpenHandCursor
+                                // The list is a Flickable, and a Flickable takes
+                                // the press-drag for itself the moment the
+                                // pointer moves -- which is why a tile could not
+                                // be picked up at all. The grab stays with the
+                                // tile; the wheel still scrolls the list.
+                                preventStealing: true
+
+                                property real pressX: 0
+                                property real pressY: 0
+                                property bool dragging: false
+                                // Lifted ONLY while the shared state agrees a
+                                // window is in hand, so a stale local flag cannot
+                                // leave the tile faded and highlighted.
+                                readonly property bool carrying: dockMouse.dragging
+                                    && root.windowDragActive
+
+                                // The moment the drag state clears -- by drop, by
+                                // cancel, by the grid closing -- this tile's flag
+                                // clears with it.
+                                Connections {
+                                    target: root
+
+                                    function onWindowDragActiveChanged() {
+                                        if (!root.windowDragActive)
+                                            dockMouse.dragging = false;
+                                    }
+
+                                    // A press that never travelled has no window
+                                    // in hand, so the watcher above never fires
+                                    // for it: the grid closing still has to put
+                                    // this tile back.
+                                    function onOpenChanged() {
+                                        if (!root.open) {
+                                            dockMouse.dragging = false;
+                                            dockMouse.pressed = false;
+                                        }
+                                    }
+                                }
+
+                                onPressed: mouse => {
+                                    dockMouse.pressX = mouse.x;
+                                    dockMouse.pressY = mouse.y;
+                                    // A PRESS picks the app up; travel is no
+                                    // longer the grant. Travel could never work
+                                    // on a touchpad: the finger lifts -- and the
+                                    // drag with it -- before it has moved a
+                                    // pixel. Pick up on the press, and let the
+                                    // RELEASE decide: over a card it places,
+                                    // anywhere else the app stays in hand.
+                                    dockMouse.dragging = true;
+                                    root.pickUpWindow(dockTile.win, appsDock.desktopId);
+                                    const p0 = dockTile.mapToItem(veil, mouse.x, mouse.y);
+                                    root.trackWindowDrag(p0.x, p0.y);
+                                }
+                                onPositionChanged: mouse => {
+                                    // `hoverEnabled` means this fires for HOVER
+                                    // too, so the gate is the carry itself and
+                                    // never `pressed`: after a touchpad lift
+                                    // there is no press, and the carry is
+                                    // exactly what must keep following.
+                                    if (!dockMouse.dragging)
+                                        return;
+                                    const p = dockTile.mapToItem(veil, mouse.x, mouse.y);
+                                    root.trackWindowDrag(p.x, p.y);
+                                }
+                                onReleased: {
+                                    if (!dockMouse.dragging)
+                                        return;
+                                    root.dragConsumed = true;
+                                    // Release OVER a target card places it --
+                                    // a mouse letting go of the click is the
+                                    // drop. Release anywhere else KEEPS the
+                                    // carry: on a touchpad the finger lifting
+                                    // is not a placement, and it happens while
+                                    // the pointer is usually still on the dock.
+                                    // What ends that carry is a CLICK on a card,
+                                    // or Escape.
+                                    if (root.dragWindowTo >= 0) {
+                                        dockMouse.dragging = false;
+                                        root.dropWindowDrag();
+                                    }
+                                }
+                                onCanceled: {
+                                    if (dockMouse.dragging) {
+                                        dockMouse.dragging = false;
+                                        root.cancelWindowDrag();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Empty: one line, centred in the space the list would have
+                // used, instead of a label drifting in the middle of the box.
+                Item {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    visible: appsDock.windows.length === 0
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: Translation.tr("No windows here")
+                        color: Appearance.colors.colSubtext
+                        font.family: Appearance.font.family.main
+                        font.pixelSize: Appearance.font.pixelSize.tiny
+                    }
+                }
+            }
+
+            // ── A press on the dock puts the carried app back ─────────────
+            //
+            // A carry OUTLIVES its release: letting go of the click is not a
+            // placement (see the tile's onReleased), so the app stays in hand
+            // until something ends it. The dock had no ending of its own, and
+            // both of the ones it fell through to were wrong. A press on a
+            // TILE picked the same window up again -- the carry never ended,
+            // so clicking the sidebar while an app was selected looked like it
+            // did nothing at all -- and a press anywhere else in the dock (the
+            // header, the gap between rows, the empty-state line) fell straight
+            // through to the veil's press-to-close catcher and dismissed the
+            // whole grid. Neither reads as "deselect".
+            //
+            // The sidebar is ONE surface, so one rule: while a window is in
+            // hand, a press anywhere on it means what Escape means -- put the
+            // app back and stay open. Above the tiles on purpose (z), and
+            // live only for that carry, so every other press reaches them
+            // untouched and the dock is unchanged when nothing is selected.
+            MouseArea {
+                id: dockDeselect
+                anchors.fill: parent
+                z: 1
+                // `holding` keeps the catcher live from the press to its own
+                // release. The carry is already gone by then, and handing the
+                // grab back mid-gesture would be the one way this press could
+                // still reach the veil and close the grid it just saved.
+                property bool holding: false
+                enabled: root.windowDragActive || dockDeselect.holding
+                onPressed: {
+                    dockDeselect.holding = true;
+                    root.cancelWindowDrag();
+                }
+                onReleased: dockDeselect.holding = false
+                onCanceled: dockDeselect.holding = false
+
+                // The grid closing cancels the gesture under this press; the
+                // latch must not survive into the next open, where it would
+                // hold the tiles down with nothing in hand.
+                Connections {
+                    target: root
+                    function onOpenChanged() {
+                        if (!root.open)
+                            dockDeselect.holding = false;
+                    }
+                }
+            }
+        }
         ColumnLayout {
             id: layout
-            anchors.centerIn: parent
+            // Centred in what is LEFT of the surface, not in the whole of it:
+            // the dock owns the right strip, so the grid slides left by half of
+            // it and the two never fight over the same pixels.
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.horizontalCenterOffset: -(root.dockWidth + root.gap) / 2
             spacing: root.gap + 6
             width: root.gridWidth
 
@@ -1263,6 +1777,28 @@ Scope {
                         z: card.carried ? 20 : 0
                         clip: true
 
+                        // THE RING, ON TOP OF EVERYTHING THE CARD DRAWS.
+                        //
+                        // A Rectangle's own border paints UNDER its children,
+                        // so any child reaching the card's edge hides it. The
+                        // window previews sit in `previewArea`, which is inset
+                        // by its `anchors.margins` on the LEFT -- but a window
+                        // wider than the card is only stopped by the card's
+                        // clip, which is the card's own right edge. So the
+                        // straight part of the right border was painted over
+                        // while the corner arcs and the whole left side stayed
+                        // visible: the ring looked missing on the right only.
+                        // This is the same border, drawn last, above the
+                        // content and below nothing -- so it cannot be covered.
+                        Rectangle {
+                            z: 10
+                            anchors.fill: parent
+                            radius: card.radius
+                            color: "transparent"
+                            border.width: card.border.width
+                            border.color: card.border.color
+                        }
+
                         StyledRectangularShadow {
                             target: card
                         }
@@ -1300,6 +1836,11 @@ Scope {
                             id: previewArea
                             anchors.fill: parent
                             anchors.margins: 2
+                            // Without this the previews are clipped by the CARD
+                            // (2 px further out), so a window that runs past the
+                            // card's edge reached the border and painted over it.
+                            // Clipped here they stop at the inset, inside it.
+                            clip: true
                             visible: !card.isNewSlot
 
                             Repeater {
@@ -1478,6 +2019,10 @@ Scope {
                             anchors.margins: 11
                             spacing: 7
                             visible: !card.isNewSlot
+                            // The block is the card's inner width (anchored both
+                            // sides); clipping here means a row that measures
+                            // itself wrong still cannot draw over the border.
+                            clip: true
 
                             // Apps, with their own window counts. The list is
                             // capped at three rows: a desktop with eight
@@ -1508,6 +2053,13 @@ Scope {
                                         }
                                         Text {
                                             Layout.fillWidth: true
+                                            // A RowLayout hands out space from the
+                                            // children's preferred widths; without
+                                            // a zero floor a long app name asked
+                                            // for its full width and the row grew
+                                            // past the card instead of eliding.
+                                            Layout.preferredWidth: 0
+                                            Layout.minimumWidth: 0
                                             text: card.apps[index]?.name ?? ""
                                             color: Appearance.colors.colOnSurface
                                             font.family: Appearance.font.family.main
@@ -1525,6 +2077,8 @@ Scope {
                                 Text {
                                     Layout.fillWidth: true
                                     visible: card.apps.length > 3
+                                    Layout.preferredWidth: 0
+                                    elide: Text.ElideRight
                                     text: Translation.tr("+%1 more").arg(card.apps.length - 3)
                                     color: Appearance.colors.colSubtext
                                     font.family: Appearance.font.family.main
@@ -1741,12 +2295,28 @@ Scope {
                                 // moment it lands: a press that starts on a
                                 // window is the candidate for a window grab,
                                 // and only travel settles it (onPositionChanged).
-                                cardMouse.pressWindow = root.windowAt(card, mouse.x, mouse.y);
+                                // A press on a card is ALWAYS the desktop: apps are
+                                // picked up from the dock beside the selected card
+                                // (see appsDock), never out of a preview. Without
+                                // this, a press that landed on a window preview turned
+                                // into an app grab on the first 6 px of travel, so a
+                                // desktop could never be dragged by its own face.
+                                cardMouse.pressWindow = null;
                                 cardMouse.windowArmed = false;
-                                // A press also abandons a grab that was somehow
-                                // still in hand -- a release the grid never saw.
-                                if (root.windowDragActive)
-                                    root.cancelWindowDrag();
+                                // A press on a card IS the drop for a carry no
+                                // release ended: the app was picked up with a
+                                // press and let go of over empty space, so the
+                                // click on a desktop is the placement. A card
+                                // that cannot take it -- the "+" slot, or the
+                                // desktop it came from -- abandons the carry
+                                // rather than promising a move it will not make.
+                                if (root.windowDragActive) {
+                                    const dropId = card.isNewSlot ? -1 : root.desktopOfCell(card.index);
+                                    if (!root.dropWindowDragOn(dropId))
+                                        root.cancelWindowDrag();
+                                    root.dragConsumed = true;
+                                    return;
+                                }
                                 // A drag that released outside any card left
                                 // this set; the next press starts clean.
                                 root.dragConsumed = false;
@@ -1806,7 +2376,7 @@ Scope {
                                 onTriggered: {
                                     if (!cardMouse.pressed || !root.dragHeld
                                         || card.isNewSlot || root.dragArmed
-                                        || cardMouse.windowArmed || root.windowDragActive)
+                                        || (cardMouse.windowArmed && cardMouse.pressed) || root.windowDragActive)
                                         return;
                                     root.dragArmed = true;
                                     root.draggingCell = card.index;
@@ -1859,17 +2429,20 @@ Scope {
                                 // arrives first in practice, so the smaller
                                 // object wins the smaller gesture -- and a press
                                 // held still still picks up the desktop.
-                                if (root.dragHeld && !root.dragArmed && !cardMouse.windowArmed
-                                    && cardMouse.pressWindow !== null
+                                // ── A CARD grab is granted by TRAVEL too ───────
+                                // Press a card and move and the desktop comes with
+                                // you; the 450 ms hold is now only a shortcut for
+                                // lifting one without travelling first. Nothing on
+                                // a card can start a window grab any more, so a
+                                // drag on a desktop can only ever reorder desktops.
+                                if (root.dragHeld && !root.dragArmed && !card.isNewSlot
                                     && (Math.abs(mouse.x - cardMouse.pressX) > root.windowDragSlop
                                         || Math.abs(mouse.y - cardMouse.pressY) > root.windowDragSlop)) {
-                                    cardMouse.windowArmed = true;
-                                    // Both card grants stand down: this press
-                                    // belongs to the window now, so a desktop
-                                    // reorder must not also fire from it.
                                     holdArm.stop();
                                     cardMouse.doubleTapPrimed = false;
-                                    root.pickUpWindow(cardMouse.pressWindow, card.desktopId);
+                                    root.dragArmed = true;
+                                    root.draggingCell = card.index;
+                                    root.dropCell = card.index;
                                 }
                                 if (cardMouse.windowArmed) {
                                     // Veil coordinates: the frame every drop
@@ -2083,7 +2656,14 @@ Scope {
     // draws its small fallback square instead.
     function iconFor(cls) {
         const __t0 = Date.now();
-        const __n = AppSearch.guessIcon(cls);
+        // An aliased class takes its icon from the SAME entry the launcher
+        // draws -- `ii-folder`, the file manager's own icon -- rather than a
+        // guess made from the class name, which has no icon to guess from.
+        const __alias = root.shellWindowAliases[String(cls ?? "").toLowerCase()];
+        const __entry = __alias
+            ? AppSearch.list.find(a => String(a.id ?? "").toLowerCase() === __alias)
+            : null;
+        const __n = __entry?.icon ? String(__entry.icon) : AppSearch.guessIcon(cls);
         const __t1 = Date.now();
         const __r = Quickshell.iconPath(__n, "");
         const __t2 = Date.now();

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=OpenFilm
+GenericName=AI video studio
+Comment=Films as web pages - Studio, the editor to change anything in them
+Exec=openfilm-studio
+TryExec=openfilm-studio
+Icon=openfilm
+Terminal=false
+Categories=AudioVideo;Video;
+Keywords=openfilm;film;video;studio;editor;motion;animation;render;mp4;ai;
+StartupNotify=false

@@ -2429,6 +2429,10 @@ Scope {
                         function vpnPanel(on: string): string {
                             return barContent.vpnPanelToggle(on === "true" || on === "1");
                         }
+
+                        function pinPanel(on: string): string {
+                            return barContent.pinPanelToggle(on === "true" || on === "1");
+                        }
                         // Test hooks for the two connectivity menus: see
                         // `vpnPanelToggle` in BarContent for why a script needs
                         // them (a layer surface takes no synthetic click here).
@@ -2437,6 +2441,11 @@ Scope {
                         }
                         function bluetoothPanel(on: string): string {
                             return barContent.bluetoothPanelToggle(on === "true" || on === "1");
+                        }
+                        // The sound menu (two-finger tap on the sound icon), and
+                        // the same proxy shape as the three above.
+                        function soundPanel(on: string): string {
+                            return barContent.soundPanelToggle(on === "true" || on === "1");
                         }
                         function ask(): string {
                             const span = (a, b) => (b > a ? Math.round(a) + ".." + Math.round(b) : "off");
@@ -3104,6 +3113,32 @@ Scope {
                 return "no bar window (barOpen off?)";
             try {
                 return proxy.vpnPanel(on);
+            } catch (e) {
+                return "threw: " + e;
+            }
+        }
+
+        // The same hook for the pin menu (two-finger tap on the power icon).
+        //   qs -c ii ipc call bar pinPanel true
+        function pinPanel(on: string): string {
+            const proxy = bar.gapAsker;
+            if (!proxy)
+                return "no bar window (barOpen off?)";
+            try {
+                return proxy.pinPanel(on);
+            } catch (e) {
+                return "threw: " + e;
+            }
+        }
+
+        // The same hook for the sound menu (two-finger tap on the sound icon).
+        //   qs -c ii ipc call bar soundPanel true
+        function soundPanel(on: string): string {
+            const proxy = bar.gapAsker;
+            if (!proxy)
+                return "no bar window (barOpen off?)";
+            try {
+                return proxy.soundPanel(on);
             } catch (e) {
                 return "threw: " + e;
             }

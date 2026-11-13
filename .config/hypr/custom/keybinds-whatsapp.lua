@@ -1,5 +1,11 @@
--- Launch WhatsApp Desktop directly via SUPER+Shift+W.
+-- Launch WhatsApp Desktop via SUPER+Shift+W.
 -- Bypasses the app-search catalogue entirely, so this always works
 -- regardless of whether DesktopEntries picked up the desktop file.
--- The real binary lives in a path with a space, so use the no-space wrapper.
-hl.bind("SUPER + SHIFT + W", hl.dsp.exec_cmd("/opt/whatsapp-linux-desktop/bin/whatsapp-linux-desktop"), { description = "App: WhatsApp Desktop" })
+--
+-- Goes through ~/.local/bin/whatsapp-desktop, NOT the bare binary: that
+-- wrapper is what adds --ozone-platform=x11 (the only path where this app
+-- reaches the real GPU), the panel scale factor, and
+-- --disable-gpu-compositing (without it the window paints a stale layer over
+-- the chat list and clicks stop landing on the rows). Starting the bare
+-- binary skips all three and brings the clicking bug back.
+hl.bind("SUPER + SHIFT + W", hl.dsp.exec_cmd((os.getenv("HOME") or "") .. "/.local/bin/whatsapp-desktop"), { description = "App: WhatsApp Desktop" })

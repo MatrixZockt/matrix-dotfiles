@@ -356,6 +356,10 @@ Item { // Bar content region
             case "nowbar": return nowbarPocket;
             case "meter": return meterPocket;
             case "status": return statusPocket;
+            // A pinned quick toggle: one shared pocket, labelled from whichever
+            // pin the pointer is on (see hoveredPinName).
+            case "pin": return pinPocket;
+            case "vpn": return vpnPocket;
         }
         return null;
     }
@@ -552,6 +556,28 @@ Item { // Bar content region
     // cursor across the bar to reach something else never arms a pocket) but
     // reads as instant-ish on a deliberate stop. The spring itself already
     // extends in ~55ms; the dwell was the whole wait.
+    // Which pinned toggle the pointer is over, for the shared pin pocket: the
+    // bar's hover line is one surface, so it reads the model of the pin that
+    // asked for it rather than existing nine times.
+    //
+    // The MODEL is held, not copies of its two strings. The line has to follow
+    // the toggle while the pointer is still resting on it, and the power icon is
+    // exactly that case: a tap on it changes the mode the line is describing, so
+    // a snapshot would keep advertising the mode you just left until you moved
+    // off and back. `statusText` is a live binding on the toggle model, so these
+    // two read through to it.
+    property var hoveredPinModel: null
+    property bool hoveredPinIsPower: false
+    readonly property string hoveredPinName: hoveredPinIsPower
+        ? Translation.tr("Power mode")
+        : (hoveredPinModel?.name ?? "")
+    readonly property string hoveredPinStatus: hoveredPinModel?.statusText ?? ""
+
+    // The pin menu (two-finger tap on the power icon). On the root, not on the
+    // delegate: the delegate is one of nine Repeater instances, so an id on it
+    // is not addressable from the panel that has to be told to open.
+    property bool pinPopupOpen: false
+
     readonly property int pocketDwellMs: 180
     property string dwellPocketId: ""
     property real dwellCenterX: 0
@@ -671,6 +697,56 @@ Item { // Bar content region
     function bluetoothPanelToggle(on): string {
         bluetoothButton.popupOpen = on;
         return "popupOpen=" + String(bluetoothButton.popupOpen);
+    }
+
+    /**
+     * The sound panel, openable without a touchpad.
+     *
+     * Same purpose as its three siblings above: the two-finger tap is the one
+     * gesture on this bar that cannot be exercised from a terminal, so the flag
+     * it drives has to be reachable by name.
+     *   qs -c ii ipc call bar soundPanelToggle true
+     */
+    function soundPanelToggle(on): string {
+        soundButton.popupOpen = on;
+        return "popupOpen=" + String(soundButton.popupOpen);
+    }
+
+    /**
+     * The same hook for the pin menu (two-finger tap on the power icon), for
+     * the same reason: the pin is a Repeater delegate and its panel is a layer
+     * surface, so neither can be clicked or screenshotted from a script.
+     *   qs -c ii ipc call bar pinPanel true
+     */
+    function pinPanelToggle(on): string {
+        root.pinPopupOpen = on;
+        return "popupOpen=" + String(root.pinPopupOpen);
+    }
+
+    // Whether a press in one of the bar's stretch areas landed on BARE BAR.
+    //
+    // The left and right stretches are the click zones for the empty bar: they
+    // run from the screen edge to the centre island and answer a left press
+    // with the desktop overview. They also run UNDER their island, which is
+    // the problem this fixes -- an island is a pill carrying the icons, and the
+    // pixels between two icons (or the padding around them) are that pill, not
+    // empty bar. A press there fell through to the stretch, so clicking in the
+    // gap between the battery and the power pin -- aiming at nothing, or
+    // mis-aiming at a pin -- threw the desktop overview over the screen.
+    //
+    // So a press is only "on the bar" while it is outside the island's painted
+    // box. The classic single-slab bar has no islands (`island.visible` false):
+    // there the whole stretch keeps its old meaning, because the slab IS the
+    // bar and everything on it is content over the same surface.
+    //
+    // Coordinates: both the stretch and the island live in this item's frame,
+    // so the press (in stretch-local x) is compared after adding the stretch's
+    // own x rather than being mapped item-to-item.
+    function pressedOnBareBar(event, stretch, island) {
+        if (!island || !island.visible)
+            return true;
+        const pressX = stretch.x + event.x;
+        return pressX < island.x || pressX > island.x + island.width;
     }
 
     function centerXFor(item) {
@@ -798,6 +874,11 @@ Item { // Bar content region
                 case "nowbar": return nowbarPocket;
                 case "meter": return meterPocket;
                 case "status": return statusPocket;
+                // A pinned quick toggle and the VPN: without these two the
+                // resolver returned null, so `contentW` was 0 and the text was
+                // clipped to a stub ("Powe...") in a box sized for nothing.
+                case "pin": return pinPocket;
+                case "vpn": return vpnPocket;
             }
             return null;
         }
@@ -1093,6 +1174,40 @@ Item { // Bar content region
                 label: Translation.tr("Bluetooth")
                 value: !BluetoothStatus.enabled ? Translation.tr("Off")
                     : (BluetoothStatus.firstActiveDevice?.name ?? Translation.tr("Not connected"))
+            }
+        }
+
+        // PINNED QUICK TOGGLES -- every one of them, present and future.
+        //
+        // These had a tooltip and nothing else, so a hover gave no bar-level
+        // answer at all: the bar's line, the surface every other icon uses, said
+        // nothing for them. A pin is no less worth knowing about -- "Night
+        // Light · Inactive" is exactly the kind of fact that line exists for.
+        //
+        // One pocket rather than nine: `hoveredPinName`/`Status` are set by the
+        // pin's own hover handler, so a quick toggle pinned later is covered
+        // without another pocket to write.
+        PocketColumn {
+            id: pinPocket
+            visible: pocketHost.resolvedId === "pin"
+            inlineEligible: true
+            PocketLine {
+                label: root.hoveredPinName
+                value: root.hoveredPinStatus
+            }
+        }
+
+        // VPN -- the last indicator without a line of its own. Its glyph says
+        // whether the tunnel is up, which is why it went without one, but "up
+        // to what" lived only in a tooltip.
+        PocketColumn {
+            id: vpnPocket
+            visible: pocketHost.resolvedId === "vpn"
+            inlineEligible: true
+            PocketLine {
+                label: Translation.tr("VPN")
+                value: !Tailscale.installed ? Translation.tr("Not installed")
+                    : (Tailscale.connected ? Translation.tr("Connected") : Translation.tr("Off"))
             }
         }
 
@@ -2001,8 +2116,7 @@ Item { // Bar content region
             function perfHistory(key) {
                 if (key === "cpu") return ResourceUsage.cpuUsageHistory;
                 if (key === "ram") return ResourceUsage.memoryUsageHistory;
-                // The discrete card the gauge names -- see
-                // SystemNow.gpuMetricPct.
+                // The busiest chip's series -- see SystemNow.gpuMetricPct.
                 if (key === "gpu") return SystemNow.gpuMetricHistory;
                 if (key === "temp") return SystemNow.tempLoadHistory;
                 return [];
@@ -2055,8 +2169,13 @@ Item { // Bar content region
     property var screen: undefined
     property var brightnessMonitor: undefined
 
-    readonly property string mediaArtist: (MprisController.activePlayer && MprisController.activePlayer.trackArtist) ? MprisController.activePlayer.trackArtist : ""
-    readonly property string mediaPlayerName: (MprisController.activePlayer && MprisController.activePlayer.identity) ? MprisController.activePlayer.identity : ""
+    // `shownPlayer`, not `activePlayer`: the bar's Playing line follows the app
+    // that is making sound right now (see MprisController), so stopping the
+    // music hands the line to whatever else is playing -- a game, Discord, a
+    // video -- instead of freezing on the song that was stopped.
+    readonly property string mediaArtist: (MprisController.shownPlayer && MprisController.shownPlayer.trackArtist) ? MprisController.shownPlayer.trackArtist : ""
+    // The name of what is actually being heard, audible browser tab included.
+    readonly property string mediaPlayerName: MprisController.nowPlayingName
 
     // ── The now bar's AI detail: four weeks of usage ────────────────────
     // `history` on a flare cell is a map of window id -> [[timestamp, used],
@@ -2694,6 +2813,25 @@ Item { // Bar content region
     Toggles.ScreenSnipToggle { id: screenSnipModel }
     Toggles.ColorPickerToggle { id: colorPickerModel }
 
+    // ── One ink size for the icons in the run ───────────────────────────
+    // Every icon in the strip is drawn at `Appearance.font.pixelSize.larger`,
+    // and Material Symbols' ink box is not uniform per glyph: measured on the
+    // live bar at that em, the wifi, the volume and the bluetooth fill 12-14.7px
+    // of ink while the power profile's eco leaf fills 10.0 and its airwave 11.3.
+    // That is the "the icons are very slightly smaller than the rest" report --
+    // the glyph, not the em.
+    //
+    // So the profile glyphs carry the multiplier that lands their ink on the
+    // run's 12px. Keyed by GLYPH and not by toggle, and a MULTIPLIER of
+    // `larger` rather than a fixed size, so an accessibility text scale moves
+    // them together, a glyph that is not listed keeps the strip's own em, and a
+    // pin that is not on the bar today is sized the day it is pinned.
+    readonly property var pinGlyphEm: ({
+        "airwave": 1.05,              // balanced
+        "energy_savings_leaf": 1.05,  // eco
+        "local_fire_department": 1.00 // performance
+    })
+
     component HoverIconButton: Rectangle {
         id: hoverIconButton
         property alias symbol: hoverIconSymbol
@@ -2753,12 +2891,25 @@ Item { // Bar content region
         // The hover feedback is the GLYPH: it takes the accent and fills in. One
         // colour change on the thing you are pointing at, rather than a plate
         // behind it plus a colour change on it.
+        // Optional glyph colour, for a pin whose colour IS its state -- the
+        // power profile's green leaf and fire-orange flame. Unset ("transparent")
+        // leaves the strip's own logic below in charge.
+        //
+        // A glyph, not a disc behind it: the bar's icons are all outline glyphs
+        // on the bar's own surface, and a coloured disc broke that run -- it read
+        // as a different kind of control sitting in the strip.
+        property color symbolColor: "transparent"
         color: "transparent"
         MaterialSymbol {
             id: hoverIconSymbol
             anchors.centerIn: parent
             iconSize: Appearance.font.pixelSize.larger
-            color: hoverIconButton.reallyHovered ? Appearance.colors.colPrimary : Appearance.colors.colOnLayer0
+            // A pin with its own colour keeps it, hover or not: that colour is
+            // the mode, not a hover state. Everything else does what every
+            // other icon in the strip does.
+            color: hoverIconButton.symbolColor.a > 0
+                ? hoverIconButton.symbolColor
+                : (hoverIconButton.reallyHovered ? Appearance.colors.colPrimary : Appearance.colors.colOnLayer0)
             // The hover swell is the FILL axis, not a scale: these glyphs are
             // native-rendered, so enlarging one stretches its rasterized pixels
             // and the icon visibly softens exactly when the eye is on it. The
@@ -3705,6 +3856,11 @@ Item { // Bar content region
         // A download's fill uses the primary accent and the real fraction
         readonly property bool downloadLive: GlobalStates.downloadProgress >= 0 && StatusSignal.loadingLine
 
+        // No update face here. The progression lives in the island's own
+        // activity TAB (see NowBar's progressView) -- a bar inside the tab it
+        // belongs to, rather than one drawn edge to edge under the whole bar
+        // while the island was saying the same thing again.
+
         // ── The meter face (brightness / volume) ──────────────────────────
         // The line shows a VALUE while this is live: it fills to the actual
         // brightness or volume, edge to edge, and a label chip beside the
@@ -3765,10 +3921,25 @@ Item { // Bar content region
         Connections {
             target: StatusSignal
             function onMeterLiveChanged() {
+                // A hand on the bar (volume, brightness) clears whatever state
+                // the line was left in: the sweep latch, a half-finished
+                // charge, and the meter's own exit hold. So the reading being
+                // changed is what shows -- and when it ends, nothing is left
+                // behind to paint a solid bar at the level of some earlier
+                // event.
+                if (StatusSignal.meterLive) {
+                    loadingLine.finishing = false;
+                    loadingLine.wasCharging = false;
+                    loadingLine.meterExit = false;
+                    if (!loadingLine.chargeLive) {
+                        loadingLine.restarting = true;
+                        loadingLine.fillProgress = 0;
+                        Qt.callLater(() => { loadingLine.restarting = false; });
+                    }
+                    return;
+                }
                 // Only a meter that was actually on screen earns the hold.
-                loadingLine.meterExit = StatusSignal.meterLive
-                    ? false
-                    : loadingLine.visible;
+                loadingLine.meterExit = loadingLine.visible;
             }
         }
 
@@ -3783,7 +3954,8 @@ Item { // Bar content region
         y: parent.height - height - 2
         height: 2
         visible: opacity > 0.01
-        opacity: (loadingLine.chargeLive || loadingLine.failLive || loadingLine.blinkLive
+        opacity: ((loadingLine.chargeLive && !loadingLine.chargeOverstayed) || loadingLine.failLive
+            || loadingLine.blinkLive
             || loadingLine.meterLive || loadingLine.alertLive || loadingLine.finishing)
             // The failure face blinks the WHOLE line: off beat = gone, on
             // beat = the full width in red (the fill is pinned to full while
@@ -3828,11 +4000,38 @@ Item { // Bar content region
         // fades out as an error, not a success), which is what the
         // `!loadingFailFlash` test below decides.
         property bool finishing: false
+        // A charge that never resolves is not still loading -- it is a wait
+        // whose ending went missing (a window the launch watcher never saw, a
+        // program that died on startup). The crawl tops out at full five
+        // seconds in, and from there an unresolved charge sat as a solid
+        // full-width bar for as long as the wait's own half-minute ceiling
+        // kept it alive. That is the one thing the charge face must never do:
+        // a still bar reads as a stuck desktop, not as patience. This latch
+        // caps the face instead -- after seven seconds the charge stops
+        // counting as a face and the line fades out, so the most a stuck
+        // launch can leave behind is a fade.
+        property bool chargeOverstayed: false
         // Whether the line was mid-charge a moment ago. `chargeLive` is
         // already false by the time the change handler runs -- it is derived
         // from the very signal that changed -- so without this the handler
         // could not tell a completed wait from a cancelled one.
         property bool wasCharging: false
+
+        // The charge's own ceiling. Bound to the face rather than started by
+        // hand, so it re-arms with every fresh wait and cannot outlive one;
+        // the latch above is what keeps it from firing twice. A download is
+        // exempt: it is the one wait that may legitimately run for minutes
+        // (GlobalStates' ceiling exempts it too), and cutting its real
+        // percentage short would be worse than a long line.
+        Timer {
+            id: chargeCap
+            interval: 7000
+            repeat: false
+            running: loadingLine.chargeLive && !loadingLine.chargeOverstayed
+                && GlobalStates.downloadProgress < 0
+            onTriggered: loadingLine.chargeOverstayed = true
+        }
+
 
         NumberAnimation {
             id: finishSweep
@@ -3856,6 +4055,7 @@ Item { // Bar content region
                 if (StatusSignal.loadingLine && !StatusSignal.loadingFailFlash) {
                     finishSweep.stop();
                     loadingLine.finishing = false;
+                    loadingLine.chargeOverstayed = false;
                     loadingLine.restarting = true;
                     loadingLine.fillProgress = 0;
                     Qt.callLater(() => { loadingLine.restarting = false; });
@@ -3865,9 +4065,17 @@ Item { // Bar content region
                     // waiting for is here. Run the charge out to the end and
                     // only then let the line go.
                     loadingLine.wasCharging = false;
-                    finishSweep.restart();
+                    // An arrival AFTER the cap does not re-light the line: it
+                    // has already faded, and a 220ms sweep out of nothing
+                    // would read as a new event rather than the end of an old
+                    // one.
+                    if (!loadingLine.chargeOverstayed)
+                        finishSweep.restart();
+                    loadingLine.chargeOverstayed = false;
                 } else {
-                    loadingLine.wasCharging = false;        }
+                    loadingLine.wasCharging = false;
+                    loadingLine.chargeOverstayed = false;
+                }
 
     }
 }
@@ -3878,9 +4086,10 @@ Item { // Bar content region
         // A real download overrides the crawl: the fill then shows the
         // actual fraction from Razer Command Center's downloader.
         Timer {
+            id: chargeCrawl
             interval: 100
             running: loadingLine.visible && loadingLine.chargeLive
-                && GlobalStates.downloadProgress < 0
+                && !loadingLine.chargeOverstayed && GlobalStates.downloadProgress < 0
             repeat: true
             onTriggered: loadingLine.fillProgress = Math.min(1, loadingLine.fillProgress + 0.02)
         }
@@ -3892,18 +4101,29 @@ Item { // Bar content region
             }
         }
 
-        // The blink's one-shot clock: hold the pulse on the line briefly,
-        // then retire it so the channel is free for the next signal.
+        // The blink's one-shot clock lives in StatusSignal now (pulseExpiry).
+        // It used to live here, and that is exactly how a pulse could be
+        // stranded: anything that stopped this timer from firing -- a reload
+        // mid-blink, a restart every time the pulse changed -- left the pulse
+        // set, and a set pulse paints a solid full-width line AND outranks the
+        // meter. The service owns its own expiry so no consumer can strand it.
+
+        // The other latch that can outlive its animation: `finishing` keeps a
+        // completed launch's fill on screen while it sweeps to the end. The
+        // sweep is 220ms, so a latch still held after 450ms belongs to no
+        // animation at all -- typically one stopped mid-flight -- and it left
+        // the strip painted SOLID at 100% for the rest of the session, which
+        // is the report this answers. Dropping the latch hands the line back
+        // to its opacity binding, so it goes away normally.
         Timer {
-            id: blinkTimer
-            interval: 750
-            onTriggered: StatusSignal.clearPulse()
-        }
-        Connections {
-            target: StatusSignal
-            function onPulseChanged() {
-                if (StatusSignal.hasPulse && StatusSignal.pulse.kind === "blink")
-                    blinkTimer.restart();
+            interval: 450
+            repeat: true
+            running: loadingLine.finishing
+            onTriggered: {
+                finishSweep.stop();
+                loadingLine.finishing = false;
+                if (!loadingLine.chargeLive)
+                    loadingLine.fillProgress = 0;
             }
         }
 
@@ -4096,7 +4316,11 @@ Item { // Bar content region
                 // its own explicit entry points (its own button, SUPER+A), so
                 // nothing became unreachable; what changed is that a tap on
                 // bare bar no longer summons a panel you did not ask for.
-                GlobalStates.desktopOverviewOpen = !GlobalStates.desktopOverviewOpen;
+                // Bare bar only: the clock's island is a control surface too,
+                // and a press in the padding around the clock is not a press on
+                // the empty bar. See `pressedOnBareBar`.
+                if (root.pressedOnBareBar(event, barLeftSideMouseArea, leftIsland))
+                    GlobalStates.desktopOverviewOpen = !GlobalStates.desktopOverviewOpen;
             }
         }
 
@@ -4245,7 +4469,15 @@ Item { // Bar content region
                 // Symmetric with the left stretch above: the desktop overview,
                 // not the right sidebar. See the note there for why the
                 // sidebars kept their own explicit buttons.
-                GlobalStates.desktopOverviewOpen = !GlobalStates.desktopOverviewOpen;
+                //
+                // BUT ONLY ON BARE BAR -- see `pressedOnBareBar`. This area
+                // covers the whole right stretch, island and all, and every
+                // pixel of the island that no icon's own MouseArea claims
+                // (the padding around the pins, the gaps between two icons)
+                // used to land here and open the overview. Clicking the island
+                // is not clicking the bar.
+                if (root.pressedOnBareBar(event, barRightSideMouseArea, rightIsland))
+                    GlobalStates.desktopOverviewOpen = !GlobalStates.desktopOverviewOpen;
             }
         }
 
@@ -4428,30 +4660,71 @@ Item { // Bar content region
                     Layout.leftMargin: root.iconInset
                     Layout.rightMargin: root.iconInset
                     hovered: topBarWidgetHover.hovered
-                    tooltipText: `${modelData.model?.name ?? ""} · ${modelData.model?.statusText ?? ""}`
-                    symbol.text: modelData.icon
-                    // "On" is the accent at full strength; hovering is the
-                    // plain label colour; at rest it is that colour held back
-                    // so a row of them reads as a row, not as a shout.
+                    // The LIVE icon, not the one this row was written with.
+                    // The power profile's glyph is `energy` / `airwave` /
+                    // `local_fire_department` depending on the profile, and it
+                    // was pinned to "battery_saver" for ever -- the icon could
+                    // never show which mode the machine was actually in.
+                    tooltipText: `${modelData.model?.name ?? ""} · ${modelData.model?.statusText ?? ""} · ${Translation.tr("tap: toggle")} · ${Translation.tr("two-finger tap: sidebar")}`
+                    symbol.text: modelData.model?.icon || modelData.icon
+                    // The same drawn size as its neighbours, whatever glyph the
+                    // toggle happens to use. See `pinGlyphEm`.
+                    symbol.iconSize: Math.round(Appearance.font.pixelSize.larger
+                        * (root.pinGlyphEm[modelData.model?.icon || modelData.icon] ?? 1))
+                    // Which pin this is, for the two-finger tap below.
+                    readonly property bool isPowerProfile: modelData.key === "powerProfiles"
+                    // The glyph carries the colour, and there is no disc behind
+                    // it: the strip is a run of outline icons on the bar's own
+                    // surface, so a filled circle on one of them reads as a
+                    // different kind of control.
                     //
-                    // The resting value used to be
-                    // `transparentize(colOnLayer0, 1)`, and `transparentize`
-                    // MULTIPLIES alpha by (1 - percentage) -- so that is
-                    // alpha 0: a completely invisible glyph. The item was
-                    // still `visible: true`, so it kept its full 26px in the
-                    // strip's layout and the bar showed a hole where the icon
-                    // should be. That is the "the spacing between the icons is
-                    // wrong" report: the gaps were not uneven by accident,
-                    // they were measuring widgets nobody could see.
-                    color: modelData.model?.toggled
-                        ? Appearance.colors.colPrimary
-                        : (hovered ? Appearance.colors.colOnLayer0
-                            : ColorUtils.transparentize(Appearance.colors.colOnLayer0, 0.35))
-                    activateAction: () => GlobalStates.sidebarRightOpen = true
-                    altAction: () => modelData.model?.mainAction?.()
+                    // `tint` exists only on the power profile (green eco,
+                    // fire-orange performance, transparent for balanced -- which
+                    // has no colour to say and whose accent is a wallpaper grey).
+                    // Everything else falls through to the shared logic inside
+                    // `HoverIconButton`.
+                    symbolColor: modelData.model?.tint ?? "transparent"
+                    activateAction: () => {
+                        // A toggle with no action of its own still has to do
+                        // something: fall back to the sidebar, which is where
+                        // its controls are.
+                        if (modelData.model?.mainAction)
+                            modelData.model.mainAction();
+                        else
+                            GlobalStates.sidebarRightOpen = true;
+                    }
+                    // Two fingers on the POWER pin opens the mode menu -- the
+                    // three modes, with the one you are on marked, and a pick
+                    // raises the same notice the popup's buttons do. Every other
+                    // pin keeps the sidebar: that is where its full controls
+                    // live, and a pin is a shortcut to a toggle, not a page.
+                    altAction: () => {
+                        if (topBarWidgetButton.isPowerProfile)
+                            root.pinPopupOpen = !root.pinPopupOpen;
+                        else
+                            GlobalStates.sidebarRightOpen = true;
+                    }
                     HoverHandler {
                         id: topBarWidgetHover
                         cursorShape: Qt.PointingHandCursor
+                        // The bar's own hover line, the same one Wi-Fi and
+                        // Bluetooth answer with -- for WHICHEVER pin this is,
+                        // which is why the text comes off the model at hover
+                        // time instead of being written per toggle.
+                        onHoveredChanged: {
+                            if (hovered) {
+                                // The power pin answers with the MODE, because
+                                // that is what a tap on it changes -- "Power
+                                // mode · Eco", not the internal profile name.
+                                // Held as the model so the line keeps up while
+                                // the pointer rests on the icon.
+                                root.hoveredPinModel = topBarWidgetButton.modelData.model ?? null;
+                                root.hoveredPinIsPower = topBarWidgetButton.isPowerProfile;
+                            }
+                            root.hoverPocket(hovered, "pin",
+                                root.centerXFor(topBarWidgetButton),
+                                root.rightIslandLeft, root.rightIslandRight);
+                        }
                     }
                 }
             }
@@ -4484,7 +4757,7 @@ Item { // Bar content region
                 // (see soundPocket); the tooltip would only repeat the level, so
                 // it carries what the bar cannot: what a click and a right click
                 // do, and that the wheel still moves the volume.
-                tooltipText: `${Translation.tr("Click: mute or unmute")} · ${Translation.tr("Two-finger tap: quick settings overlay")} · ${Translation.tr("Scroll: change volume")}`
+                tooltipText: `${Translation.tr("Click: mute or unmute")} · ${Translation.tr("Two-finger tap: sound devices")} · ${Translation.tr("Scroll: change volume")}`
                 symbol.text: muted ? "volume_off" : "volume_up"
                 // ── Which gesture does which (2026-10-20, final) ──────────
                 //
@@ -4515,8 +4788,21 @@ Item { // Bar content region
                 // deliberate second tap. So the split is not by time but by
                 // role: this click toggles, and `onTapTriggered` below only
                 // reports. Nothing to race.
+                // Where the SoundPanel lives. Same flag-and-Connections
+                // arrangement as the Wi-Fi, Bluetooth and VPN icons: the tap
+                // raises this flag, the panel follows it, and the panel's own
+                // close (Escape, the backdrop, its close button) clears it
+                // again -- otherwise the next tap would "open" a card that is
+                // already shut and read as a press that did nothing.
+                //
+                // NEW DESTINATION 2026-11-01 (user request): a two-finger tap
+                // used to flip the SUPER + G overlay. The overlay already has
+                // its key; the output and microphone lists had no door at all
+                // in the bar, which is what this gesture is worth.
+                property bool popupOpen: false
                 altAction: () => {
-                    console.log(`[tap] 2-finger tap on the sound icon: ${root.toggleOverlayFromTap()}`);
+                    soundButton.popupOpen = !soundButton.popupOpen;
+                    console.log(`[tap] 2-finger tap on the sound icon: sound panel ${soundButton.popupOpen ? "open" : "closed"}`);
                 }
                 WheelHandler {
                     acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
@@ -4661,13 +4947,27 @@ Item { // Bar content region
                     // edge instead, which is the "first icon has a big spacing
                     // to the left" report.
                     //
-                    // The SAME single number the strip's own icons are inset
-                    // by, so the run has exactly one spacing to change. It is
-                    // deliberately the inset and not twice it: the pill's two
-                    // glyphs are one control, so they read a touch tighter than
-                    // two separate strip icons -- which is the hierarchy the eye
-                    // expects inside a group.
-                    spacing: root.iconInset
+                    // TWICE the inset, which is what a gap between two strip
+                    // icons actually measures: each one carries `iconInset` on
+                    // both sides, so a neighbour gap is 18 -- this row can only
+                    // put 9 between its own children, so it has to ask for 18.
+                    //
+                    // This used to be the bare inset on the theory that the
+                    // pill's glyphs were one control and should read tighter
+                    // than the strip around them. That was true when the pill
+                    // was two indications; it holds three separate buttons now
+                    // (network, bluetooth, VPN) plus the mic and bell chips, so
+                    // the tighter number stopped grouping anything and started
+                    // looking like a mistake next to the icons beside it.
+                    //
+                    // Measured on the live bar before this, right run, glyph
+                    // centre to glyph centre, logical px: 47, 34.3, 36, 44, 44,
+                    // 44.7 -- the two short ones are the wifi-to-bluetooth and
+                    // bluetooth-to-VPN gaps, i.e. this row. With the pill's
+                    // inner gap at 2 * iconInset every one of those reads 44,
+                    // because 26 (the icon box) + 18 (the gap) is the whole
+                    // arithmetic of the run.
+                    spacing: root.iconInset * 2
                     // NO muted-sink chip here: the sound button to the left
                     // already swaps its own glyph to volume_off when muted,
                     // so this chip was a SECOND crossed speaker appearing next
@@ -4865,6 +5165,11 @@ Item { // Bar content region
                         HoverHandler {
                             id: vpnHover
                             cursorShape: Qt.PointingHandCursor
+                            // The one indicator that had no bar line: the glyph
+                            // says up or down, the line says which.
+                            onHoveredChanged: root.hoverPocket(vpnHover.hovered, "vpn",
+                                root.centerXFor(vpnButton),
+                                root.rightIslandLeft, root.rightIslandRight)
                         }
                     }
                 }
@@ -4877,6 +5182,33 @@ Item { // Bar content region
             // it parsed as the pill's own children and the file never balanced,
             // which took the entire bar down with it. The strip's icons are all
             // siblings of the pill, at this indent.
+
+            // The power-mode menu, on the same flag-and-Connections
+            // arrangement as the connectivity menus below. `anchorItem` is the
+            // sound icon: the pin that opens it is a Repeater delegate, so it
+            // cannot be named from out here, and the panel uses the anchor only
+            // to pick the screen -- which is this bar's screen either way.
+            PowerModePanel {
+                id: powerModePanel
+                anchorItem: soundButton
+                Connections {
+                    target: root
+                    function onPinPopupOpenChanged() {
+                        powerModePanel.open = root.pinPopupOpen;
+                    }
+                }
+                // The panel closes itself (Escape, backdrop, its close button),
+                // so the flag follows it back -- otherwise the next two-finger
+                // tap would "open" a panel that is already shut and read as a
+                // press that did nothing.
+                Connections {
+                    target: powerModePanel
+                    function onOpenChanged() {
+                        if (!powerModePanel.open && root.pinPopupOpen)
+                            root.pinPopupOpen = false;
+                    }
+                }
+            }
 
             // The VPN popup. A sibling of the pill rather than a child of it,
             // and non-visual (a Scope holding a layer-shell window), so it
@@ -4941,6 +5273,28 @@ Item { // Bar content region
                     function onOpenChanged() {
                         if (!bluetoothPanel.open && bluetoothButton.popupOpen)
                             bluetoothButton.popupOpen = false;
+                    }
+                }
+            }
+
+            // The sound popup: what a two-finger tap on the sound icon opens.
+            // Same flag-and-Connections arrangement as the three above, and a
+            // sibling of them for the same reason -- a panel is a Scope holding
+            // a layer-shell window, so it takes no room in the strip's row.
+            SoundPanel {
+                id: soundPanel
+                Connections {
+                    target: soundButton
+                    function onPopupOpenChanged() {
+                        soundPanel.anchorItem = soundButton;
+                        soundPanel.open = soundButton.popupOpen;
+                    }
+                }
+                Connections {
+                    target: soundPanel
+                    function onOpenChanged() {
+                        if (!soundPanel.open && soundButton.popupOpen)
+                            soundButton.popupOpen = false;
                     }
                 }
             }
@@ -5860,19 +6214,22 @@ Item { // Bar content region
         return muted ? "muted" : "unmuted";
     }
 
-    // ── Two-finger tap on the sound icon: the SUPER + G overlay ───────────
+    // ── The SUPER + G overlay, reachable from here ─────────────────────────
     //
     // SUPER + G is a global shortcut (`overlayToggle` in Overlay.qml) that
     // flips `GlobalStates.overlayOpen`, so that is exactly what this flips. The
     // gesture and the key mean the same thing, with no second implementation to
     // drift away from the first.
     //
-    // CALLED FROM EXACTLY ONE PLACE: the right click (`altAction`). The
-    // tracker's `onTapTriggered(2)` reports the same gesture but must not act --
-    // two toggles for one tap is open-then-instantly-close, which is what made
-    // the overlay flash for a second and vanish. See the note at the button for
-    // why a time-based latch could not fix that: the tracker's report is
-    // hundreds of milliseconds late, and variable.
+    // NO LONGER WIRED TO THE ICON (2026-11-01, user request). The two-finger tap
+    // on the sound icon opens the sound panel instead, so nothing calls this
+    // any more; it stays as the one-call way to the overlay for anything that
+    // wants it later, and because the key itself is the overlay's real door.
+    // The old note still holds for whoever re-wires it: the right click is what
+    // acts, and the tracker's `onTapTriggered(2)` only reports -- two toggles
+    // for one tap is open-then-instantly-close, which is what made the overlay
+    // flash for a second and vanish, and the tracker's report is hundreds of
+    // milliseconds late, so no time-based latch can collapse the two.
     function toggleOverlayFromTap(): string {
         GlobalStates.overlayOpen = !GlobalStates.overlayOpen;
         return GlobalStates.overlayOpen ? "overlay open" : "overlay closed";
@@ -6593,4 +6950,3 @@ Item { // Bar content region
         }
     }
 }
-

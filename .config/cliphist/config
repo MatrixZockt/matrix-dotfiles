@@ -1,0 +1,22 @@
+# cliphist — how much clipboard history is kept.
+#
+# The copies themselves are already SNAPSHOTS: cliphist reads the bytes at copy
+# time, so an entry survives the app that made it closing, the chat or document
+# being deleted, or the selection being cleared. Verified 2026-11-04 on this
+# machine — copied a marker, killed the owning client so the clipboard read
+# "Nothing is copied", and the entry was still listed and still decoded.
+#
+# The only thing that ever removed an entry was the store's cap. The default is
+# 750, and this store sits permanently at it: 750 rows with the newest id 3120,
+# i.e. 2370 copies already dropped. A copy you meant to keep silently ages out
+# as newer ones arrive.
+#
+# 2000 (was 750) — about three times the retention. Measured cost of the
+# current store: ~55 MB on disk for 750 entries (images dominate the size), so
+# this settles near 150 MB at the cap. Per-item size is still bounded by
+# cliphist's own max-store-size default (5 MB), and `cliphist wipe -older-than`
+# remains the explicit way to expire history — nothing expires on a timer.
+#
+# Format: one "<key> <value>" per line, read by every cliphist call (the
+# wl-paste watchers in hyprland/execs.lua pass no flags, so they inherit this).
+max-items 2000

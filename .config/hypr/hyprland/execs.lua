@@ -55,16 +55,27 @@ hl.on("hyprland.start", function ()
 
     -- Clipboard: history
     --hl.exec_cmd("wl-paste --watch cliphist store")
-    hl.exec_cmd("wl-paste --type text --watch bash -c 'cliphist store && qs -c $qsConfig ipc call cliphistService update'")
+    -- TEXT copies are stored by custom/scripts/clipboard-plain.sh, not by a
+    -- bare `cliphist store`, because that script also STRIPS the copy down to
+    -- plain text before it is stored and before anything pastes it: a copy out
+    -- of a browser carries `text/html` beside `text/plain`, which is what made
+    -- pasted text arrive with the source's styling (2026-11-05, the user's
+    -- rule). It does the storing itself so one copy is one history entry --
+    -- see its header, and its marker note for the rewrite not re-storing.
+    -- flock because this file is parsed on every config reload: without it a
+    -- reload stacks a second watcher and every copy is stored twice. The lock
+    -- dies with the watcher, so a crash is recoverable on the next reload.
+    hl.exec_cmd([[bash -c 'exec 9>"$XDG_RUNTIME_DIR/ii-clip-plain.lock"; flock -n 9 || exit 0; exec wl-paste --type text --watch "$HOME/.config/hypr/custom/scripts/clipboard-plain.sh"']])
     hl.exec_cmd("wl-paste --type image --watch bash -c 'cliphist store && qs -c $qsConfig ipc call cliphistService update'")
 
-    -- ydotoold: the virtual-input daemon the clipboard's paste needs. Without it
-    -- every Ctrl+V synthesis dies with "Connection refused" and clicking a
-    -- clipboard entry does nothing visible. Nothing else on the system started
-    -- it (checked execs, systemd user units), and the stale socket at
-    -- ~/.ydotool_socket makes a leftover daemon look alive, so the socket is
-    -- removed first.
-    hl.exec_cmd("bash -c 'rm -f $XDG_RUNTIME_DIR/.ydotool_socket; exec ydotoold'")
+    -- ydotoold: the virtual-input daemon the clipboard's paste AND dictation
+    -- need. Without it every Ctrl+V synthesis dies with "Connection refused",
+    -- clicking a clipboard entry does nothing visible, and dictation falls back
+    -- to wtype -- which never reaches an XWayland window. It used to be spawned
+    -- bare from here, so an OOM sweep left it dead with no restart; it is a
+    -- systemd user unit now (Restart=on-failure, enabled into default.target),
+    -- and this line only nudges it. The unit removes the stale socket itself.
+    hl.exec_cmd("systemctl --user start ydotoold.service")
 
     -- Cursor: deliberately NOT set here.
     --

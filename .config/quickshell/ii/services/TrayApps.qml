@@ -325,6 +325,44 @@ Singleton {
         }
     }
 
+    // ── Bring a RESTORED-BY-THE-APP window to the current workspace ──────────
+    //
+    // `SystemTrayItem.activate()` asks the APP to show itself, and the app has
+    // no idea which workspace the user is on: it re-raises its window exactly
+    // where it last was. Minimize Discord on workspace 2, click its tray icon
+    // while sitting on 5, and it came back on 2 -- "when reopening them they
+    // open on the same desktop instead of the current one". The shell cannot
+    // make the app choose differently; it can only move the window once the
+    // app has shown it.
+    //
+    // A PURE function on purpose, with no state of its own: the polling that
+    // needs a clock lives in SysTrayItem (a Timer per icon) after a version of
+    // this that kept `pullClass`/`pullTries` plus a Timer in this singleton
+    // pegged the shell's main thread at 100% of a core. Returns
+    //   { found: how many of the class's main windows are on a real workspace,
+    //     moved: whether any of them had to be moved }
+    // so the caller knows when to stop asking.
+    function bringToActive(cls) {
+        const st = { found: 0, moved: false };
+        if (!cls)
+            return st;
+        const act = HyprlandData.activeWorkspace;
+        if (!act || act.id <= 0)
+            return st;
+        for (const w of root.primaryWindowsOf(cls)) {
+            // Parked windows are show()'s job: that one also flips the intent
+            // and re-attaches the float/fullscreen state on the way out.
+            if (!w.workspace || w.workspace.name === "special:tray")
+                continue;
+            st.found += 1;
+            if (w.workspace.id === act.id)
+                continue;
+            Hyprland.dispatch(`hl.dsp.window.move({ workspace = ${act.id}, follow = true, window = "address:${w.address}" })`);
+            st.moved = true;
+        }
+        return st;
+    }
+
     // The icon's left click: show it if parked, park it if visible, start it
     // if not running. The shell decides -- there is no app behind this icon
     // to ask (SysTrayAppItem's note: not item.activate()).

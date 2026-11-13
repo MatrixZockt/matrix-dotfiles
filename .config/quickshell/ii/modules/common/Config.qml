@@ -43,11 +43,43 @@ Singleton {
         obj[keys[keys.length - 1]] = convertedValue;
     }
 
+    // ── Our own write must not be read back over the value we just set ──────
+    //
+    // Watch-and-write on one file is a race, and this shell kept losing it:
+    // a property write schedules a flush in 50 ms, the flush changes the file,
+    // watchChanges reports that as a change, and the 50 ms reload then stamps
+    // the adapter with whatever the file happened to contain -- which, for a
+    // write still in flight, is the PREVIOUS value. The property visibly
+    // snapped back, and the next write was computed from the reverted value.
+    //
+    // It showed up as "changing the power mode sometimes does nothing": tapping
+    // the bar's power icon twice quickly set performance, then eco, then read
+    // eco again -- a reload had put the older value back -- so the third tap
+    // walked the ring from the wrong notch. Anything with a cycle or a
+    // read-modify-write on config was exposed the same way, most visibly under
+    // fast clicks (a real click pair is ~130 ms, and the window below is 250).
+    //
+    // So a change we caused is not news: `selfWrite` covers the flush (and the
+    // file event it raises), and reloads are skipped while it is up. Changes
+    // from anywhere else -- the settings app, a hand edit -- are still picked
+    // up exactly as before, because they do not go through this flush.
+    property bool selfWrite: false
+    Timer {
+        id: selfWriteTimer
+        interval: 250
+        repeat: false
+        onTriggered: root.selfWrite = false
+    }
+
     Timer {
         id: fileReloadTimer
         interval: root.readWriteDelay
         repeat: false
         onTriggered: {
+            // Not while our own flush is in flight: the file is mid-write, and
+            // what it holds now is older than what memory holds.
+            if (root.selfWrite)
+                return
             configFileView.reload()
         }
     }
@@ -57,6 +89,8 @@ Singleton {
         interval: root.readWriteDelay
         repeat: false
         onTriggered: {
+            root.selfWrite = true
+            selfWriteTimer.restart()
             configFileView.writeAdapter()
         }
     }
@@ -670,6 +704,18 @@ Singleton {
                 // before (nothing in the shell ever asked for a sound), which
                 // read as "the audio stack is broken" while YouTube played fine.
                 property bool sound: true
+                // ── Apps the user has muted ──
+                // A list of names, not a JsonObject: the config adapter DROPS
+                // any key inside a JsonObject that is not declared here (see the
+                // Razer note above), and apps are discovered at runtime, so
+                // there is nothing to declare. Stored as the app's own display
+                // name; matching is by normalized identity
+                // (NotificationUtils.normalizeAppIdentity), because one app
+                // spells itself three ways -- name, desktop entry, icon path.
+                //
+                // Written from Settings > Notifications, read by
+                // services/Notifications.qml in the shell process.
+                property list<string> mutedApps: []
                 property JsonObject monitor: JsonObject {
                     property bool enable: false
                     property string name: "" // Name of the monitor to show notifications on, like "eDP-1". Find out with 'hyprctl monitors' command
@@ -734,7 +780,10 @@ Singleton {
             property JsonObject resources: JsonObject {
                 // Short enough that the readout keeps up with what you are doing;
                 // reading /proc twice a second costs nothing.
-                property int updateInterval: 1000
+                // 2 s, not 1 s: every sample repaints the bar's numbers, and each
+                    // repaint is a wake-up for the display chip. Twice the interval is
+                    // half the wake-ups for a readout nobody watches that closely.
+                    property int updateInterval: 2000
                 property int historyLength: 60
             }
 

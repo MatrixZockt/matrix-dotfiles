@@ -265,6 +265,29 @@ Window {
         // pane showing it.
         function probeNavDrawn(): string { return content.probeNavDrawn(); }
         function probeNavQuick(): string { return content.probeNavQuick(); }
+        // The pinned section: the order it is in and the slot a move would land
+        // in, plus the three calls the drag itself makes -- so the move can be
+        // driven from a terminal, where there is no pointer to press and hold.
+        function probePinned(): string { return content.probePinned(); }
+        function pinDragBegin(index: string): void { content.beginPinDrag(Number(index)); }
+        function pinDrop(gap: string): void { content.setPinDrop(Number(gap)); }
+        function pinDragEnd(): void { content.finishPinDrag(); }
+        // The whole pin list at once (a JSON array of paths): a caller that
+        // already knows the order it wants sets it here, so the app's own
+        // write is the one that lands instead of racing a hand-edited file.
+        function pinReplace(paths: string): void {
+            // Newline-separated is the form that survives being handed over as
+            // one shell argument; a JSON array is accepted too, quietly, for
+            // callers that already speak it.
+            const raw = String(paths ?? "").trim();
+            let list = [];
+            if (raw.charAt(0) === "[") {
+                try { list = JSON.parse(raw); } catch (e) { list = []; }
+            } else if (raw.length > 0) {
+                list = raw.split("\n");
+            }
+            content.replacePinFolders(list);
+        }
         function probeMtp(): string { return content.probeMtp(); }
         function probeMtpScan(): void { content.scanMtpDevices(); }
         // The scan fed by hand, so the states a phone has to be in to show them
@@ -293,6 +316,12 @@ Window {
         function probeViewMode(mode: string): string { return content.probeViewMode(mode); }
         function probeCut(name: string): string { return content.probeCut(name); }
         function probePaste(path: string): string { return content.probePaste(path); }
+        // The collision question: what it is asking, the answer a click on one
+        // of its buttons would give, and a paste that carries its own answer so
+        // replace/skip can be driven without a modal dialog in the way.
+        function probeConflictState(): string { return content.probeConflictState(); }
+        function probeConflictAnswer(policy: string): string { return content.probeConflictAnswer(policy); }
+        function probePastePolicy(dir: string, policy: string): string { return content.probePastePolicy(dir, policy); }
         function probeColumnDragBegin(index: string): string { return content.probeColumnDragBegin(index); }
         function probeColumnDragStep(delta: string): string { return content.probeColumnDragStep(delta); }
         function probeColumnDragEnd(): string { return content.probeColumnDragEnd(); }
@@ -332,6 +361,11 @@ Window {
         }
         function probeFocusActivate(): void { content.activateFocus(); }
         function probeMenu(): string { return content.probeMenu(); }
+        // Where each details row's blank (folder-background) tail begins.
+        function probeNameBlank(): string { return content.probeNameBlank(); }
+        // The right-click menu on the blank tail of <name> as it is composed:
+        // the folder's New rows plus the row's own (Rename included).
+        function probeTailMenu(name: string): string { return content.probeTailMenu(name); }
         // The tile cell the grid chose for the pane's width.
         function probeTileCell(): string { return content.probeTileCell(); }
         // The view controls the bar is showing, and the tile-size step they
@@ -495,6 +529,12 @@ Window {
             return content.probeDrop(list, dest, move);
         }
         function probeDropState(): string { return content.probeDropState(); }
+        // What the list would paint while <sourceName> is dragged over
+        // <targetName>: the folder highlight and the source dim, read off the
+        // live rows (see probeDropFeedback).
+        function probeDropFeedback(targetName: string, sourceName: string): string {
+            return content.probeDropFeedback(targetName, sourceName);
+        }
         function probeDropAreas(): string { return content.probeDropAreas(); }
         // What the eject control asks before it acts, and what the answer would
         // run -- without running it.

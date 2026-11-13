@@ -1,0 +1,26 @@
+[Unit]
+Description=Make a newly connected Bluetooth headset the default output
+# Same anchor as power-autoswitch and the other helpers: there is no
+# graphical-session.target on this setup (it stays inactive), so default.target
+# is the only anchor that actually starts.
+#
+# Ordered after the audio stack so the first `pactl` call does not land in a
+# server that is not listening yet -- but not Requisitioned by it: the watcher
+# re-subscribes on its own if pipewire-pulse restarts underneath it.
+After=pipewire.service pipewire-pulse.service wireplumber.service
+After=default.target
+PartOf=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/audio-auto-switch
+Restart=on-failure
+RestartSec=5
+# Every switch has to be answerable after the fact, the same way
+# power-autoswitch does it: "why did my speakers stop" is a journal query.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=audio-auto-switch
+
+[Install]
+WantedBy=default.target

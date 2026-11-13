@@ -44,6 +44,15 @@ ColumnLayout {
     Layout.fillWidth: true
     spacing: 6
 
+    // Whether the "Tray icons" label and its count stepper are offered HERE.
+    //
+    // Settings > Bar shows the whole list, tray count included. The right
+    // sidebar does not: it is the surface you open to flip an icon on or off,
+    // and the count of tray icons sitting on the bar is a different kind of
+    // question -- a number to tune once, not a chip to tap. It stays reachable
+    // in Settings, so nothing is lost.
+    property bool showTrayCount: true
+
     // Shared with the search panel's "which icons does the bar show" listing.
     // `group` picks which config object the chip reads and writes; `key` is the
     // field name inside it.
@@ -206,6 +215,7 @@ ColumnLayout {
 
     StyledText {
         Layout.topMargin: 2
+        visible: root.showTrayCount
         text: Translation.tr("Tray icons")
         color: Appearance.colors.colOnLayer1Inactive
         font.pixelSize: Appearance.font.pixelSize.small
@@ -218,6 +228,7 @@ ColumnLayout {
     RowLayout {
         Layout.fillWidth: true
         spacing: 6
+        visible: root.showTrayCount
 
         StyledText {
             Layout.fillWidth: true

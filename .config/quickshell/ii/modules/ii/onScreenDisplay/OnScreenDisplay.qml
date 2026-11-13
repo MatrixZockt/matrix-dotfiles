@@ -17,6 +17,11 @@ Scope {
     property var focusedScreen: Quickshell.screens.find(s => s.name === Hyprland.focusedMonitor?.name)
 
     property string currentIndicator: "volume"
+    // The mode notice is the one card that stays up for seconds after the
+    // switch (see triggerOsd: the configured time plus 4s for the hardware
+    // rows to settle and be read). It is therefore the one that has to be
+    // dismissable by carrying on with the desktop.
+    readonly property bool noticeMode: root.currentIndicator === "performanceMode"
     property var indicators: [
         {
             id: "volume",
@@ -145,12 +150,25 @@ Scope {
 
             WlrLayershell.namespace: "quickshell:onScreenDisplay"
             WlrLayershell.layer: WlrLayer.Overlay
+            // ── Full screen while the notice is up, and only then ──────────
+            // A click that lands anywhere else on the desktop never reaches
+            // this surface: the window was the size of the card and its input
+            // region was the card too, so the only way to make the notice go
+            // early was to wait it out. Covering the screen (minus the bar, so
+            // the strip keeps its clicks) with a press-to-close catcher gives
+            // the click somewhere to land.
+            //
+            // Deliberately NOT applied to the volume/brightness OSDs: those are
+            // glanced at and gone in a second, and eating a click during a
+            // volume change would be worse than the card staying.
             anchors {
-                top: !Config.options.bar.bottom
-                bottom: Config.options.bar.bottom
+                top: !Config.options.bar.bottom || root.noticeMode
+                bottom: Config.options.bar.bottom || root.noticeMode
+                left: root.noticeMode
+                right: root.noticeMode
             }
             mask: Region {
-                item: osdValuesWrapper
+                item: root.noticeMode ? noticeClickCatcher : osdValuesWrapper
             }
 
             exclusionMode: ExclusionMode.Ignore
@@ -163,6 +181,15 @@ Scope {
             implicitWidth: columnLayout.implicitWidth
             implicitHeight: columnLayout.implicitHeight
             visible: osdLoader.active
+
+            // One press, anywhere, closes it. Declared before the column so
+            // the card and its own hover/press handling stay on top.
+            MouseArea {
+                id: noticeClickCatcher
+                anchors.fill: parent
+                enabled: root.noticeMode
+                onClicked: GlobalStates.osdVolumeOpen = false
+            }
 
             ColumnLayout {
                 id: columnLayout
@@ -179,6 +206,9 @@ Scope {
                         anchors.fill: parent
                         hoverEnabled: true
                         onEntered: GlobalStates.osdVolumeOpen = false
+                        // A press is a request too, and the notice can be
+                        // clicked before the pointer has settled on it.
+                        onPressed: GlobalStates.osdVolumeOpen = false
                     }
 
                     Column {

@@ -10,6 +10,7 @@ InterfaceConfig 1.0 InterfaceConfig.qml
 KeybindsConfig 1.0 KeybindsConfig.qml
 KeyboardConfig 1.0 KeyboardConfig.qml
 NetworkConfig 1.0 NetworkConfig.qml
+NotificationsConfig 1.0 NotificationsConfig.qml
 Overview 1.0 Overview.qml
 QuickConfig 1.0 QuickConfig.qml
 ServicesConfig 1.0 ServicesConfig.qml

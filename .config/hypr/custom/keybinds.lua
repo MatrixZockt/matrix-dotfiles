@@ -982,8 +982,29 @@ local function toggleTaskManager()
     -- SUPER is not involved here, but the release-interrupt is cheap and
     -- keeps a stray held modifier from opening the search panel on release.
     hl.exec_cmd(shellIpc("search toggleReleaseInterrupt"))
-    hl.exec_cmd(shellIpc("taskManager toggle"))
+    -- The empty argument is NOT decoration: the handler is
+    -- `function toggle(key: string)` (the argument is the page to deep-link
+    -- to), and `qs ipc` runs its argument checks before the call reaches the
+    -- shell, so `taskManager toggle` on its own is refused with "Too few
+    -- arguments provided (1 required but 0 were provided)" and nothing
+    -- happens. That is why the chord looked dead even where it was bound:
+    -- measured 2026-11-12 by running the exact string this line builds.
+    hl.exec_cmd(shellIpc("taskManager toggle ''"))
 end
+
+-- ── The stock bind on the SAME chord has to go first ────────────────────
+-- hyprland/keybinds.lua binds CTRL + SHIFT + Escape to `taskManager` (its
+-- generic system monitor: gnome-system-monitor, else btop in a terminal). Both
+-- binds were registered -- `hyprctl binds` listed two entries with modmask 5 --
+-- and the stock one is the one Hyprland fired, so the shell's own overlay
+-- never came up and the chord opened a stranger's task manager instead (or
+-- nothing at all when none of those programs is installed).
+--
+-- Unbound rather than deleted from hyprland/keybinds.lua on purpose: that file
+-- is the shipped default the rest of this config is built on, and every other
+-- override of it lives here beside its reason (SUPER + F, SUPER + P and the
+-- mouse binds at the top of this file do the same thing).
+hl.unbind("CTRL + SHIFT + Escape")
 
 hl.bind("CTRL + SHIFT + Escape", toggleTaskManager,
     { description = "App: Task manager (always on top)" })
@@ -1214,6 +1235,61 @@ for raw in SUPER_CHORD_LIST:gmatch("[^,\n]+") do
             { description = "Shell: SUPER chord (cancels the bare-SUPER action)" })
     end
 end
+
+--#! Panel
+-- ── Panel care: the OLED's two knobs ────────────────────────────────────────
+-- This display is a Samsung OLED (eDP-1, 2560x1600). Every pixel emits, and
+-- every pixel ages in proportion to how hard and how long it has been driven,
+-- so a large bright field held in one place leaves a ghost -- first temporary
+-- retention, then burn-in. The desktop cannot make an app not be bright, and it
+-- must not touch the brightness dial, which is the user's own choice. What it
+-- CAN do, through the compositor's screen shader, is cap the peak and even out
+-- what is already there. custom/scripts/panel-care.py is the controller and its
+-- docstring is the long version; these are the two gestures.
+--
+-- The ceiling is applied at login and on every reload by execs.lua, so it is
+-- already on and this chord is the off switch, not the on switch.
+hl.bind("SUPER + SHIFT + O",
+    hl.dsp.exec_cmd("$HOME/.config/hypr/custom/scripts/panel-care.py toggle"),
+    { description = "Panel: toggle the OLED peak ceiling" })
+
+-- A flat, uniform field for four minutes -- deliberately under the five-minute
+-- idle dim in hypridle.conf, because a wash at 1% backlight is not a wash.
+-- Pressing the same chord again stops it early: the script reads a second call
+-- while a wash is running as the cancel gesture, so two can never overlap.
+hl.bind("SUPER + SHIFT + ALT + O",
+    hl.dsp.exec_cmd("$HOME/.config/hypr/custom/scripts/panel-care.py wash"),
+    { description = "Panel: even out retention (uniform wash, 4 min)" })
+
+--#! Dictation
+-- Hold to talk: hold the key, speak, let go, and the words are typed at the
+-- cursor of whatever has focus. The Linux stand-in for Wispr Flow -- local
+-- whisper.cpp, no account, no API key, nothing leaves the machine
+-- (custom/scripts/dictate.sh has the pipeline and the settings).
+--
+-- THE KEY, and why it is not Fn: Fn cannot be bound on this laptop. It never
+-- reaches the kernel at all -- no input device in /proc/bus/input/devices
+-- advertises KEY_FN, so there is no keycode for Hyprland, a remapper or
+-- anything else to see; the firmware handles it and swallows it. Control_R is
+-- the nearest key that DOES reach Linux, it sits beside Fn on this keyboard,
+-- and nothing else here uses it. Moving it is one edit: put any keysym in both
+-- binds below ("Caps_Lock", "Alt_R", "F9"...).
+--
+-- NO BINDS FOR THIS, deliberately. Every Hyprland bind on SUPER fires for
+-- chords as well: `ignore_mods` matches SUPER+Q too, and `long_press` on this
+-- build's Lua binding is dropped on the floor (it registers as a plain bind --
+-- verified with hyprctl), so a bind here would either record through every
+-- SUPER chord or never fire at all.
+--
+-- The detector therefore lives below the compositor: scripts/dictate-daemon.py
+-- reads the keyboard devices directly and arms only when SUPER is held ALONE
+-- past a threshold -- any other key cancels it, so SUPER+Q, SUPER+numbers,
+-- SUPER+drag and SUPER+tap (search) are untouched. Nothing here for the
+-- compositor to mis-handle, and no way for a chord to leave a recorder running.
+--
+-- Start it with execs.lua; the island's recording pill is in
+-- modules/ii/bar/NowBar.qml.
+local dictate = nil -- (kept as a name for the next reader: see above)
 
 --#! Shell
 -- TAB belongs to the focused application: it moves between form fields, indents

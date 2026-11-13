@@ -19,6 +19,7 @@ import QtQuick.Layouts
 // Translation lives in services: without this the header's own label is a
 // ReferenceError at runtime, which shows up as an empty row rather than as
 // anything you can see.
+import qs
 import qs.services
 import qs.modules.common
 import qs.modules.common.widgets
@@ -32,6 +33,22 @@ ColumnLayout {
     // Folded until asked. The state lives here rather than in the config on
     // purpose: this is a disclosure control, not a preference.
     property bool expanded: false
+
+    // Closing the sidebar folds it back up.
+    //
+    // `expanded` is plain QML state, and the sidebar keeps its content loaded
+    // between openings (Config.sidebar.keepRightSidebarLoaded), so without this
+    // the section came back expanded on the next open -- a dropdown that was
+    // never asked for, pushing the notifications card down the panel. Closing
+    // is the user saying they are done with the sidebar, so the disclosure goes
+    // with it. Same rule the dialogs and `notificationsExtended` follow in
+    // SidebarRightContent.
+    Connections {
+        target: GlobalStates
+        function onSidebarRightOpenChanged() {
+            if (!GlobalStates.sidebarRightOpen) root.expanded = false;
+        }
+    }
 
     RippleButton {
         id: header
@@ -80,6 +97,10 @@ ColumnLayout {
     }
 
     TopBarIconPicker {
+        // No tray-count stepper here. See `showTrayCount`: the sidebar is for
+        // putting icons on the bar and taking them off, and the stepper is a
+        // settings number, not a chip. Settings > Bar keeps it.
+        showTrayCount: false
         visible: root.expanded
         // Folded away items still occupy layout space unless the height goes
         // with them; a ColumnLayout child that is invisible is skipped, so this

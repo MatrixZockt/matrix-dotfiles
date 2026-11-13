@@ -370,6 +370,44 @@ Singleton {
         refresh()
     }
 
+    // ── IPC: writing tasks down without a pointer ──────────────────────
+    //
+    // The list is also where finished work gets recorded ("this was verified on
+    // this machine, and here is the number it produced"), and there was no way
+    // to write that from a terminal: the JSON file is loaded ONCE at startup
+    // (see the FileView below -- no watcher, no reload on external change), so
+    // a file edited behind the running shell's back is not shown, and the next
+    // tick writes the stale in-memory list straight over it. The handler makes
+    // the running shell do the write, which is the only path that survives.
+    //
+    //   qs -c ii ipc call todo state
+    //   qs -c ii ipc call todo addDone "Verified: ..."
+    //
+    // addDone stamps `completedAt` itself, the same way markDoneById does: a
+    // done task without a stamp is the one shape that must never reach the
+    // list, because retention and the Done page both measure from it.
+    IpcHandler {
+        target: "todo"
+
+        function add(text: string): string {
+            root.addTask(text);
+            return String(root.list[root.list.length - 1].id);
+        }
+
+        function addDone(text: string): string {
+            const id = root.nextId;
+            root.nextId += 1;
+            root.addItem({ "id": id, "content": text, "done": true, "completedAt": Date.now() });
+            root.purgeExpiredDone();
+            return String(id);
+        }
+
+        function state(): string {
+            const done = root.list.filter(t => t.done === true).length;
+            return `total=${root.list.length} done=${done} open=${root.list.length - done}`;
+        }
+    }
+
     // Retention also runs on a slow clock, so a task that crosses the line
     // while the shell is running disappears on its own instead of waiting for
     // the next restart or tick. Hourly is chosen because the boundary is

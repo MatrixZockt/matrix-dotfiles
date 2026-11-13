@@ -30,6 +30,19 @@ StyledImage {
     // model row and knows what it is looking at, and a second copy of the list
     // is a second place to forget a format.
     property bool videoFrame: false
+    // ── First PAGE instead of pixels ─────────────────────────────────────
+    //
+    // A PDF and a document have no decoder that yields pixels here: Poppler
+    // reads a PDF, and a .docx has to be drawn from its text (there is no
+    // LibreOffice on this machine). Both go through
+    // scripts/system/file-thumbnail.sh, which writes the same PNG into the same
+    // cache, so everything downstream -- the size buckets, the watcher, the
+    // failure latch, the fallback -- behaves exactly as it does for a photo.
+    //
+    // Two flags rather than one because the two are different questions: a PDF's
+    // page is rendered as it looks, a document's is laid out from what it says.
+    property bool pdfPage: false
+    property bool docPage: false
     required property string sourcePath
     property string thumbnailSizeName: Images.thumbnailSizeNameForDimensions(sourceSize.width, sourceSize.height)
     property string thumbnailPath: {
@@ -252,6 +265,15 @@ StyledImage {
             // `-f` because a failed run can leave a 0-byte file behind, and
             // that would read as "a thumbnail exists" for ever.
             const have = `mkdir -p ${dir} && [ -s ${out} ] && exit 0; `;
+            if (root.pdfPage || root.docPage) {
+                // First page, by the helper that knows how to make one. Its exit
+                // status is the answer (0 = a non-empty PNG was written), so
+                // there is no second test bolted on here.
+                const kind = root.pdfPage ? "pdf" : "document";
+                const helper = root._shq(Quickshell.shellPath("scripts/system/file-thumbnail.sh"));
+                return ["bash", "-c", have
+                    + `bash ${helper} ${kind} ${src} ${out} ${maxSize}`];
+            }
             if (root.videoFrame) {
                 // One frame, one second in: far enough to be past a fade-in or
                 // a black leader, short enough to exist in a clip of any real

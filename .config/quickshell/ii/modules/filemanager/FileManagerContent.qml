@@ -212,6 +212,122 @@ Item {
     property string mountFailurePath: ""
     property string mountFailure: ""
     property string statusNote: ""
+    // ── The transfer in flight ──────────────────────────────────────────
+    //
+    // A copy is the one thing this window does that takes minutes rather than
+    // milliseconds, and it used to say nothing while it did: the header kept
+    // showing the folder as if nothing were happening, and the only trace was
+    // a "Pasting…" note in the bar at the bottom. Files going onto a USB stick
+    // at 13 MB/s made that note look like a paste that never started.
+    //
+    // These are the numbers the header's transfer line draws: how many bytes
+    // have landed, out of how many, for which item. They are fed by
+    // scripts/system/file-transfer.sh, which prints them WHILE it copies.
+    property bool transferRunning: false
+    // Bumped for every transfer, so the "hold at 100%" timer can tell whether
+    // the copy it belongs to is still the current one.
+    property int transferEpoch: 0
+    property real transferDone: 0
+    property real transferTotal: 0
+    property int transferItemsDone: 0
+    property int transferItemsTotal: 0
+    property string transferLabel: ""
+    property string transferError: ""
+    // ── The collision question ──────────────────────────────────────────
+    //
+    // Copying onto a name that is already there is a decision, not a default.
+    // For a file: replace it, keep both (it lands as "name - copy.ext"), or
+    // leave it. For a folder: replace the whole folder, fill it in with only
+    // the files it is missing, or leave it. The window asks before any bytes
+    // move, and the answer travels to the helper as ON_CONFLICT.
+    property string conflictPolicy: "keep"
+    property bool conflictAsking: false
+    // [{ name, kind: "dir" | "file" }] -- what the helper found in the way.
+    property var conflictEntries: []
+    // What to run once the question is answered: { sources, dest, move,
+    // cleanup }. Held here rather than passed through the dialog so the batch
+    // cannot be half-started by a click on the wrong thing.
+    property var pendingTransfer: null
+    // Items the helper left alone because the answer was Skip, reported once
+    // at the end instead of one status line per name.
+    property int transferSkipped: 0
+    readonly property real transferFraction: root.transferTotal > 0
+        ? Math.max(0, Math.min(1, root.transferDone / root.transferTotal)) : 0
+    // ── The machine's other jobs ───────────────────────────────────────────
+    //
+    // A copy in this window knows how far along it is and says so in the header;
+    // an upload into the Google Drive mount knows how far along it is too, but
+    // only to rclone -- the file appears locally, rclone uploads it in the
+    // background, and nothing on the desktop could say whether it had finished.
+    //
+    // progress-hub (a user service, ~/.local/bin/progress-hub) collects both
+    // kinds of work into one file:
+    //
+    //   ~/.local/state/progress/status.json   { updated, seq, jobs: [ ... ] }
+    //
+    // fed from rclone's own remote-control API for the Drive mount, and from a
+    // spool directory (~/.local/state/progress/jobs/) that ANY program on this
+    // machine can write through `progress-report`. That second half is what
+    // makes this general rather than a Drive special case: an encoder, a build,
+    // an apt upgrade all get the same bar by saying the same few numbers.
+    //
+    // This window reads that file and draws it in the STATUS BAR, which is the
+    // only surface progress was asked to occupy (owner, 2026-11-12): no second
+    // window, no island row, nothing over the desktop.
+    property var progressJobs: []
+    // The last text seen, so an unchanged file does not rebuild the bar every
+    // second: the hub itself only rewrites when the numbers move, and this is
+    // the same courtesy on the reading side.
+    property string progressJobsJSON: ""
+    readonly property string progressStatusPath:
+        (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state"))
+        + "/progress/status.json"
+    // What the status bar draws, this window's own copy FIRST (it is the one
+    // the pointer just caused) followed by whatever else the machine is doing.
+    readonly property var progressItems: {
+        const items = [];
+        if (root.transferRunning) {
+            items.push({
+                key: "files",
+                icon: root.transferLabel.indexOf("Move") === 0 ? "drive_file_move" : "content_copy",
+                label: root.transferLabel.length > 0
+                    ? root.transferLabel : Translation.tr("Copying"),
+                detail: root.transferItemsTotal > 1
+                    ? (root.transferItemsDone + 1) + "/" + root.transferItemsTotal : "",
+                fraction: root.transferFraction,
+                done: root.transferDone,
+                total: root.transferTotal,
+                speed: 0,
+                unit: "bytes",
+                state: root.transferFraction >= 1 ? "finishing" : "running"
+            });
+        }
+        for (let i = 0; i < root.progressJobs.length; i++) {
+            const j = root.progressJobs[i];
+            if (!j) continue;
+            const unit = String(j.unit ?? "");
+            const total = Number(j.total) || 0;
+            const fraction = Number(j.fraction);
+            items.push({
+                key: String(j.id ?? i),
+                icon: j.kind === "upload" ? "cloud_upload"
+                    : j.kind === "copy" ? "content_copy" : "progress_activity",
+                label: String(j.label ?? ""),
+                detail: String(j.detail ?? ""),
+                fraction: isFinite(fraction) ? fraction : -1,
+                done: Number(j.done) || 0,
+                total: total,
+                speed: Number(j.speed) || 0,
+                unit: unit,
+                state: String(j.state ?? "running")
+            });
+        }
+        return items;
+    }
+    // The bar's own pixel height. The header grows by exactly this much while a
+    // transfer runs, so the line gets real room instead of being painted over
+    // the bottom of the name.
+    readonly property int transferLineHeight: 16
     // The title row's HUD: how many of the listed rows are folders. Derived
     // from `rows` rather than counted while listing, so the number on screen
     // cannot disagree with the list under it.
@@ -275,27 +391,36 @@ Item {
     function rebuildRows() {
         const needle = root.filter.trim().toLowerCase();
         const out = [];
-        const n = folderModel.count;
+        // Two sources, one row shape: Qt's model for local folders, the child
+        // process's output for network mounts (see beginListing above).
+        const remote = root.remoteListing;
+        const n = remote ? root.remoteEntries.length : folderModel.count;
         for (let i = 0; i < n; i++) {
-            const name = String(folderModel.get(i, "fileName"));
+            const e = remote ? root.remoteEntries[i] : null;
+            const name = remote ? String(e.name) : String(folderModel.get(i, "fileName"));
+            // The model above filters hidden files itself; on a network folder
+            // these rows are the only place that can.
+            if (remote && !root.showHidden && name.startsWith("."))
+                continue;
             if (needle.length > 0 && name.toLowerCase().indexOf(needle) === -1)
                 continue;
-            const isDir = folderModel.get(i, "fileIsDir") === true;
+            const isDir = remote ? e.isDir === true : folderModel.get(i, "fileIsDir") === true;
             out.push({
                 name: name,
-                path: String(folderModel.get(i, "filePath")),
+                path: remote ? String(e.path) : String(folderModel.get(i, "filePath")),
                 isDir: isDir,
-                size: Number(folderModel.get(i, "fileSize") ?? 0),
-                modified: folderModel.get(i, "fileModified"),
+                size: remote ? Number(e.size ?? 0) : Number(folderModel.get(i, "fileSize") ?? 0),
+                modified: remote ? e.modified : folderModel.get(i, "fileModified"),
                 kind: root.kindFor(name, isDir),
                 icon: root.iconFor(name, isDir),
-                // Is this a file whose CONTENT can be drawn? Images, and now
-                // videos -- a video is shown as ONE FRAME pulled out of it a
-                // second in, which is a preview of the thing itself rather than
-                // a made-up picture. Everything else keeps its icon: a preview
-                // of an archive is still a lie.
-                preview: !isDir && (root.imageExts.indexOf(root.suffixOf(name)) !== -1
-                    || root.videoExts.indexOf(root.suffixOf(name)) !== -1)
+                // Is this a file whose CONTENT can be drawn? Images, video
+                // frames, PDFs and documents -- a video is ONE FRAME pulled out
+                // of it a second in, a PDF is its first page rendered by
+                // Poppler, a document is its opening text laid out on a page.
+                // Each is a preview of the thing itself rather than a made-up
+                // picture. Everything else keeps its icon: a preview of an
+                // archive is still a lie.
+                preview: !isDir && root.hasThumbnailSource(name)
             });
         }
         const field = root.sortField;
@@ -382,6 +507,11 @@ Item {
     // ── Naming / formatting ─────────────────────────────────────────────
     readonly property var imageExts: ["png", "jpg", "jpeg", "webp", "gif", "bmp", "avif", "svg", "tif", "tiff", "heic"]
     readonly property var videoExts: ["mp4", "mkv", "webm", "mov", "avi", "m4v"]
+    // Plain documents whose text is their preview: the readable formats a tile
+    // can show as a page. Deliberately NOT all of textExts -- every source file
+    // in a checkout becoming a text thumbnail would turn a project folder into a
+    // wall of grey paragraphs, which is not what a document preview is for.
+    readonly property var docPreviewExts: ["txt", "log", "md", "markdown", "rtf", "csv", "tsv", "json", "xml", "epub"]
     readonly property var audioExts: ["mp3", "flac", "wav", "ogg", "opus", "m4a"]
     readonly property var archiveExts: ["zip", "tar", "gz", "xz", "zst", "7z", "rar", "bz2"]
     readonly property var codeExts: ["sh", "py", "js", "qml", "lua", "c", "cpp", "h", "rs", "go", "ts", "json", "yml", "yaml", "toml"]
@@ -532,10 +662,15 @@ Item {
     // what the view actually drew: a folder nobody scrolled to is never
     // measured at all.
     property int listingGeneration: 0
-    function requestDirSize(entry) {
-        if (!entry || !entry.isDir) return;
-        FolderSizes.request(entry.path, root.timeValue(entry.modified));
-    }
+          function requestDirSize(entry) {
+          if (!entry || !entry.isDir) return;
+          // Never for a network folder: `du` under the hood would crawl Google
+          // Drive (or a phone) for a number the column does not need, and with
+          // `-x` it cannot even leave the mount, so the only thing it can do
+          // there is cost bandwidth.
+          if (root.remoteListing) return;
+          FolderSizes.request(entry.path, root.timeValue(entry.modified));
+      }
     function firstLine(text) {
         const t = String(text ?? "").trim();
         const i = t.indexOf("\n");
@@ -559,6 +694,53 @@ Item {
             onStreamFinished: shellProc.output = String(this.text ?? "")
         }
         onExited: (code, status) => root.handleShellDone(shellProc.mode, shellProc.payload, code)
+    }
+    // The transfer's own process. Same shape as shellProc, one deliberate
+    // difference: its stdout is read LINE BY LINE as it arrives (SplitParser)
+    // rather than collected at exit (StdioCollector), because the whole point
+    // of it is the numbers while they are still changing.
+    Process {
+        id: transferProc
+        command: []
+        stdout: SplitParser { onRead: line => root.readTransferLine(String(line ?? "")) }
+        onExited: (code, status) => root.finishTransfer(code)
+    }
+    // A finished copy is not an instant to look away from: the bar lands on
+    // 100% and stays there for a moment, so the end of a transfer reads as
+    // "done" rather than as a line that blinked out at 97%. The epoch is what
+    // keeps a queued copy from having its line hidden by the one before it.
+    Timer {
+        id: transferSettle
+        interval: 900
+        repeat: false
+        property int epoch: -1
+        onTriggered: {
+            if (transferSettle.epoch !== root.transferEpoch) return;
+            root.transferRunning = false;
+            root.transferDone = 0;
+            root.transferTotal = 0;
+        }
+    }
+    // progress-hub's status file, read once a second. A FileView rather than a
+    // shell `cat` per tick: the file is small, it is replaced atomically by the
+    // hub (write-then-rename, so a read never catches half a JSON object), and
+    // this costs no process. Errors stay quiet -- the hub may not be installed
+    // or may be restarting, and that is not this window's problem to print.
+    FileView {
+        id: progressStatusFile
+        path: root.progressStatusPath
+        watchChanges: false
+        printErrors: false
+        onTextChanged: root.readProgressStatus(progressStatusFile.text())
+        onLoaded: root.readProgressStatus(progressStatusFile.text())
+    }
+    Timer {
+        id: progressStatusPoll
+        interval: 1000
+        running: true
+        repeat: true
+        triggeredOnStart: true
+        onTriggered: progressStatusFile.reload()
     }
     // ── The launch feedback this window raises (and must end) ─────────────
     //
@@ -590,6 +772,14 @@ Item {
             argv.push(String(arg));
         Quickshell.execDetached(argv);
     }
+    // The one-word "that worked" card: `signalToast sayIcon <label> <glyph>`.
+    // Its glyph is the caller's, because the label is a translated word and
+    // guessing the kind from a string is how a card ends up with the wrong
+    // icon in the wrong language (see Cliphist's showCopyToast).
+    function ipcSignalToast(text, icon) {
+        Quickshell.execDetached(["qs", "-c", "ii", "ipc", "call", "signalToast", "sayIcon",
+            String(text ?? ""), String(icon ?? "check_circle")]);
+    }
     // The success ending: late on purpose (the shell's own window watcher
     // beats us whenever the app maps a NEW window), and guarded (the shell
     // retires the wait only while it still carries OUR name, so a launch
@@ -618,9 +808,19 @@ Item {
         shellProc.running = false;
         shellProc.running = true;
     }
+    // The clipboard publish's process. Separate for the same reason the
+    // notification's is: the selection is not an operation OF this window, and
+    // it must not take the window's one command slot to say so.
+    Process {
+        id: clipboardProc
+        command: []
+    }
+    Process {
+        id: notifyProc
+        command: []
+    }
     function notify(title, body, critical) {
-        root.sh("notify-send -a 'Files' -u " + (critical ? "critical" : "normal")
-            + " " + root.shq(title) + " " + root.shq(body));
+        root.sendNotification(title, body, !!critical);
     }
     // One handler for every helper call. The alternative -- reassigning a
     // callback property per operation -- is where a stale closure silently
@@ -636,6 +836,22 @@ Item {
         }
         if (mode === "mount-names") {
             root.parseMountNames(shellProc.output);
+            return;
+        }
+        // ── The collision question, before any bytes move ─────────────────
+        // Asked of the helper so the answer and the transfer read the same
+        // filesystem: a name that appears between the question and the copy is
+        // still handled by the policy the person chose.
+        if (mode === "conflict-check") {
+            const found = root.parseConflicts(shellProc.output);
+            const p = root.pendingTransfer;
+            if (found.length === 0) {
+                root.pendingTransfer = null;
+                if (p) root.runTransfer(p.sources, p.dest, p.move, p.cleanup, "keep");
+                return;
+            }
+            root.conflictEntries = found;
+            root.conflictAsking = true;
             return;
         }
         // The save prompt's "does this name exist" check. `exists` opens the
@@ -787,9 +1003,17 @@ Item {
         // other, every no-handler file fell through to `gio open` and failed
         // after the fact -- i.e. a double-click that did nothing.
         if (mode === "open-check") {
-            const lines = String(shellProc.output ?? "").split("\n");
-            const type = String(lines[0] ?? "").trim();
-            const handler = String(lines[1] ?? "").trim();
+            // One JSON line from open-with.py, not two lines of shell output:
+            // the type and the handler are asked in ONE process, which is what
+            // keeps a slow answer from being read as the next question's.
+            let checked = null;
+            try {
+                checked = JSON.parse(String(shellProc.output ?? "").trim() || "null");
+            } catch (e) {
+                checked = null;
+            }
+            const type = String(checked?.mime ?? "").trim();
+            const handler = String(checked?.default ?? "").trim();
             if (type.length === 0 || handler.length === 0) {
                 // A TEXT FILE that nothing has claimed is not a mystery worth a
                 // dialog: this desktop HAS a text editor, and "which
@@ -1036,6 +1260,24 @@ Item {
             root.statusNote = "";
             if (code !== 0 && mode !== "trash")
                 root.notify(Translation.tr("Operation failed"), root.firstLine(shellProc.output), true);
+            // What Delete actually did. On an ordinary disk it went to the
+            // trash and there is nothing to announce; on a FUSE mount (Google
+            // Drive, a phone) there was no trash to go to, so it went for good
+            // -- and a permanent delete nobody mentioned is the one surprise
+            // this window must never spring.
+            if (mode === "trash") {
+                const gone = String(shellProc.output ?? "").split("\n")
+                    .filter(line => line.indexOf("DELETE ") === 0);
+                if (gone.length > 0) {
+                    root.notify(Translation.tr("Deleted for good"),
+                        (gone.length === 1
+                            ? root.baseName(gone[0].slice(7))
+                            : gone.length + " " + Translation.tr("items"))
+                        + " — " + Translation.tr("this drive has no trash") + ".",
+                        false);
+                    root.statusNote = Translation.tr("Deleted") + " " + gone.length;
+                }
+            }
             root.refresh();
         }
     }
@@ -1066,12 +1308,368 @@ Item {
     // ── Listing ─────────────────────────────────────────────────────────
     FolderListModel {
         id: folderModel
-        folder: root.asUrl(root.path)
+        // Empty, and set by beginListing() / Component.onCompleted below -- NOT
+        // bound to root.path. A binding here would scan the start folder during
+        // construction, before any of the network-mount guard exists: opening
+        // the manager with Google Drive as its start path ("show in file
+        // manager" on a Drive file) would freeze the shell before the window
+        // was even up.
+        folder: ""
         showFiles: true
         showHidden: root.showHidden
         // No sorting or filtering here: this model is read out and re-ordered
         // by rebuildRows(), which is the only place that has to agree with
         // what the views show.
+    }
+
+    // ── Network mounts are listed WITHOUT Qt's model ────────────────────────
+    //
+    // FolderListModel above scans a directory on the GUI thread. Against local
+    // disk that is invisible. Against ~/Google Drive (fuse.rclone)
+    // it is not: every entry is a round trip to Google, the scan never yields,
+    // and the whole SHELL stops painting -- not just this popup. The report was
+    // exact: "it suddenly freezes because of the loading and I can't close it in
+    // any way". A frozen window cannot be closed, and a task manager would not
+    // help here: the Files popup is a layer surface inside quickshell, so
+    // "kill the file manager" and "kill the desktop" are the same click.
+    //
+    // So a path on a network filesystem is listed by a CHILD PROCESS instead
+    // (`find -printf`, one line per entry) and the rows are built from its
+    // output. Nothing in that path touches the network on the UI thread, so the
+    // popup keeps answering clicks -- you can leave the folder mid-read, or
+    // close the whole thing -- and the rest of the desktop never notices.
+    // Local folders keep the model: it is faster there and it watches for
+    // changes, which `find` does not.
+    //
+    // The same guard covers MTP phones (fuse.aft-mtp-mount) and anything else
+    // on fuse/nfs/cifs, which have the same failure mode for the same reason.
+    property bool remoteListing: false
+    property bool remoteLoading: false
+    property var remoteEntries: []
+    // Bumped by every network read. A cancelled process can still report its
+    // exit (and a 20s timeout can still fire) after a newer read owns the view;
+    // the read that owns it is the one whose number matches this.
+    property int remoteGen: 0
+    // The last read of every network folder, keyed by path. Going BACK to a
+    // folder -- the gesture people repeat constantly, up and down a tree -- is
+    // answered from here at once while the fresh read runs behind it. A network
+    // listing costs a round trip per entry, so re-reading before showing
+    // anything is what makes a file dialog feel stuck.
+    property var remoteCache: ({})
+    // ...and it OUTLIVES the process, because every save dialog is a new one.
+    // Without this, the picker a download opens starts knowing nothing about
+    // the Drive folder it was opened in and spends seconds on "Loading …"
+    // before it can show a single file -- which is what "the file manager opens
+    // very late" looked like from the outside. The last read of each network
+    // folder is written here after every read and read back at startup.
+    readonly property string remoteCachePath: (Quickshell.env("HOME") ?? "/tmp") + "/.cache/ii-files-remote-cache.json"
+    property bool remoteCacheLoaded: false
+    FileView {
+        id: remoteCacheFile
+        path: root.remoteCachePath
+        blockLoading: true
+        watchChanges: false
+    }
+    function loadRemoteCache() {
+        if (root.remoteCacheLoaded)
+            return;
+        root.remoteCacheLoaded = true;
+        const raw = String(remoteCacheFile.text() ?? "");
+        if (raw.length === 0)
+            return;
+        try {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === "object")
+                root.remoteCache = parsed;
+        } catch (error) {
+            // A half-written cache is not data: the next read rewrites it.
+        }
+    }
+    // Debounced, but only just: a dialog can be closed a second after it opens,
+    // and a cache that is written 800ms later is a cache that never arrives for
+    // the one case it exists for. Short enough to survive a quick close, long
+    // enough that a folder read, left and re-read is one write.
+    Timer {
+        id: remoteCacheSave
+        interval: 120
+        onTriggered: {
+            try {
+                const text = JSON.stringify(root.remoteCache);
+                // A cache that has grown past this is not worth the read it
+                // costs at startup; the next reads refill what matters.
+                if (text.length < 1500000)
+                    remoteCacheFile.setText(text);
+            } catch (error) {
+            }
+        }
+    }
+    // The hidden-file setting is the shell's, so a network folder has to obey it
+    // too: `find` has no such filter, and the rows are the only place left to
+    // apply it. No re-read -- the entries are already here.
+    onShowHiddenChanged: {
+        if (root.remoteListing)
+            root.rebuildRows();
+    }
+
+    // What is actually mounted, read from /proc/mounts when a listing starts.
+    // A few KB from procfs -- nothing next to the network round trip this
+    // exists to keep off the UI thread.
+    FileView {
+        id: mountsView
+        path: "/proc/mounts"
+        blockLoading: true
+    }
+
+    // /proc/mounts escapes spaces and backslashes in mount points (`\040`).
+    function unescapeMountPath(p) {
+        return String(p ?? "").replace(/\\040/g, " ").replace(/\\011/g, "\t").replace(/\\134/g, "\\");
+    }
+
+    // The mount point when `p` lives on a network filesystem, "" when it does
+    // not. AppImage mounts are fuse too, and they are local and instant --
+    // excluded by SOURCE, because treating them as network would make every
+    // launch slower for a reason nobody could see.
+    function slowMountFor(p) {
+        const want = String(p ?? "");
+        if (want.length === 0)
+            return "";
+        const lines = String(mountsView.text() ?? "").split("\n");
+        for (let i = 0; i < lines.length; i++) {
+            const f = lines[i].split(" ");
+            if (f.length < 3)
+                continue;
+            const src = f[0];
+            const mp = root.unescapeMountPath(f[1]).replace(/\/+$/, "");
+            const fs = f[2];
+            if (!/^(fuse|nfs|cifs|smb|sshfs|davfs|afpfs|9p)/.test(fs))
+                continue;
+            if (/(AppImage|\.mount_)/.test(src) || mp.length === 0)
+                continue;
+            if (want === mp || want.startsWith(mp + "/"))
+                return mp;
+        }
+        return "";
+    }
+
+    Process {
+        id: remoteListProc
+        property string target: ""
+        // Which read this process belongs to: see remoteGen.
+        property int gen: 0
+        // The path whose read is waiting for this one to be cancelled.
+        property string pending: ""
+        // True while the running process is a read nobody is waiting for any
+        // more: its exit is the signal to start `pending`, not an answer.
+        property bool abandoned: false
+        // The read's output, kept for the exit handler below.
+        property string output: ""
+        command: []
+        stdout: StdioCollector {
+            id: remoteListOut
+            // Collected here, ACTED ON only in onExited. This fires when the
+            // output stream ends, which is not the same moment as the read
+            // being over -- ending the wait here is what made a first open show
+            // an empty folder with no "Loading …" line: the wait was announced
+            // and called off in the same breath, so the 300ms delay that draws
+            // the spinner never got to fire.
+            onStreamFinished: remoteListProc.output = String(this.text ?? "")
+        }
+        onExited: (code, status) => {
+            // The exit of a read that was replaced belongs to no folder on
+            // screen. It has to be recognised as such, because the folder that
+            // is on screen has a read WAITING behind it (see beginListing) and
+            // this is the moment it can start -- not a moment to end anything,
+            // which is what made every second navigation close its own wait
+            // instantly and draw an empty folder.
+            if (remoteListProc.abandoned) {
+                remoteListProc.abandoned = false;
+                const next = remoteListProc.pending;
+                remoteListProc.pending = "";
+                if (next.length > 0 && next === root.path && root.remoteListing)
+                    root.startRemoteRead(next);
+                return;
+            }
+            // A listing that printed nothing still has to end, or "Loading …"
+            // stays on screen forever -- but only the process exiting says the
+            // read is over. finishRemoteListing is idempotent.
+            if (root.remoteLoading && remoteListProc.gen === root.remoteGen && remoteListProc.target === root.path)
+                root.finishRemoteListing(remoteListProc.gen, remoteListProc.target,
+                    remoteListProc.output.length > 0 ? remoteListProc.output : String(remoteListOut.text ?? ""));
+            // 124 is `timeout` giving up: the mount is not answering, which is
+            // a different sentence from "this folder is empty" -- an empty
+            // folder is an answer, a mount that never replied is not. Only the
+            // read that owns the view gets to say it.
+            if (code === 124 && remoteListProc.gen === root.remoteGen)
+                root.statusNote = Translation.tr("No answer from") + " " + root.listingTargetName;
+        }
+    }
+
+    // Start reading `dest`. The ONE door navigation goes through, so a network
+    // path can never reach folderModel.folder.
+    function beginListing(dest) {
+        const p = String(dest ?? "");
+        // A mount that appeared after this window opened (Drive connected,
+        // phone plugged in) is not in the copy read at construction.
+        if (typeof mountsView.reload === "function")
+            mountsView.reload();
+        if (root.slowMountFor(p).length === 0) {
+            root.remoteListing = false;
+            root.remoteLoading = false;
+            root.remoteEntries = [];
+            if (String(folderModel.folder ?? "").replace(/^file:\/+/, "").replace(/\/+$/, "") !== p)
+                folderModel.folder = root.asUrl(p);
+            else
+                root.rebuildRows();
+            return;
+        }
+        root.remoteListing = true;
+        root.remoteLoading = true;
+        // Anything already known about this folder is drawn first; the read
+        // below refreshes it. Stale rows beat an empty window.
+        const known = root.remoteCache[p];
+        root.remoteEntries = known ? known : [];
+        root.rows = [];
+        root.rawCount = 0;
+        if (known)
+            root.rebuildRows();
+        // A read already in flight cannot just be restarted: assigning
+        // `running` while it is true is a no-op, and the exit of the OLD
+        // process cannot be told apart from the new one's -- which is how the
+        // wait used to close the instant it began. So the old read is cancelled
+        // and this path queued behind it; onExited starts it, milliseconds
+        // later. The view shows the queued folder while that happens.
+        if (remoteListProc.running) {
+            remoteListProc.abandoned = true;
+            remoteListProc.pending = p;
+            remoteListProc.running = false;
+            return;
+        }
+        root.startRemoteRead(p);
+    }
+
+    // The one place a network read is launched.
+    function startRemoteRead(p) {
+        root.remoteGen++;
+        remoteListProc.gen = root.remoteGen;
+        remoteListProc.target = p;
+        remoteListProc.output = "";
+        remoteListProc.pending = "";
+        // One stat per entry is exactly the work that must not happen on this
+        // thread, so it happens in that child process instead.
+        //
+        // `timeout` is load-bearing. A hung rclone mount does not fail -- it
+        // never returns: measured on this machine, `find` inside
+        // ~/Google Drive produced ZERO lines in 40s while rclone was
+        // running and the kernel kept the mount "fuse". Without a deadline the
+        // popup would sit on "Loading Google Drive…" forever even now that the
+        // UI thread is free, so the read is given 20s and says so when it runs
+        // out.
+        remoteListProc.command = ["bash", "-lc",
+            "timeout 20 find " + root.shq(p) + " -mindepth 1 -maxdepth 1 -printf '%y\\t%s\\t%T@\\t%f\\n' 2>/dev/null"];
+        remoteListProc.running = true;
+    }
+
+    function finishRemoteListing(gen, target, text) {
+        // A newer read owns the view: this one's rows would be another folder's.
+        if (gen !== root.remoteGen)
+            return;
+        if (String(target) !== String(root.path) || !root.remoteListing)
+            return;
+        const out = [];
+        const lines = String(text ?? "").split("\n");
+        const base = String(root.path ?? "").replace(/\/+$/, "");
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            if (line.length === 0)
+                continue;
+            // `%f` may itself contain a tab, so only the FIRST three tabs are
+            // separators and everything after them is the name.
+            const a = line.indexOf("\t");
+            const b = a < 0 ? -1 : line.indexOf("\t", a + 1);
+            const c = b < 0 ? -1 : line.indexOf("\t", b + 1);
+            if (c < 0)
+                continue;
+            const type = line.slice(0, a);
+            const size = Number(line.slice(a + 1, b));
+            const mtime = Number(line.slice(b + 1, c));
+            const name = line.slice(c + 1);
+            if (name.length === 0)
+                continue;
+            out.push({
+                name: name,
+                path: base + "/" + name,
+                isDir: type === "d",
+                size: isNaN(size) ? 0 : size,
+                // Milliseconds, which is what timeValue() reads.
+                modified: (isNaN(mtime) ? 0 : mtime) * 1000
+            });
+        }
+        // An empty answer does NOT erase a folder this window has already seen
+        // full. A freshly mounted rclone answers "nothing here" in a few
+        // milliseconds while it is still warming up, and taking that as the
+        // truth is what turned a Drive folder with files in it into "This
+        // folder is empty" seconds after it listed them. A real emptying keeps
+        // the stale rows until the next read -- the safer of the two mistakes.
+        const prev = root.remoteCache[String(target)];
+        if (out.length === 0 && prev && prev.length > 0) {
+            root.remoteLoading = false;
+            root.rebuildRows();
+            return;
+        }
+        root.remoteEntries = out;
+        root.remoteLoading = false;
+        // Bounded: a cache that grows with every folder ever visited is a leak
+        // wearing a feature's clothes, and the oldest entries are the ones
+        // nobody is going back to.
+        const paths = Object.keys(root.remoteCache);
+        if (paths.length > 40 && !root.remoteCache[target]) {
+            const trimmed = ({});
+            for (let i = paths.length - 30; i < paths.length; i++)
+                trimmed[paths[i]] = root.remoteCache[paths[i]];
+            root.remoteCache = trimmed;
+        }
+        root.remoteCache[String(target)] = out;
+        root.rebuildRows();
+        // ...and it is written down, so the NEXT process (every save dialog is
+        // one) opens this folder with its files already in hand.
+        remoteCacheSave.restart();
+    }
+    // ── A write that is still going says so ──────────────────────────────
+    // A local folder answers in a frame, so a status line that blinked on
+    // every one of them would be noise. A folder over the network does not:
+    // the Google Drive mount answers through rclone, and until it does the
+    // list keeps the PREVIOUS folder's rows (with the status bar counting
+    // them as if that were the answer) or nothing at all -- which the pane
+    // was reading out as "This folder is empty". Either way the honest
+    // report is that the read has not come back yet.
+    //
+    // So the wait is announced in two places, the status bar and the empty
+    // pane, but only once it has lasted longer than `listingSlowTimer`:
+    // a fast read never draws it (no flicker on Home), and a slow one is
+    // named -- "Loading Google Drive…" -- instead of looking like an answer.
+    readonly property bool listingLoading: root.remoteLoading
+        || folderModel.status === FolderListModel.Loading
+    property bool listingSlow: false
+    // The DESTINATION, not `folderPath`: Qt's model only commits its `folder`
+    // once the read has come back, so during the wait folderPath is still the
+    // folder being LEFT -- and "Loading matrix…" while the request was for
+    // Google Drive is the wrong sentence about the wrong folder. `path` is what
+    // was asked for, which is what the wait is about.
+    readonly property string listingTargetName: root.baseName(root.path) || root.path
+    readonly property string listingLine: Translation.tr("Loading") + " " + root.listingTargetName + "…"
+    Timer {
+        id: listingSlowTimer
+        interval: 300
+        repeat: false
+        onTriggered: root.listingSlow = root.listingLoading
+    }
+    onListingLoadingChanged: {
+        if (root.listingLoading) {
+            listingSlowTimer.restart();
+        } else {
+            listingSlowTimer.stop();
+            root.listingSlow = false;
+        }
     }
     function asUrl(p) {
         const clean = String(p ?? "");
@@ -1084,10 +1682,17 @@ Item {
     // that calls a function tracks nothing, so every property that must react
     // to navigation (breadcrumbs, the nav pane's highlight, free space) binds
     // to THIS, which is a tracked read of `folderModel.folder`.
-    readonly property string folderPath: {
-        const raw = String(folderModel.folder ?? "").replace(/^file:\/+/, "/").replace(/\/+$/, "");
-        return raw.length === 0 ? "/" : raw;
-    }
+          readonly property string folderPath: {
+          // A network listing does not go through the model, so the model still
+          // holds the last LOCAL folder. Reading it here would draw the wrong
+          // breadcrumb and highlight the wrong place in the sidebar.
+          if (root.remoteListing) {
+              const p = String(root.path ?? "").replace(/\/+$/, "");
+              return p.length === 0 ? "/" : p;
+          }
+          const raw = String(folderModel.folder ?? "").replace(/^file:\/+/, "/").replace(/\/+$/, "");
+          return raw.length === 0 ? "/" : raw;
+      }
     function currentFolderPath() {
         return root.folderPath;
     }
@@ -1157,6 +1762,27 @@ Item {
         const dest = String(p ?? "");
         if (dest.length === 0)
             return;
+        // Going somewhere is the pointer's move (or the address bar's, or a
+        // pin's), so the row the ARROWS were left standing on stops being
+        // marked here. Without this the rail wore two rails at once -- "Temp"
+        // and "Google Drive" lit together -- until the keyboard was walked
+        // again, because a place row navigates without touching the focus and
+        // its marker outlived the click.
+        root.clearFocusHighlight();
+        // The folder you are ALREADY in is a re-read, never a no-op.
+        //
+        // A mount that came back, or files changed by something that cannot
+        // notify this window (the rclone mount behind Google Drive has no
+        // inotify: what it says on the first read of a folder is all this
+        // model will ever hear), is exactly the case where the same place has
+        // new contents -- and pressing the pin you are standing on is the
+        // gesture people make at it. Meeting that gesture with nothing is how
+        // a Drive folder sat on "This folder is empty" over a folder that was
+        // not empty at all.
+        if (!root.atThisPc && dest === root.folderPath) {
+            root.refresh();
+            return;
+        }
         if (dest === root.thisPc) {
             root.atThisPc = true;
             root.selection = [];
@@ -1173,8 +1799,10 @@ Item {
         root.path = dest;
         // The folder being entered wears its OWN saved view, not the one the
         // folder we came from was wearing.
-        root.viewMode = root.savedViewFor(dest);
-        folderModel.folder = root.asUrl(dest);
+                  root.viewMode = root.savedViewFor(dest);
+          // The only door to a listing: a network path goes to a child process
+          // instead of Qt's model, which would scan it on the GUI thread.
+          root.beginListing(dest);
         root.selection = [];
         root.selIndex = -1;
         root.anchorIndex = -1;
@@ -1217,12 +1845,17 @@ Item {
         root.historyIndex += 1;
         root.navigateTo(root.history[root.historyIndex], false);
     }
-    function goUp() {
-        if (root.atThisPc) return;
-        const p = String(folderModel.parentFolder ?? "");
-        if (p.length === 0) return;
-        root.navigateTo(p.replace(/^file:\/+/, "/"));
-    }
+          function goUp() {
+          if (root.atThisPc) return;
+          // A network folder is not in the model, so its parent has to be cut
+          // off the path rather than read from folderModel.parentFolder (which
+          // would answer with the last LOCAL folder's parent).
+          const p = root.remoteListing
+              ? root.dirName(root.path)
+              : String(folderModel.parentFolder ?? "").replace(/^file:\/+/, "/");
+          if (p.length === 0) return;
+          root.navigateTo(p);
+      }
     function refresh() {
         // Re-assigning the same URL is a no-op, so the re-read is forced with
         // a trailing slash that comes and goes. The directory is the SAME one
@@ -1230,9 +1863,14 @@ Item {
         // version really did navigate to root for a frame, and a phone call at
         // that moment (a probe, a click, the new item's own refresh) saw a
         // root folder instead of the one on screen.
-        const cur = String(folderModel.folder ?? "");
-        folderModel.folder = cur.endsWith("//") ? cur.slice(0, -1) : cur + "/";
-        root.statusNote = "";
+                  if (root.remoteListing) {
+              root.beginListing(root.path);
+              root.statusNote = "";
+              return;
+          }
+          const cur = String(folderModel.folder ?? "");
+          folderModel.folder = cur.endsWith("//") ? cur.slice(0, -1) : cur + "/";
+          root.statusNote = "";
     }
 
     // ── Open with ───────────────────────────────────────────────────────
@@ -1342,27 +1980,55 @@ Item {
             root.sh(root.announcePrefix(root.openAnnounced) + "gio open " + root.shq(p), "open", p);
             return;
         }
-        root.sh("t=$(xdg-mime query filetype " + root.shq(p) + " 2>/dev/null); "
-            + "printf '%s\\n' \"$t\"; xdg-mime query default \"$t\" 2>/dev/null", "open-check", p);
+        // Both answers in one cheap call, and cheap is the point: the old line
+        // asked `xdg-mime query filetype`, which SNIFFS THE FILE -- on the
+        // Google Drive mount that is a download (2.7s warm, 30s+ cold), and a
+        // double-click there ended in an "Open with" dialog that said it could
+        // not read the list of applications, because the late type query had
+        // answered into the slot the chooser's list was waiting on.
+        root.sh("python3 " + root.shq(Quickshell.shellPath("scripts/system/open-with.py"))
+            + " check " + root.shq(p), "open-check", p);
     }
-    // The double-click. WINDOW MODE opens anything; PICKER MODE opens FOLDERS.
+    // The double-click, in BOTH modes.
     //
-    // Inside a file dialog a double-click on a FILE would answer a question the
-    // user has not been asked yet, so that is still only a selection. A folder
-    // is not an answer though -- it is the way through the tree -- and a dialog
-    // that made you hunt for a breadcrumb to enter the folder you just
-    // double-clicked was asked to stop doing that (REQUESTED 2026-10-13:
-    // "open folders with double click also ... in the add folder or file file
-    // manager version"). Entering the folder IS the answer in a folder picker:
-    // pickerConfirm hands over the folder being looked at.
+    // WINDOW MODE: a file is opened, a folder is entered. A folder is never
+    // handed to another program -- double-clicking one goes INSIDE it, because
+    // that is what a folder is for and a second file-manager window showing the
+    // same tree is not an answer to anything.
+    //
+    // PICKER MODE:
+    //   * a FOLDER is the way through the tree, so it is entered as well. Enter
+    //     `custom` and the dialog is standing in it; the Open/Select button then
+    //     answers with the folder being looked at (REQUESTED 2026-10-13: "open
+    //     folders with double click also ... in the add folder or file file
+    //     manager version").
+    //   * a FILE, in a dialog that asks for a FILE, IS the answer. This used to
+    //     be a selection only -- the user had to double-click, then travel to
+    //     Open -- which made the fastest gesture in every file dialog the one
+    //     that did nothing (REQUESTED 2026-11-01: "when picking a file open it on
+    //     double click always"). The double-click now selects the file and
+    //     confirms, exactly as Open would.
+    //   * in SAVE, the file is the name: the click adopts it (see adoptSaveName)
+    //     and the double-click then confirms, which is how "save over that file"
+    //     is done in two gestures. Confirming does NOT silently replace it --
+    //     pickerConfirm puts the name to the filesystem first and raises the
+    //     Replace prompt when something is already there.
+    //   * a FOLDER picker keeps the old meaning, because its answer is the folder
+    //     being looked at, never a file inside it.
     function activate(i) {
         if (i < 0 || i >= root.rows.length)
             return;
-        if (root.pickerMode && !root.isDirAt(i)) {
-            root.selectIndex(i, false, false);
+        if (!root.pickerMode) {
+            root.openEntry(i);
             return;
         }
-        root.openEntry(i);
+        if (root.isDirAt(i)) {
+            root.openEntry(i);            // navigateTo for a directory
+            return;
+        }
+        root.selectIndex(i, false, false);
+        if (!root.pickerDirectory)
+            root.pickerConfirm();
     }
 
     // ── Selection ───────────────────────────────────────────────────────
@@ -1396,6 +2062,13 @@ Item {
             root.selection = [root.pathAt(i)];
             root.anchorIndex = i;
         }
+        // A single row clicked in a SAVE dialog is a candidate name, so the box
+        // follows the pointer (see adoptSaveName). Multi-selection, a
+        // ctrl-click and a shift range all leave the name alone: they do not
+        // name one file, and the box can only hold one.
+        if (root.pickerMode && root.pickerOp === "save" && !root.isDirAt(i)
+            && root.selection.length === 1 && root.selection[0] === root.pathAt(i))
+            root.adoptSaveName(root.pathAt(i));
     }
     function selectName(name) {
         const i = root.indexOfPath(root.currentFolderPath() + "/" + name);
@@ -1473,7 +2146,13 @@ Item {
         else root.navigateTo(t.path ?? root.homeDir, false);
     }
     function newTab(p) {
-        const target = (typeof p === "string" && p.length > 0) ? p : root.path;
+        // HOME, not the folder on screen (asked 2026-11-12). A new tab is a
+        // fresh starting point -- matrix -- where it used to copy whatever the
+        // current tab was showing, which made the "+" feel like "duplicate
+        // this folder". An explicit target is still honoured: the menu's
+        // "Open in new tab", a folder dropped on the strip and the IPC hooks
+        // all name a folder on purpose.
+        const target = (typeof p === "string" && p.length > 0) ? p : root.homeDir;
         root.syncTab();
         root.tabs = root.tabs.concat([{
             path: target,
@@ -2937,12 +3616,18 @@ Item {
         else
             root.sh("touch -- " + root.shq(target) + " 2>&1", "touch", target);
     }
-    function nameExistsInFolder(name) {
-        for (let i = 0; i < folderModel.count; i++)
-            if (String(folderModel.get(i, "fileName")) === String(name))
-                return true;
-        return false;
-    }
+          function nameExistsInFolder(name) {
+          if (root.remoteListing) {
+              for (let i = 0; i < root.rows.length; i++)
+                  if (String(root.rows[i].name) === String(name))
+                      return true;
+              return false;
+          }
+          for (let i = 0; i < folderModel.count; i++)
+              if (String(folderModel.get(i, "fileName")) === String(name))
+                  return true;
+          return false;
+      }
     function renameItem(p, name) {
         if (!p || !name) return;
         const clean = String(name).trim();
@@ -2963,8 +3648,19 @@ Item {
     function trashItems(paths) {
         const list = (paths && paths.length ? paths : root.selection).slice();
         if (list.length === 0) return;
-        root.sh(list.map(p => "gio trash " + root.shq(p)).join("; ") + " 2>&1",
-            "trash", list.join("\n"));
+        // A FUSE filesystem has no trash to put a file in: `gio trash` answers
+        // that by CREATING `.Trash-1000` ON THE SHARE, so deleting one file
+        // from Google Drive uploaded a hidden folder into the user's cloud
+        // (and nothing ever empties it, because it is not this machine's
+        // trash). Those mounts get a real delete instead -- announced, since
+        // it is not undoable -- while every ordinary disk keeps the trash it
+        // has always had. The decision is made per path, in the helper, off
+        // `stat -f`: the filesystem is the only thing that knows.
+        root.sh("while IFS= read -r p; do [ -z \"$p\" ] && continue; "
+            + "fs=$(stat -f -c %T -- \"$p\" 2>/dev/null); "
+            + "case \"$fs\" in fuse*) rm -rf -- \"$p\" && echo \"DELETE $p\" ;; "
+            + "*) gio trash \"$p\" && echo \"TRASH $p\" ;; esac; done <<'EOF'\n"
+            + list.join("\n") + "\nEOF", "trash", list.join("\n"));
     }
     function deleteItems(paths) {
         const list = (paths && paths.length ? paths : root.selection).slice();
@@ -3170,6 +3866,18 @@ Item {
     function emptyPreviewTable() {
         return ({ header: [], rows: [], totalRows: 0, totalCols: 0 });
     }
+    // Files a thumbnail can be drawn for (see scripts/system/file-thumbnail.sh):
+    // images and clips from their own pixels, PDFs from page one, documents from
+    // their text. One list, used by the row model (the `preview` flag the tiles
+    // read) so a tile and the pane cannot disagree about what is previewable.
+    function hasThumbnailSource(name) {
+        const s = root.suffixOf(name);
+        return root.imageExts.indexOf(s) !== -1
+            || root.videoExts.indexOf(s) !== -1
+            || s === "pdf"
+            || root.officeExts.indexOf(s) !== -1
+            || root.docPreviewExts.indexOf(s) !== -1;
+    }
     function previewKindFor(e) {
         if (!e) return "";
         if (e.isDir) return "folder";
@@ -3353,54 +4061,279 @@ Item {
         // selection is a race whose loser is whichever one the pasting app
         // happens to read. Then one helper owns it until another copy (from
         // here or from anywhere else) takes the clipboard away.
-        root.sh(root.clipboardStopCommand() + "; setsid python3 " + root.shq(root.clipboardHelper)
+        // On its OWN process, not sh(). `shellProc` carries exactly one
+        // command, and the command a copy would replace is usually the one
+        // that was about to fill this window -- a preview, a media probe, a
+        // folder's first listing. Publishing a selection is a claim on the
+        // desktop clipboard; it has no business cancelling what the window is
+        // in the middle of showing, and replacing a command mid-flight is
+        // exactly how a pane ends up holding the previous file's answer.
+        clipboardProc.command = ["bash", "-c",
+            root.clipboardStopCommand() + "; setsid python3 " + root.shq(root.clipboardHelper)
             + " " + (cut ? "cut" : "copy")
             + list.map(c => " " + root.shq(c.path)).join("")
-            + " >/dev/null 2>&1 & echo $! > " + root.shq(root.clipboardPidFile), "clipboard");
+            + " >/dev/null 2>&1 & echo $! > " + root.shq(root.clipboardPidFile)];
+        clipboardProc.running = false;
+        clipboardProc.running = true;
     }
     function copySelection(cut) {
-        if (root.selection.length === 0) return;
+        if (root.selection.length === 0) { root.toast(Translation.tr("Nothing selected"), ""); return; }
         root.clipboard = root.selection.map(p => ({ path: p, cut: !!cut }));
         root.publishClipboard(!!cut);
         root.statusNote = root.selection.length + " "
             + (cut ? Translation.tr("item(s) to move") : Translation.tr("item(s) copied"));
+        // Say it out loud as well, and say it the way a TEXT copy says it: the
+        // desktop's one-word signal card, the same one the clipboard raises.
+        //
+        // It was a real notification before, and that was wrong twice over. It
+        // filed a file copy in the notification list as a message with an app
+        // name and a body to dismiss, where copying text gives a glance that
+        // expires on its own and is never heard from again; and it raised a
+        // notification surface over the screen for it. A copy is a
+        // confirmation, not a message.
+        //
+        // No file name in the card, on purpose: the text-copy card is one word
+        // ("Copied"), and a name long enough to matter is exactly what turns a
+        // glance into a read. Copy or cut is the only thing worth carrying, and
+        // it changes the word.
+        //
+        // Through IPC rather than a direct call, because the card belongs to
+        // the SHELL's process (GlobalStates.showSignalToast, called from
+        // Cliphist in there) and Files is its own process -- `qs -p
+        // filemanager.qml`. A GlobalStates call from here would set a
+        // singleton nobody draws. Same crossing as ipcLoading below.
+        root.ipcSignalToast(cut ? Translation.tr("Cut") : Translation.tr("Copied"),
+            cut ? "content_cut" : "content_copy");
     }
-    // The one line that moves ONE item into a folder -- and the only place the
+    // A notification is FEEDBACK, never an operation: it must not share
+    // `shellProc`, which carries exactly one command at a time. A second sh()
+    // in the same turn replaces the command of the first -- the documented way
+    // a cut once lost its move -- and a copy that replaced its own publish with
+    // "1 item copied" would break the clipboard it was announcing.
+    function toast(title, body) {
+        root.sendNotification(title, body, false);
+    }
+    // A notification, without libnotify in the way.
+    //
+    // `notify-send` is broken on this machine -- it exits 127 with
+    // "symbol lookup error: notify-send: undefined symbol:
+    // notify_notification_get_activation_app_launch_context" -- so EVERY
+    // notification this app sent, copy feedback included, died before it
+    // reached the daemon. The daemon itself is healthy (it is the shell), so
+    // this makes the same D-Bus call notify-send would: no shell (nothing to
+    // quote, nothing to split, no second Process to collide with), no library.
+    function sendNotification(title, body, critical) {
+        notifyProc.command = ["gdbus", "call", "--session",
+            "--dest", "org.freedesktop.Notifications",
+            "--object-path", "/org/freedesktop/Notifications",
+            "--method", "org.freedesktop.Notifications.Notify",
+            "Files", "0", "", String(title ?? ""), String(body ?? ""),
+            "[]", critical ? "{'urgency': <byte 2>}" : "{}", "8000"];
+        notifyProc.running = false;
+        notifyProc.running = true;
+    }
+    // The command line that moves items into a folder -- and the one place the
     // destination name is decided.
     //
-    // gio copy/move have no -f (passing it is an instant "Unknown option" and
-    // nothing is copied -- which is exactly why Paste used to do nothing at
-    // all), and a write onto an existing name must not clobber it. Explorer's
-    // answer to a collision is "Keep both", and so is this: the incoming file
-    // lands as "name - copy.ext", or "name - copy (2)" when even that is
-    // taken.
+    // A write onto an existing name must not clobber it. Explorer's answer to a
+    // collision is "Keep both", and so is this: the incoming file lands as
+    // "name - copy.ext", or "name - copy (2)" when even that is taken. That
+    // rule lives in the helper below now, in one place, because Paste and every
+    // drop target both go through it and two copies of a naming rule is how
+    // they would come to disagree.
     //
-    // Paste and every drop target build their shell lines from this one
-    // function, because a paste and a drop are the same operation and two
-    // copies of the naming rule is how they would come to disagree.
-    function transferCommand(srcPath, destDir, move) {
-        const verb = move ? "gio move" : "gio copy";
-        return `src=${root.shq(srcPath)}; dst=${root.shq(destDir)}; base=$(basename -- "$src"); target="$dst/$base"; `
-            + `if [ -e "$target" ]; then stem="${'$'}{base%.*}"; ext="${'$'}{base##*.}"; `
-            + `if [ "$stem" = "$base" ]; then ext=""; else ext=".$ext"; fi; `
-            + `target="$dst/$stem - copy$ext"; i=2; while [ -e "$target" ]; do target="$dst/$stem - copy ($i)$ext"; i=$((i+1)); done; fi; `
-            // A DIRECTORY is not something gio will copy or move: both verbs
-            // answer "Can't recursively copy directory" and do nothing, which
-            // is why Ctrl+V of a folder onto another drive looked like no paste
-            // at all (measured 2026-10-28 on /home -> the NTFS SSD). A folder
-            // is handled by cp -a (recursive, keeps timestamps and modes where
-            // the filesystem allows them), and a MOVE deletes the source only
-            // after the copy has succeeded -- `&&` is the guard, so a
-            // half-copied folder is never removed. On the same filesystem mv
-            // is used instead: it is a rename, and duplicating the tree first
-            // would be pointless work.
-            + `if [ -d "$src" ]; then `
-            + `if [ "$(stat -c %d -- "$src" 2>/dev/null)" = "$(stat -c %d -- "$dst" 2>/dev/null)" ]; then `
-            + `mv -- "$src" "$target"; `
-            + `else cp -a -- "$src" "$target"`
-            + (move ? ` && rm -rf -- "$src"` : ``)
-            + `; fi; `
-            + `else ${verb} "$src" "$target"; fi`;
+    // The transfer itself is ONE process for the whole batch
+    // (scripts/system/file-transfer.sh) rather than a shell line per item, for
+    // two reasons that turned out to be the same reason:
+    //
+    //   * a progress bar needs a TOTAL, and a total needs the whole batch in
+    //     one place -- seven independent commands cannot say "3 of 7, 42%";
+    //   * `gio copy` refused a directory outright ("Can't recursively copy
+    //     directory") and `gio move` disagreed with it about removable drives,
+    //     so the folder case had grown a cp -a special case and the USB case
+    //     had no answer at all.
+    //
+    // The helper decides the names ("name - copy.ext" then "name - copy (2)"),
+    // moves the bytes, and prints BEGIN / ITEM / PROGRESS / FAIL / DONE on
+    // stdout. readTransferLine below turns those into the header's line.
+    readonly property string transferHelper: Quickshell.shellPath("scripts/system/file-transfer.sh")
+    // The bytes as a person reads them. Decimal units, like the free-space
+    // figure in the HUD, so the two numbers on this bar speak the same way.
+    function transferSizeText(bytes) {
+        const n = Math.max(0, Number(bytes) || 0);
+        if (n < 1000) return Math.round(n) + " B";
+        const units = ["KB", "MB", "GB", "TB"];
+        let v = n, i = -1;
+        while (v >= 1000 && i < units.length - 1) { v = v / 1000; i++; }
+        const shown = v >= 10 ? Math.round(v) : Math.round(v * 10) / 10;
+        return String(shown) + " " + units[i];
+    }
+    // The whole batch as one command line. `cleanup` is the CUT's tail: the
+    // clipboard helper has to let go of a selection the move consumed, and it
+    // rides on THIS line because a second process in the same turn is how the
+    // old paste lost the move entirely (see pasteInto).
+    function transferArgs(srcPaths, destDir, move, policy) {
+        // ON_CONFLICT is an environment assignment on the same line, so the
+        // helper reads the answer without another argument to keep in step
+        // with what Paste, a drop and every probe already pass.
+        const how = (policy === undefined || policy === null || String(policy) === "")
+            ? "keep" : String(policy);
+        return ["ON_CONFLICT=" + root.shq(how),
+                root.shq(root.transferHelper), (move ? "move" : "copy"), root.shq(destDir)]
+            .concat((srcPaths ?? []).map(p => root.shq(p))).join(" ");
+    }
+    // One item's command line, for a plan that names what WOULD run.
+    function transferCommand(srcPath, destDir, move, policy) {
+        return root.transferArgs([srcPath], destDir, move, policy);
+    }
+    // The question, answered without moving a byte: one line per source whose
+    // name is already in the destination, then a count.
+    function conflictsCommand(srcPaths, destDir) {
+        return [root.shq(root.transferHelper), "conflicts", root.shq(destDir)]
+            .concat((srcPaths ?? []).map(p => root.shq(p))).join(" ");
+    }
+    function parseConflicts(text) {
+        const out = [];
+        for (const line of String(text ?? "").split("\n")) {
+            const m = /^CONFLICT\s+(.+?)\s+(dir|file)\s*$/.exec(line);
+            if (m) out.push({ name: m[1], kind: m[2] });
+        }
+        return out;
+    }
+    // Every copy and every move starts HERE now. If nothing collides there is
+    // no question to ask and the transfer starts at once; if something does,
+    // the batch waits in `pendingTransfer` until the dialog is answered.
+    function startTransfer(srcPaths, destDir, move, cleanup) {
+        const list = (srcPaths ?? []).filter(p => String(p ?? "").length > 0);
+        if (list.length === 0) return 0;
+        root.pendingTransfer = { sources: list, dest: String(destDir ?? ""),
+                                 move: !!move, cleanup: !!cleanup };
+        root.conflictEntries = [];
+        root.sh(root.conflictsCommand(list, destDir), "conflict-check");
+        return list.length;
+    }
+    function answerConflict(policy) {
+        const p = root.pendingTransfer;
+        root.conflictAsking = false;
+        root.conflictEntries = [];
+        root.pendingTransfer = null;
+        keyLayer.forceActiveFocus();
+        if (!p) return;
+        root.conflictPolicy = policy;
+        root.runTransfer(p.sources, p.dest, p.move, p.cleanup, policy);
+    }
+    // Cancel writes nothing and keeps a cut on the clipboard: the local list
+    // is only cleared when a transfer actually starts (see runTransfer).
+    function cancelConflict() {
+        root.conflictAsking = false;
+        root.conflictEntries = [];
+        root.pendingTransfer = null;
+        root.statusNote = "";
+        keyLayer.forceActiveFocus();
+    }
+    // What the dialog calls the thing it found: one name when there is one,
+    // a count when a whole batch collides.
+    readonly property string conflictTitle: {
+        const n = root.conflictEntries.length;
+        if (n === 1) return Translation.tr("“%1” is already here.").arg(root.conflictEntries[0].name);
+        return Translation.tr("%1 items are already here.").arg(n);
+    }
+    function runTransfer(srcPaths, destDir, move, cleanup, policy) {
+        const list = (srcPaths ?? []).filter(p => String(p ?? "").length > 0);
+        if (list.length === 0) return 0;
+        root.transferDone = 0;
+        root.transferTotal = 0;
+        root.transferItemsDone = 0;
+        root.transferItemsTotal = list.length;
+        root.transferLabel = "";
+        root.transferError = "";
+        root.transferSkipped = 0;
+        // A cut is consumed by the transfer, never by the question in front
+        // of it.
+        if (cleanup) root.clipboard = [];
+        root.transferRunning = true;
+        root.transferEpoch++;
+        // No `exec` in front of the transfer. `exec VAR=value cmd` is NOT a
+        // command to bash -- assignments are only a command prefix in front of
+        // a simple command, and exec takes the program name first -- so the
+        // whole paste died as "exec: ON_CONFLICT=keep: not found", exit 127,
+        // every single time. That was the entire "I cannot copy/paste anything
+        // in the file manager": the copy was fine, the transfer never ran, and
+        // a CUT was cleared off the clipboard by runTransfer before it failed.
+        // The helper is the last command on this line, so its exit status is
+        // still the shell's, which is what finishTransfer reads.
+        transferProc.command = ["bash", "-c",
+            (cleanup ? root.clipboardStopCommand() + "; " : "")
+            + root.transferArgs(list, destDir, move, policy) + " 2>&1"];
+        transferProc.running = false;
+        transferProc.running = true;
+        return list.length;
+    }
+    function readTransferLine(line) {
+        const s = String(line ?? "");
+        const m = /^ITEM\s+(\d+)\s+(\d+)\s+(.*)$/.exec(s);
+        if (m) {
+            root.transferItemsDone = Math.max(0, (Number(m[1]) || 1) - 1);
+            root.transferItemsTotal = Number(m[2]) || root.transferItemsTotal;
+            root.transferLabel = m[3];
+            return;
+        }
+        if (s.indexOf("BEGIN ") === 0) {
+            const p = s.split(/\s+/);
+            root.transferTotal = Number(p[1]) || 0;
+            root.transferItemsTotal = Number(p[2]) || root.transferItemsTotal;
+            root.transferDone = 0;
+            root.transferItemsDone = 0;
+            return;
+        }
+        if (s.indexOf("PROGRESS ") === 0) {
+            const p = s.split(/\s+/);
+            const total = Number(p[2]) || 0;
+            if (total > 0) root.transferTotal = total;
+            const done = Number(p[1]) || 0;
+            if (done > root.transferDone) root.transferDone = done;
+            return;
+        }
+        if (s.indexOf("SKIP ") === 0) {
+            root.transferSkipped++;
+            return;
+        }
+        if (s.indexOf("FAIL ") === 0 && root.transferError.length === 0) {
+            root.transferError = s.slice(5).trim();
+        }
+    }
+    function finishTransfer(code) {
+        const failed = Number(code) !== 0;
+        const skipped = root.transferSkipped;
+        root.transferSkipped = 0;
+        // The reason, kept before the state is cleared: a paste that cannot
+        // land is exactly the "copying to the USB does nothing" report, and the
+        // sentence that explains it is the only useful thing left in the
+        // failure case.
+        const why = failed
+            ? (root.transferError.length > 0 ? root.transferError
+                                             : Translation.tr("The transfer did not complete."))
+            : (skipped > 0 ? Translation.tr("%1 left alone").arg(skipped) : "");
+        root.transferLabel = "";
+        root.transferError = "";
+        if (failed) {
+            root.transferRunning = false;
+            root.transferDone = 0;
+            root.transferTotal = 0;
+        } else {
+            // 100% is a state worth SHOWING: the bar fills, then the line
+            // stands down a moment later (see transferSettle).
+            root.transferDone = root.transferTotal;
+            transferSettle.epoch = root.transferEpoch;
+            transferSettle.restart();
+        }
+        // refresh() CLEARS the status note (it is written for the folder you
+        // are looking at, and the folder just changed), so it has to happen
+        // BEFORE the reason is written -- the other order lost every failure
+        // message in the same call that raised it.
+        root.refresh();
+        root.statusNote = why;
+        if (failed) root.notify(Translation.tr("Operation failed"), why, true);
     }
     // Where a paste that had to adopt the DESKTOP clipboard is aimed. Set
     // before the read starts: the read is asynchronous (one sh()) and the
@@ -3472,25 +4405,21 @@ Item {
                 "paste-adopt", dest);
             return;
         }
-        const cmds = root.clipboard.map(c => root.transferCommand(c.path, dest, c.cut));
         // A cut is consumed by the paste; a copy stays on the clipboard, which
         // is what makes "paste three times" work.
         //
         // The spent cut is taken off the DESKTOP clipboard too, or the same
-        // files could be dropped into a second folder afterwards and moved
-        // twice -- and that cleanup rides on THIS shell line rather than on a
-        // sh() of its own. sh() drives one Process, and a second sh() in the
-        // same turn rewrote that Process's command while the first was still
-        // starting: only the cleanup ever ran, the cut was cleared off the
-        // clipboard anyway, and NOTHING moved. That was the whole of the
-        // reported "cut and paste does not work" (copy+paste never showed it,
-        // because a copy has no cleanup step and so only ever calls sh() once).
-        if (root.clipboard.every(c => c.cut)) {
-            root.clipboard = [];
-            cmds.unshift(root.clipboardStopCommand());
-        }
+        // files could be pasted into a second folder afterwards and moved
+        // twice -- and that cleanup rides on the SAME command line as the
+        // transfer, never on a second process: sh() drives one Process, and a
+        // second command in the same turn rewrote that Process's command while
+        // the first was still starting, so only the cleanup ever ran, the cut
+        // was cleared off the clipboard anyway, and NOTHING moved. That was the
+        // whole of the reported "cut and paste does not work".
+        const cutting = root.clipboard.every(c => c.cut);
+        const sources = root.clipboard.map(c => c.path);
         root.statusNote = Translation.tr("Pasting") + "…";
-        root.sh(cmds.join("; ") + " 2>&1", "paste", dest);
+        root.startTransfer(sources, dest, cutting, cutting);
     }
 
     // ── Drops ───────────────────────────────────────────────────────────
@@ -3558,13 +4487,23 @@ Item {
         const out = [];
         const list = urls ?? [];
         for (let i = 0; i < list.length; i++) {
-            let s = String(list[i] ?? "");
-            if (s.length === 0) continue;
-            if (s.indexOf("file://") === 0) {
-                s = s.slice(7);
-                try { s = decodeURIComponent(s); } catch (e) { /* leave it raw */ }
+            // A uri list also arrives as ONE CRLF-terminated string (that is the
+            // clipboard's own shape, and what a probe hands over): without this
+            // split a drop of four files is one path with newlines inside it,
+            // which fails as "is gone" -- the drop looks like it did nothing.
+            const raw = String(list[i] ?? "");
+            if (raw.length === 0) continue;
+            for (const part of raw.split(/\r?\n/)) {
+                let s = String(part ?? "").trim();
+                if (s.length === 0) continue;
+                // Comments are legal in text/uri-list ("# something").
+                if (s.charAt(0) === "#") continue;
+                if (s.indexOf("file://") === 0) {
+                    s = s.slice(7);
+                    try { s = decodeURIComponent(s); } catch (e) { /* leave it raw */ }
+                }
+                if (s.length > 0 && out.indexOf(s) === -1) out.push(s);
             }
-            if (s.length > 0 && out.indexOf(s) === -1) out.push(s);
         }
         return out;
     }
@@ -3598,7 +4537,7 @@ Item {
         const work = root.dropWorkList(root.dropPathsOf(urls), dest, move);
         if (work.length === 0) return 0;
         root.statusNote = (move ? Translation.tr("Moving") : Translation.tr("Copying")) + "…";
-        root.sh(work.map(p => root.transferCommand(p, dest, move)).join("; ") + " 2>&1", "paste", dest);
+        root.startTransfer(work, dest, move, false);
         return work.length;
     }
 
@@ -3816,6 +4755,29 @@ Item {
     // this press and needs no gesture handling of its own.
     function openFolderMenuAt(item, x, y) {
         root.openMenuAt(item, x, y, "");
+    }
+    // ── The menu for the blank tail of a name cell ──────────────────────
+    //
+    // That strip is folder ground (asked for: aiming at empty space beside a
+    // name should not act on the row it happens to be next to), and a folder
+    // menu has New folder, New file and Paste in it -- but nothing about the
+    // row. The strip is also MOST of the name column: for "alpha.txt" the text
+    // ends 48 px into a 334 px cell, so 86% of it is "blank". Sending all of
+    // that to the folder menu meant Rename -- and Open, Open with, Delete,
+    // Properties, everything the row has -- was unreachable unless the pointer
+    // was exactly on the glyphs, which is why renaming a file looked broken.
+    //
+    // So the tail gets ONE menu with both halves: the folder's create rows (what
+    // the strip was for) and then the row's own actions (what a right-click on
+    // a file is for). Nothing is lost, and Rename is wherever the pointer is.
+    function rowTailMenu(p) {
+        return [...root.createMenuItems(), root.sep(), ...root.entryMenu(String(p ?? ""))];
+    }
+    function openRowTailMenuAt(item, x, y, path) {
+        const p = String(path ?? "");
+        root.openMenuAt(item, x, y, p);
+        if (p.length > 0)
+            root.menuItems = root.rowTailMenu(p);
     }
     // New drop-down, always available however full the folder is. It opens
     // UNDER the command (not at the pointer) because a menu that covers the
@@ -4200,6 +5162,31 @@ Item {
     }
     onPickerNameChanged: root.syncSaveName()
 
+    // A file CLICKED in a save dialog names the thing about to be written.
+    //
+    // Explorer's save box fills itself from the list: point at the file you mean
+    // and the name follows, so "replace this one" is a gesture instead of typing
+    // the same characters again. That is what this does (REQUESTED 2026-11-01:
+    // "when clicking on another file when saving a file, change the name to that
+    // file").
+    //
+    // BOTH halves are taken from the file's own name -- stem and extension --
+    // because a name only replaces the file it matches if the extension matches
+    // too: adopting "report" from "report.pdf" while the box still says ".png"
+    // would save a NEW file beside the clicked one. saveExtDefault moves with it
+    // for the same reason: it is the small label that says what the finished name
+    // will be, and it would otherwise keep advertising the application's type.
+    function adoptSaveName(p) {
+        const name = root.baseName(String(p ?? ""));
+        if (name.length === 0)
+            return;
+        const ext = root.extOfName(name);
+        root.saveStem = ext.length > 0 ? root.stemOf(name) : name;
+        root.saveExt = ext;
+        root.saveExtDefault = ext;
+        root.saveExtEditing = false;
+    }
+
     // What the two halves add up to. An emptied extension box is how a type is
     // removed, so the name never comes back with a trailing dot.
     function saveComposedName() {
@@ -4448,12 +5435,24 @@ Item {
     // The control the arrows are on, lit the way a hover lights it, cleared and
     // set in ONE place -- so a walk can never leave two of them lit, and a new
     // walkable row only has to carry the property.
-    function refreshFocusHighlight() {
+    // Drop the keyboard's row marker everywhere, without moving the keyboard.
+    //
+    // The pointer needs this: a row clicked with the mouse IS the place you are
+    // on, and the row the arrows were left standing on keeps its own, stronger
+    // marker -- so the rail wore TWO rails at once ("Temp" and "Google Drive"
+    // lit together) until the keyboard was walked again. Clicking a file row
+    // never showed it because selectIndex() already parks the focus on the
+    // list; a place row navigates without touching the focus, which is the gap
+    // this closes.
+    function clearFocusHighlight() {
         for (const a of ["toolbar", "nav"]) {
             const c = root.focusCandidates(a);
             for (let i = 0; i < c.length; i++)
                 if (c[i].keyFocused !== undefined) c[i].keyFocused = false;
         }
+    }
+    function refreshFocusHighlight() {
+        root.clearFocusHighlight();
         if (root.focusArea === "toolbar" || root.focusArea === "nav") {
             const c = root.focusCandidates();
             const it = c[Math.max(0, Math.min(c.length - 1, root.focusIndex))];
@@ -4553,6 +5552,49 @@ Item {
     function isDropTarget(path) {
         const p = root.dropPathKey(path);
         return p.length > 0 && root.dropTargetPath === p;
+    }
+
+    // ── What is in the air ──────────────────────────────────────────────
+    //
+    // REQUESTED (2026-11-13): "I want the files that I'm dragging to move away
+    // and folders to highlight when I would be dropping them inside".
+    //
+    // The second half is the drop target above; this is the first. A file being
+    // dragged is still painted in its own row -- that is where it was picked up
+    // -- so without this the list looks untouched while the pointer carries a
+    // copy around, and there is no way to tell what has been picked up from what
+    // is merely under it. Dimming the SOURCE rows is what says "these, and only
+    // these, are in the air": the same reduce-to-half the clipboard's cut uses,
+    // because it is the same claim (this item is committed to going somewhere
+    // else).
+    //
+    // The set is the DRAG PAYLOAD's own answer (dragUriListFor): the whole
+    // selection when the pressed row is part of it, otherwise just that row. A
+    // highlight that named a different set from the one that would move is worse
+    // than none.
+    property var dragSourcePaths: []
+    readonly property real dragSourceOpacity: 0.45
+    function isDragSource(p) {
+        const q = String(p ?? "");
+        for (let i = 0; i < root.dragSourcePaths.length; i++) {
+            if (String(root.dragSourcePaths[i]) === q)
+                return true;
+        }
+        return false;
+    }
+    function beginDragSources(path) {
+        const p = String(path ?? "");
+        if (p.length === 0) return;
+        root.dragSourcePaths = (root.selection.indexOf(p) !== -1 && root.selection.length > 1)
+            ? root.selection.slice()
+            : [p];
+    }
+    // Unconditional: a drag that was dropped, cancelled with Escape or aborted by
+    // the compositor all end the same way, and a stale dim that never clears is
+    // a row the user cannot read.
+    function endDragSources() {
+        if (root.dragSourcePaths.length === 0) return;
+        root.dragSourcePaths = [];
     }
     // Column widths: sized by DRAGGING the divider before a column (see
     // HeaderCell's handle) and kept in a small JSON file beside the drive-letter
@@ -4860,6 +5902,10 @@ Item {
     // have all to itself, and without it the name read as hanging off the path
     // box -- the "title spacing" that was wrong.
     readonly property int addressBarHeight: 26 + 8 + 48
+        // The transfer line is a real row in the header rather than something
+        // painted over the name, so the bar has to grow by exactly its height
+        // while it is up and shrink back when the copy ends.
+        + (root.transferRunning ? root.transferLineHeight : 0)
     // The strip's own bottom edge to the bar's rectangle: where the tab
     // baseline hairline hangs (see tabBaseline in the address bar). ONE name
     // for both, so the line can never drift away from the margin it marks.
@@ -5111,13 +6157,35 @@ Item {
                             }
                         }
                     }
+
+                    // The "+" is the next tab, and it lives at the END OF THE
+                    // TABS, not against the window's right edge (asked
+                    // 2026-11-12). It used to be the RowLayout's second item
+                    // after a fill-width lane, so it was pushed as far from
+                    // the tabs as the window allowed -- two tabs open and the
+                    // button sat a screen away from them. Here it is the last
+                    // chip's neighbour, it scrolls with the chips, and the
+                    // lane's contentWidth (built from this Row's implicit
+                    // width) already accounts for it.
+                    //
+                    // 26x26, the chips' own height: in a plain Row the button
+                    // keeps its own size, and the component's 34x30 default
+                    // would make the Row 30 tall inside a 26 px lane -- the
+                    // bottom four pixels of the "+" would be cut off.
+                    IconButton {
+                        id: newTabBtn
+                        symbol: "add"
+                        tip: Translation.tr("New tab")
+                        visible: root.tabsAvailable
+                        width: 26
+                        height: 26
+                        onActivated: root.newTab("")
+                    }
                 }
             }
-            // Capped at the lane's own height: an unconstrained button can
-            // make the row taller than the chips, the row then centres them,
-            // and a centred chip has air under it -- which is exactly the
-            // floating the baseline was asked to fix.
-            IconButton { id: newTabBtn; symbol: "add"; tip: Translation.tr("New tab"); visible: root.tabsAvailable; Layout.maximumHeight: 26; onActivated: root.newTab("") }
+            // The "+" used to stand here, on the far side of a fill-width
+            // lane. It is now the last child of the chips' Row above (see
+            // there), which is what puts it next to the tabs.
         }
 
         // ── Address bar ────────────────────────────────────────────────
@@ -5621,6 +6689,74 @@ Item {
                         }
                     }
                 }
+
+                // ── The transfer line ───────────────────────────────────
+                // Under the name, in the header: a copy that takes a minute
+                // has to say so where the eye already is, not in the bar at
+                // the bottom of the window. Three things on one row -- what is
+                // moving, how many bytes of how many, and the percentage --
+                // over a full-width hairline that fills as the bytes land.
+                Item {
+                    id: transferLine
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: root.transferRunning ? root.transferLineHeight : 0
+                    visible: root.transferRunning
+                    implicitHeight: root.transferLineHeight
+
+                    StyledText {
+                        id: transferLineText
+                        anchors.left: parent.left
+                        anchors.leftMargin: 10
+                        anchors.right: transferPercent.left
+                        anchors.rightMargin: 12
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.verticalCenterOffset: -1
+                        text: {
+                            const total = root.transferSizeText(root.transferTotal);
+                            const done = root.transferDone > 0
+                                ? root.transferSizeText(root.transferDone) + " / " + total
+                                : total;
+                            let s = (root.transferLabel.length > 0 ? root.transferLabel + " · " : "") + done;
+                            if (root.transferItemsTotal > 1)
+                                s = (root.transferItemsDone + 1) + "/" + root.transferItemsTotal + " · " + s;
+                            return s;
+                        }
+                        font.pixelSize: Appearance.font.pixelSize.smallest
+                        font.letterSpacing: 1.2
+                        font.weight: Font.Medium
+                        color: Appearance.colors.colSubtext
+                        elide: Text.ElideMiddle
+                    }
+                    StyledText {
+                        id: transferPercent
+                        anchors.right: parent.right
+                        anchors.rightMargin: 10
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.verticalCenterOffset: -1
+                        text: Math.round(root.transferFraction * 100) + "%"
+                        font.pixelSize: Appearance.font.pixelSize.smallest
+                        font.letterSpacing: 1.2
+                        font.weight: Font.Medium
+                        color: Appearance.colors.colOnLayer0
+                    }
+                    Rectangle {
+                        id: transferBar
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        height: 2
+                        color: Appearance.colors.colOutlineVariant
+                        Rectangle {
+                            id: transferBarFill
+                            anchors.left: parent.left
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            width: parent.width * root.transferFraction
+                            color: Appearance.colors.colPrimary
+                            Behavior on width { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+                        }
+                    }
+                }
             }   // the ColumnLayout: micro row over title row
         }
 
@@ -5825,19 +6961,29 @@ Item {
                         // for the first pin -- a heading with nothing under
                         // it is not a section.
                         NavHeading {
+                            id: pinnedHeading
                             visible: root.pinnedPlaces.length > 0
+                            icon: "push_pin"
                             text: Translation.tr("Pinned")
                         }
+                        // A pin's order is the order you put it in, so these
+                        // rows can be picked up and dropped somewhere else in
+                        // the section (see NavRow's reorderable). Only this
+                        // list asks for it: Quick access and the drives are
+                        // not a list the user wrote.
                         Repeater {
                             id: pinnedRepeater
                             model: root.pinnedPlaces
                             delegate: NavRow {
                                 id: pinnedRow
                                 required property var modelData
+                                required property int index
                                 label: root.pinnedLabel(modelData)
                                 symbol: "folder"
                                 path: modelData
                                 active: !root.atThisPc && root.folderPath === modelData
+                                reorderable: true
+                                pinIndex: index
                                 onActivated: root.navigateTo(modelData)
                                 // Right-click: the folder's OWN menu, the
                                 // same one a row in the pane gets -- Unpin is
@@ -5846,7 +6992,7 @@ Item {
                             }
                         }
 
-                        NavHeading { text: Translation.tr("Quick access") }
+                        NavHeading { id: quickHeading; icon: "bolt"; text: Translation.tr("Quick access") }
                         Repeater {
                             id: quickRepeater
                             model: root.quickPlaces
@@ -5902,6 +7048,28 @@ Item {
                             }
                         }
                         Item { Layout.preferredHeight: 6 }
+                    }
+
+                    // ── Where a carried pin would land ────────────────
+                    // ONE line for the whole section, not one per row: the rows
+                    // slide out of the way as you drag, so a line drawn inside
+                    // a row would ride along with the very row it is meant to
+                    // sit between. As a child of the Flickable it scrolls with
+                    // the rail and takes no part in the column's layout.
+                    Rectangle {
+                        id: pinDropLine
+                        objectName: "pin-drop-line"
+                        visible: root.pinDragging
+                        z: 20
+                        x: 6
+                        width: navColumn.width - 12
+                        height: 2
+                        radius: 1
+                        // The accent, not the selection's grey: this is the
+                        // gap a moving thing will fall into, and the same
+                        // accent the file pane already marks its own drops in.
+                        color: Appearance.colors.colPrimary
+                        y: root.pinGapY()
                     }
                 }
             }
@@ -5994,6 +7162,29 @@ Item {
                             root.clearDropTarget();
                             root.receiveDrop(drop.urls, dest, drop.action === Qt.MoveAction);
                         }
+                    }
+                    // ── The folder itself, as a target ──────────────────
+                    //
+                    // Most of the pane is neither a folder row nor a tile, and a
+                    // drag over it means "into the folder on screen" (the
+                    // DropArea above already says so) -- but until now that
+                    // answer had no picture, so dragging a file across the list
+                    // toward a folder row passed over a completely silent area
+                    // and the only cue was the row lighting up at the end. This
+                    // outlines the pane while it is the destination, and goes
+                    // away the instant the pointer is over a folder.
+                    //
+                    // It takes no mouse input (a Rectangle does not), so it
+                    // cannot get between a drag and the DropArea underneath it.
+                    Rectangle {
+                        anchors.fill: parent
+                        anchors.margins: 3
+                        z: 100
+                        visible: root.isDropTarget(root.currentFolderPath())
+                        radius: Appearance.rounding.small
+                        color: "transparent"
+                        border.width: 2
+                        border.color: root.dropRailColor
                     }
 
                     ColumnLayout {
@@ -6193,11 +7384,27 @@ Item {
                                 DragHandler {
                                     target: null
                                     acceptedButtons: Qt.LeftButton
-                                    onActiveChanged: rowRoot.Drag.active = active
+                                    onActiveChanged: {
+                                        rowRoot.Drag.active = active;
+                                        // Only a drag that actually STARTED dims
+                                        // anything, and it stops dimming when the
+                                        // drag ends however it ends -- dropped,
+                                        // cancelled, or taken by the compositor.
+                                        // A plain press does neither. (See
+                                        // dragSourcePaths.)
+                                        if (active) root.beginDragSources(modelData.path);
+                                        else root.endDragSources();
+                                    }
                                 }
 
-                                Component.onCompleted: root.requestDirSize(modelData)
-                                onModelDataChanged: root.requestDirSize(modelData)
+                                Component.onCompleted: {
+                                    root.requestDirSize(modelData)
+                                    root.queueDragCard(modelData.path)
+                                }
+                                onModelDataChanged: {
+                                    root.requestDirSize(modelData)
+                                    root.queueDragCard(modelData.path)
+                                }
                                 // The listing this row belongs to has been
                                 // re-read: see requestDirSize.
                                 Connections {
@@ -6226,7 +7433,7 @@ Item {
                                     // faded -- the marker under them (the wash and
                                     // the rail) is NOT, because where the eye is
                                     // and where the item is going are two answers.
-                                    opacity: root.isCut(modelData.path) ? root.cutOpacity : 1
+                                    opacity: rowRoot.contentOpacity
                                     Behavior on opacity {
                                         NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
                                     }
@@ -6358,11 +7565,17 @@ Item {
                                     anchors.topMargin: root.selectionGap
                                     anchors.bottomMargin: root.selectionGap
                                     radius: root.selectionRadius
-                                    color: root.isSelected(modelData.path)
-                                        ? root.selectionWashColor
-                                        : (rowHover.containsMouse ? root.selectionWashHoverColor : "transparent")
+                                    // ── Drop target: the folder that would take it ──
+                                    // "What happens if I let go" is the one state in
+                                    // this window worth the accent colour (see
+                                    // dropWashColor). Only a folder can be one -- the
+                                    // row's DropArea is disabled for files -- so the
+                                    // wash appears exactly when the drop would go
+                                    // INSIDE something.
+                                    color: rowRoot.markColor
                                     Rectangle {
                                         visible: root.isSelected(modelData.path)
+                                            || (modelData.isDir && root.isDropTarget(modelData.path))
                                         anchors.left: parent.left
                                         anchors.top: parent.top
                                         anchors.bottom: parent.bottom
@@ -6371,7 +7584,12 @@ Item {
                                         anchors.bottomMargin: 3
                                         width: root.selectionRail
                                         radius: width / 2
-                                        color: root.selectionRailColor
+                                        // The rail carries the accent while a drop is
+                                        // pending, so a folder under the pointer is
+                                        // distinguishable from a folder that happens
+                                        // to be selected.
+                                        color: (modelData.isDir && root.isDropTarget(modelData.path))
+                                            ? root.dropRailColor : root.selectionRailColor
                                     }
                                 }
                                 // ── A name the column cut ──────────────────
@@ -6406,6 +7624,66 @@ Item {
                                     alternativeVisibleCondition: rowRoot.nameTipWanted
                                         && rowHover.containsMouse
                                 }
+                                // ── The blank tail of the name cell ──────────────
+                                // In the details list the name cell is the
+                                // FLEXIBLE column, so a short name leaves most of
+                                // it empty -- the strip between "4 jobs" and the
+                                // date column. That strip is folder background, not
+                                // file surface, and it used to lie: `rowHover`
+                                // covers the whole row, so a right-click out there
+                                // opened the FILE's menu (Open, Rename, Delete) and
+                                // a double-click OPENED the file. Aiming at empty
+                                // space and getting "Rename" on a folder you did not
+                                // mean to touch is how you rename the wrong thing.
+                                //
+                                // So the press is tested against the label's own
+                                // painted text: past the end of the name (by 4 px,
+                                // so the last glyph still belongs to it) and still
+                                // inside the cell is the folder's. A name cut by the
+                                // column (elided) has no tail -- the text runs to
+                                // the wall -- so `min(contentWidth, width)` makes
+                                // the range empty and the whole cell stays the
+                                // row's, which is right: there is nothing empty to
+                                // aim at.
+                                // The label's geometry as it is LAID OUT, for the
+                                // blank-tail probe: the range is only right if it
+                                // came from the painted text.
+                                function nameLabelMetrics() {
+                                    return {
+                                        left: rowNameLabel.mapToItem(rowRoot, 0, 0).x,
+                                        width: rowNameLabel.width,
+                                        content: rowNameLabel.contentWidth,
+                                        painted: rowNameLabel.paintedWidth
+                                    };
+                                }
+                                function nameBlankRange() {
+                                    const left = rowNameLabel.mapToItem(rowRoot, 0, 0).x;
+                                    const right = rowNameLabel.mapToItem(rowRoot, rowNameLabel.width, 0).x;
+                                    const textEnd = rowNameLabel.mapToItem(rowRoot,
+                                        Math.min(rowNameLabel.contentWidth, rowNameLabel.width), 0).x;
+                                    return [Math.max(left, textEnd + 4), right];
+                                }
+                                function inNameBlank(mx) {
+                                    const range = rowRoot.nameBlankRange();
+                                    return mx > range[0] && mx <= range[1];
+                                }
+                                // ── What this row PAINTS, named once ──────────────
+                                //
+                                // Two values the rest of the row binds to, and the
+                                // drop-feedback probe reads: the mark's colour and
+                                // the dim on the picture. Copied into a probe they
+                                // would be a second implementation that can drift;
+                                // named here they ARE what is drawn.
+                                readonly property color markColor:
+                                    (modelData.isDir && root.isDropTarget(modelData.path))
+                                        ? root.dropWashColor
+                                        : (root.isSelected(modelData.path)
+                                            ? root.selectionWashColor
+                                            : (rowHover.containsMouse ? root.selectionWashHoverColor : "transparent"))
+                                readonly property real contentOpacity:
+                                    (root.isCut(modelData.path) || root.isDragSource(modelData.path))
+                                        ? root.dragSourceOpacity : 1
+
                                 MouseArea {
                                     id: rowHover
                                     anchors.fill: parent
@@ -6453,6 +7731,20 @@ Item {
                                         root.beginDrag(modelData.path);
                                     }
                                     onClicked: mouse => {
+                                        // A press in the blank tail of the name cell
+                                        // belongs to the FOLDER: the folder's own
+                                        // menu, which is where New folder, New file
+                                        // and Paste live (see nameBlankRange). The
+                                        // row is deliberately NOT selected for it --
+                                        // the point of empty space is that it is not
+                                        // any file.
+                                        if (mouse.button === Qt.RightButton && rowRoot.inNameBlank(mouse.x)) {
+                                            // Folder ground AND this row: see
+                                            // rowTailMenu, which is where Rename
+                                            // went missing from this strip.
+                                            root.openRowTailMenuAt(rowHover, mouse.x, mouse.y, modelData.path);
+                                            return;
+                                        }
                                         if (mouse.button === Qt.RightButton) {
                                             if (!root.isSelected(modelData.path)) root.selectIndex(index, false, false);
                                             root.openMenuAt(rowHover, mouse.x, mouse.y, modelData.path);
@@ -6465,7 +7757,18 @@ Item {
                                     // The double-click contract, in one place: the
                                     // window opens, the picker only selects.
                                     onDoubleClicked: mouse => {
-                                        if (mouse.button === Qt.LeftButton) root.activate(index);
+                                        if (mouse.button !== Qt.LeftButton) return;
+                                        // Double-tapping that same background opens
+                                        // the folder's menu where the pointer is, so
+                                        // adding a file or a folder needs no aim at
+                                        // the command bar. Same menu as the
+                                        // right-click above, by design: the strip is
+                                        // the folder, and both gestures say so.
+                                        if (rowRoot.inNameBlank(mouse.x)) {
+                                            root.openFolderMenuAt(rowHover, mouse.x, mouse.y);
+                                            return;
+                                        }
+                                        root.activate(index);
                                     }
                                 }
                                 // ── Dropping ONTO this row ─────────────────
@@ -6555,6 +7858,13 @@ Item {
                                 required property int index
                                 required property var modelData
 
+                                // A tile is a row on screen like any other, so
+                                // its card is photographed as it appears rather
+                                // than left to a hover that a quick press never
+                                // gives it (see queueDragCard).
+                                Component.onCompleted: root.queueDragCard(modelData.path)
+                                onModelDataChanged: root.queueDragCard(modelData.path)
+
                                 // Same drag as the details row, and for the
                                 // same reason it hangs off the tile and is
                                 // started by a DragHandler: the payload is the
@@ -6569,8 +7879,26 @@ Item {
                                 DragHandler {
                                     target: null
                                     acceptedButtons: Qt.LeftButton
-                                    onActiveChanged: tileRoot.Drag.active = active
+                                    onActiveChanged: {
+                                        tileRoot.Drag.active = active;
+                                        // Same source dimming as the details row.
+                                        if (active) root.beginDragSources(modelData.path);
+                                        else root.endDragSources();
+                                    }
                                 }
+
+                                // The tile's two painted values, named once: the
+                                // same pair as the details row, read by the same
+                                // probe (see rowRoot.markColor).
+                                readonly property color markColor:
+                                    (modelData.isDir && root.isDropTarget(modelData.path))
+                                        ? root.dropWashColor
+                                        : (root.isSelected(modelData.path)
+                                            ? root.selectionWashColor
+                                            : (tileHover.containsMouse ? root.selectionWashHoverColor : "transparent"))
+                                readonly property real contentOpacity:
+                                    (root.isCut(modelData.path) || root.isDragSource(modelData.path))
+                                        ? root.dragSourceOpacity : 1
 
                                 width: tilesView.cellWidth - 8
                                 height: tilesView.cellHeight - 8
@@ -6587,7 +7915,7 @@ Item {
                                     // The tile half of the cut fade (see the
                                     // details row): the picture and the title, not
                                     // the marker under them.
-                                    opacity: root.isCut(modelData.path) ? root.cutOpacity : 1
+                                    opacity: tileRoot.contentOpacity
                                     Behavior on opacity {
                                         NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
                                     }
@@ -6632,6 +7960,17 @@ Item {
                                                     // pictures rather than a row of
                                                     // identical film icons.
                                                     videoFrame: root.previewKindFor(modelData) === "video"
+                                                    // A PDF is its first page; a
+                                                    // document is its opening text
+                                                    // on a page. Both rendered by
+                                                    // scripts/system/file-thumbnail.sh
+                                                    // into the same cache.
+                                                    pdfPage: root.previewKindFor(modelData) === "pdf"
+                                                    docPage: {
+                                                        const k = root.previewKindFor(modelData);
+                                                        return k === "office" || k === "markdown"
+                                                            || root.docPreviewExts.indexOf(root.suffixOf(modelData.name)) !== -1;
+                                                    }
                                                     fillMode: Image.PreserveAspectFit
                                                 }
                                             }
@@ -6689,11 +8028,13 @@ Item {
                                     anchors.fill: parent
                                     anchors.margins: 1
                                     radius: Appearance.rounding.small
-                                    color: root.isSelected(modelData.path)
-                                        ? root.selectionWashColor
-                                        : (tileHover.containsMouse ? root.selectionWashHoverColor : "transparent")
+                                    // Same rule as the details row's marker: the
+                                    // accent means "a drop would land in here", and
+                                    // only a folder tile can wear it.
+                                    color: tileRoot.markColor
                                     Rectangle {
                                         visible: root.isSelected(modelData.path)
+                                            || (modelData.isDir && root.isDropTarget(modelData.path))
                                         anchors.left: parent.left
                                         anchors.top: parent.top
                                         anchors.bottom: parent.bottom
@@ -6702,7 +8043,8 @@ Item {
                                         anchors.bottomMargin: 5
                                         width: root.selectionRail
                                         radius: width / 2
-                                        color: root.selectionRailColor
+                                        color: (modelData.isDir && root.isDropTarget(modelData.path))
+                                            ? root.dropRailColor : root.selectionRailColor
                                     }
                                 }
                                 MouseArea {
@@ -6769,11 +8111,13 @@ Item {
                             visible: !root.atThisPc && root.rows.length === 0
                             horizontalAlignment: Text.AlignHCenter
                             verticalAlignment: Text.AlignVCenter
-                            text: root.currentMtpVolume !== null
-                                ? root.mtpUnlockHint(root.currentMtpVolume.mtp)
-                                : ((root.filter.length > 0 && root.rawCount > 0)
-                                    ? Translation.tr("No items match your search")
-                                    : Translation.tr("This folder is empty"))
+                            text: root.listingSlow
+                                ? root.listingLine
+                                : (root.currentMtpVolume !== null
+                                    ? root.mtpUnlockHint(root.currentMtpVolume.mtp)
+                                    : ((root.filter.length > 0 && root.rawCount > 0)
+                                        ? Translation.tr("No items match your search")
+                                        : Translation.tr("This folder is empty")))
                             font.pixelSize: Appearance.font.pixelSize.small
                             color: Appearance.colors.colSubtext
                             // ── Empty space: the folder's own menu ──────────
@@ -7606,18 +8950,109 @@ Item {
                 anchors.leftMargin: 10
                 anchors.rightMargin: 10
                 spacing: 12
-                CutLabel {
+                // The count, the selection and the note -- or, while a read is
+                // still going, the turning glyph and the folder's name instead
+                // of all three: during the wait the count belongs to the folder
+                // we just left, and a number that is about somewhere else reads
+                // as an answer about this one.
+                RowLayout {
                     Layout.fillWidth: true
-                    text: {
-                        const n = root.rows.length;
-                        const sel = root.selection.length;
-                        let s = n + " " + (n === 1 ? Translation.tr("item") : Translation.tr("items"));
-                        if (sel > 0) s += " · " + sel + " " + Translation.tr("selected");
-                        if (root.statusNote.length > 0) s += " · " + root.statusNote;
-                        return s;
+                    spacing: 6
+                    MaterialSymbol {
+                        visible: root.listingSlow
+                        text: "progress_activity"
+                        iconSize: 13
+                        color: Appearance.colors.colSubtext
+                        RotationAnimation on rotation {
+                            running: root.listingSlow
+                            loops: Animation.Infinite
+                            from: 0
+                            to: 360
+                            duration: 900
+                        }
                     }
-                    font.pixelSize: Appearance.font.pixelSize.smallest
-                    color: Appearance.colors.colSubtext
+                    CutLabel {
+                        id: statusLabel
+                        Layout.fillWidth: true
+                        text: {
+                            if (root.listingSlow)
+                                return root.listingLine;
+                            const n = root.rows.length;
+                            const sel = root.selection.length;
+                            let s = n + " " + (n === 1 ? Translation.tr("item") : Translation.tr("items"));
+                            if (sel > 0) s += " · " + sel + " " + Translation.tr("selected");
+                            if (root.statusNote.length > 0) s += " · " + root.statusNote;
+                            return s;
+                        }
+                        font.pixelSize: Appearance.font.pixelSize.smallest
+                        color: Appearance.colors.colSubtext
+                    }
+                }
+                // ── What is running ────────────────────────────────────
+                //
+                // A copy in this window and an upload to the Drive mount are
+                // drawn the same way here: a glyph, what is being moved, how
+                // far, and a hairline that fills as the bytes land. When the
+                // size of the work is not known the bar is replaced by a
+                // turning glyph -- "working, amount unknown" is a state, not
+                // a failure to report one.
+                // A plain Row, not a RowLayout: this block has to take the
+                // WIDTH ITS TEXT NEEDS and nothing more, and a layout child
+                // given a maximum width but no content width takes the
+                // maximum (measured: 1024 px of mostly empty status bar for
+                // one job's 300 px of words). With a Row each label carries
+                // its own capped width, the row sums them, and the whole
+                // segment shrink-wraps beside the item count.
+                Row {
+                    id: progressStrip
+                    visible: root.progressItems.length > 0
+                    Layout.alignment: Qt.AlignVCenter
+                    spacing: 14
+                    Repeater {
+                        model: root.progressItems
+                        delegate: Row {
+                            spacing: 5
+                            MaterialSymbol {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: modelData.fraction >= 0 ? modelData.icon : "progress_activity"
+                                iconSize: 13
+                                color: Appearance.colors.colSubtext
+                                RotationAnimation on rotation {
+                                    running: modelData.fraction < 0
+                                    loops: Animation.Infinite
+                                    from: 0
+                                    to: 360
+                                    duration: 900
+                                }
+                            }
+                            CutLabel {
+                                anchors.verticalCenter: parent.verticalCenter
+                                // The wall: long names are cut here rather than
+                                // squeezing the item count off the other end.
+                                width: Math.min(implicitWidth, 250)
+                                text: root.progressItemText(modelData)
+                                font.pixelSize: Appearance.font.pixelSize.smallest
+                                color: Appearance.colors.colSubtext
+                            }
+                            Item {
+                                anchors.verticalCenter: parent.verticalCenter
+                                visible: modelData.fraction >= 0
+                                width: 34
+                                height: 3
+                                Rectangle {
+                                    anchors.fill: parent
+                                    radius: 1.5
+                                    color: CF.ColorUtils.transparentize(Appearance.colors.colOutline, 0.5)
+                                }
+                                Rectangle {
+                                    width: Math.round(parent.width * Math.max(0, Math.min(1, modelData.fraction)))
+                                    height: parent.height
+                                    radius: 1.5
+                                    color: Appearance.colors.colPrimary
+                                }
+                            }
+                        }
+                    }
                 }
                 StyledText {
                     text: root.storageText
@@ -7775,6 +9210,50 @@ Item {
         });
         return false;
     }
+    // ── Warming the rows on screen, not only the one under the cursor ────
+    //
+    // Hovering a row warms it, but the hand outruns the pointer: sweep the
+    // list quickly, press, and the row under the cursor was entered and left
+    // before its photograph came back. Qt takes the drag image at drag START,
+    // so that drag carries nothing at all and the hand looks empty -- the file
+    // still arrives, which is exactly why this reads as "there is no feedback"
+    // instead of as a broken drag. The only rows a press can reach are the ones
+    // on screen, so each row that appears is photographed as it appears, one at
+    // a time behind the same single-flight gate the hover uses.
+    property var dragWarmQueue: []
+    function queueDragCard(path) {
+        const p = String(path ?? "");
+        if (p.length === 0) return;
+        if (root.cachedCard(p).length > 0) return;
+        const queue = root.dragWarmQueue ?? [];
+        if (queue.indexOf(p) !== -1) return;
+        const next = queue.slice();
+        next.push(p);
+        root.dragWarmQueue = next;
+        root.pumpDragCard();
+    }
+    function pumpDragCard() {
+        const queue = root.dragWarmQueue ?? [];
+        // One photograph at a time: the card is a single shared item, so two
+        // grabs in flight would photograph the second name into the first
+        // file's picture.
+        if (root.dragGhostGrabPending) return;
+        if (queue.length === 0) return;
+        const next = String(queue[0]);
+        root.dragWarmQueue = queue.slice(1);
+        if (root.cachedCard(next).length > 0) {
+            root.pumpDragCard();
+            return;
+        }
+        root.warmDragCard(next);
+    }
+    // A grab landing -- or coming back empty -- opens the gate again, and that
+    // is what keeps the queue moving.
+    onDragGhostGrabPendingChanged: {
+        if (!root.dragGhostGrabPending)
+            root.pumpDragCard();
+    }
+    onDragGhostCacheChanged: root.pumpDragCard()
     // The press. Hands over a picture in the SAME event when one was warmed --
     // that is what makes the card follow the cursor -- and only falls back to
     // photographing on the spot when it was not (a keyboard-initiated drag, a
@@ -8235,6 +9714,73 @@ Item {
                     danger: true
                     label: Translation.tr("Replace")
                     onActivated: root.acceptSaveReplace()
+                }
+            }
+        }
+    }
+
+    // ── The collision dialog ────────────────────────────────────────────
+    // Three answers, and the words say what each one does to a FILE and to a
+    // FOLDER, because the same button has to mean something in both cases.
+    // Escape and Cancel are the same non-answer: nothing is written.
+    Popup {
+        id: conflictPopup
+        anchors.centerIn: parent
+        width: 520
+        padding: 14
+        visible: root.conflictAsking
+        modal: true
+        closePolicy: Popup.CloseOnEscape
+        onClosed: {
+            if (root.conflictAsking)
+                root.cancelConflict();
+        }
+        background: Rectangle {
+            radius: Appearance.rounding.normal
+            color: Appearance.m3colors.m3surfaceContainer
+            border.width: 1
+            border.color: CF.ColorUtils.transparentize(Appearance.colors.colOutlineVariant, 0.5)
+        }
+        contentItem: ColumnLayout {
+            spacing: 10
+            StyledText {
+                Layout.fillWidth: true
+                text: root.conflictTitle
+                font.pixelSize: Appearance.font.pixelSize.small
+                color: Appearance.colors.colOnLayer0
+                wrapMode: Text.Wrap
+            }
+            StyledText {
+                Layout.fillWidth: true
+                text: Translation.tr("Replace overwrites the files and swaps each folder whole. Keep both renames the files (“name - copy”) and adds only the files a folder is missing. Skip leaves everything as it is.")
+                font.pixelSize: Appearance.font.pixelSize.smallest
+                color: Appearance.colors.colSubtext
+                wrapMode: Text.Wrap
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.alignment: Qt.AlignRight
+                spacing: 8
+                ActionButton {
+                    implicitWidth: 96
+                    label: Translation.tr("Cancel")
+                    onActivated: root.cancelConflict()
+                }
+                ActionButton {
+                    implicitWidth: 100
+                    label: Translation.tr("Skip")
+                    onActivated: root.answerConflict("skip")
+                }
+                ActionButton {
+                    implicitWidth: 118
+                    label: Translation.tr("Keep both")
+                    onActivated: root.answerConflict("keep")
+                }
+                ActionButton {
+                    implicitWidth: 110
+                    danger: true
+                    label: Translation.tr("Replace")
+                    onActivated: root.answerConflict("replace")
                 }
             }
         }
@@ -8903,6 +10449,20 @@ Item {
     component NavHeading: Item {
         id: heading
         property string text: ""
+        // A small glyph before the words: the section's own sign. Empty by
+        // default, because most headings here are just a name -- the two
+        // sections that are a KIND of list are the two that say which kind.
+        property string icon: ""
+        // Read by the probe: the sign's own size, and where the words start
+        // because of it -- a glyph the font has not got draws nothing, and
+        // that is a number before it is a screenshot.
+        readonly property real iconWidth: headingIcon.visible ? headingIcon.width : 0
+        readonly property real labelLeft: headingLabel.x
+        // The hairline, as the probe reads it: a heading is the name of a
+        // CATEGORY, and the line under it is what says so.
+        readonly property bool dividerDrawn: headingDivider.visible
+        readonly property real dividerWidth: headingDivider.width
+        readonly property real dividerY: headingDivider.y
         property bool extra: false
         // A heading that can be FOLDED: the label plus a chevron pointing the
         // way the click will take it. Separate from `extra` (the Refresh glyph)
@@ -8927,9 +10487,24 @@ Item {
         // own box -- over its neighbours, which the suite reports as overBox.
         // The wall sits left of the chevron / Refresh glyph so the cut never
         // eats a control.
-        CutLabel {
+        MaterialSymbol {
+            id: headingIcon
             anchors.left: parent.left
             anchors.leftMargin: 8
+            anchors.verticalCenter: parent.verticalCenter
+            visible: heading.icon.length > 0
+            text: heading.icon
+            // Smaller than a row's icon: a heading is a label, and its glyph
+            // is a hint beside the word, not a thing to aim at.
+            iconSize: 12
+            color: Appearance.colors.colSubtext
+        }
+        CutLabel {
+            id: headingLabel
+            anchors.left: parent.left
+            // Past the glyph when there is one (8 + 12 + 3), at the pane's own
+            // margin when there is not.
+            anchors.leftMargin: heading.icon.length > 0 ? 23 : 8
             anchors.right: parent.right
             anchors.rightMargin: (heading.expandable || heading.extra) ? 26 : 8
             anchors.verticalCenter: parent.verticalCenter
@@ -8955,6 +10530,23 @@ Item {
             text: heading.expanded ? "expand_less" : "expand_more"
             iconSize: 16
             color: Appearance.m3colors.m3outline
+        }
+        // ── The rule under the name ────────────────────────────────────
+        // A small hairline, so the headings read as dividers between kinds of
+        // place instead of as rows that happen to be told apart by weight. It
+        // stops short of any control on the right (the fold's chevron, the
+        // Refresh glyph) and starts at the pane's text margin, which is where
+        // the words start -- the line belongs to the label, not to the box.
+        Rectangle {
+            id: headingDivider
+            anchors.left: parent.left
+            anchors.leftMargin: 8
+            anchors.right: parent.right
+            anchors.rightMargin: (heading.expandable || heading.extra) ? 26 : 8
+            anchors.bottom: parent.bottom
+            visible: heading.text.length > 0
+            height: 1
+            color: Appearance.colors.colOutlineVariant
         }
         MouseArea {
             id: headingHover
@@ -8996,6 +10588,72 @@ Item {
         // Read by the key layer: this is the row the ARROWS are on inside the
         // nav stop (see refreshFocusHighlight).
         property bool keyFocused: false
+        // ── Pick-up-and-move ──────────────────────────────────────────────
+        // Only the pinned rows are reorderable: they are the one list in this
+        // rail the user wrote, so their order is theirs to change. The row
+        // reports the gesture; root owns the landing slot, because only the
+        // list knows where its rows are.
+        property bool reorderable: false
+        property int pinIndex: -1
+        // This row is the one being carried. pointerY/gripY are where the
+        // pointer is in the column's coordinates and where inside the row it
+        // took hold, so the row follows the hand that grabbed it instead of
+        // jumping to the cursor.
+        property bool moving: false
+        property real pointerY: 0
+        property real gripY: 0
+        // A press that became a move must not also count as a click: the
+        // release that ends the move would otherwise navigate, throwing away
+        // the list being rearranged.
+        property bool movedSincePress: false
+        readonly property bool dropBefore: root.pinDragging && root.pinDropIndex === navRow.pinIndex
+        readonly property bool dropAfter: root.pinDragging
+            && root.pinDropIndex >= pinnedRepeater.count
+            && navRow.pinIndex === pinnedRepeater.count - 1
+        function armMove() {
+            if (!navRow.reorderable || root.pinDragIndex >= 0)
+                return;
+            navRow.moving = true;
+            root.beginPinDrag(navRow.pinIndex);
+            root.updatePinDrag(navRow.pointerY);
+        }
+        function endMove() {
+            holdArm.stop();
+            if (!navRow.moving)
+                return;
+            navRow.moving = false;
+            navRow.movedSincePress = true;
+            root.finishPinDrag();
+        }
+        // Above its neighbours while carried, so no sibling's wash or drop
+        // line can paint over the row in your hand.
+        z: navRow.moving ? 5 : 0
+        // A whisker larger while carried: enough to read as "this one is off
+        // the list", not enough to look like a different control.
+        scale: navRow.moving ? 1.03 : 1
+        Behavior on scale {
+            animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+        }
+        // Carried, not copied into the layout: the row keeps its slot while
+        // the pointer moves it, so the list never re-flows under the cursor.
+        //
+        // The rows that are NOT carried still move: everything between the
+        // pin's slot and the pointer slides one place over, which is what
+        // opens the gap the placeholder line sits in. That slide IS the drag
+        // animation -- and it is a translate, so the column never re-lays
+        // itself out mid-drag.
+        transform: Translate {
+            y: navRow.moving
+                ? (navRow.pointerY - navRow.gripY - navRow.y)
+                : root.pinShiftFor(navRow.pinIndex)
+            // The carried row has to sit exactly under the pointer, so its
+            // translation is not animated; a row merely getting out of the way
+            // glides, and gliding back when the drag ends.
+            Behavior on y {
+                enabled: !navRow.moving
+                animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+            }
+        }
         Layout.fillWidth: true
         implicitHeight: 30
         radius: Appearance.rounding.small
@@ -9032,13 +10690,13 @@ Item {
             radius: Appearance.rounding.small
             color: root.isDropTarget(navRow.path)
                 ? root.dropWashColor
-                : (navRow.keyFocused
+                : (navRow.moving || navRow.keyFocused
                     ? root.selectionWashStrongColor
                     : (navRow.active
                         ? root.selectionWashColor
                         : (navHover.containsMouse ? root.selectionWashHoverColor : "transparent")))
             Rectangle {
-                visible: navRow.active || navRow.keyFocused || root.isDropTarget(navRow.path)
+                visible: navRow.active || navRow.keyFocused || navRow.moving || root.isDropTarget(navRow.path)
                 anchors.left: parent.left
                 anchors.top: parent.top
                 anchors.bottom: parent.bottom
@@ -9049,6 +10707,13 @@ Item {
                 radius: width / 2
                 color: root.isDropTarget(navRow.path) ? root.dropRailColor : root.selectionRailColor
             }
+        }
+        // The arm-after-a-short-hold timer: see the note on onPressed below.
+        Timer {
+            id: holdArm
+            interval: 250
+            repeat: false
+            onTriggered: if (navHover.pressed) navRow.armMove()
         }
         MouseArea {
             id: navHover
@@ -9065,8 +10730,38 @@ Item {
             z: 2
             hoverEnabled: true
             acceptedButtons: Qt.LeftButton | Qt.RightButton
-            cursorShape: Qt.PointingHandCursor
+            cursorShape: navRow.moving ? Qt.ClosedHandCursor : Qt.PointingHandCursor
+            onPressed: mouse => {
+                navRow.movedSincePress = false;
+                if (!navRow.reorderable)
+                    return;
+                const p = navHover.mapToItem(navColumn, mouse.x, mouse.y).y;
+                navRow.pointerY = p;
+                navRow.gripY = p - navRow.y;
+                holdArm.restart();
+            }
+            // ONE press, held: that is the whole gesture.
+            //
+            // It used to be MouseArea::pressAndHold, which waits out the
+            // platform's long-press interval (~800 ms here) and gives up the
+            // moment the pointer moves a pixel -- so reaching for it kept
+            // missing and the way in became double-click-and-drag. This timer
+            // arms a quarter of a second after the press and does not care
+            // whether the hand has started moving yet: nothing else in this
+            // rail is a press-and-drag (this MouseArea takes the press, so the
+            // Flickable never scrolls from it). Let go without moving and it is
+            // still just a click.
+            onPositionChanged: mouse => {
+                const p = navHover.mapToItem(navColumn, mouse.x, mouse.y).y;
+                navRow.pointerY = p;
+                if (navRow.moving)
+                    root.updatePinDrag(p);
+            }
+            onReleased: navRow.endMove()
+            onCanceled: navRow.endMove()
             onClicked: mouse => {
+                if (navRow.movedSincePress)
+                    return;
                 if (mouse.button === Qt.RightButton)
                     navRow.contextRequested(mouse.x, mouse.y);
                 else
@@ -9533,6 +11228,114 @@ Item {
         return base.length > 0 ? base : q;
     }
 
+    // ── Moving a pin ──────────────────────────────────────────────────────
+    // The drag lives on the row (NavRow), the landing slot lives here: a row
+    // can say where the pointer is, but only the list knows where its rows
+    // are, and "between which two pins" is a question about the list.
+    //   pinDragIndex -- the pin being carried, -1 when nothing is
+    //   pinDropIndex -- the gap it would be inserted into, 0..count
+    property int pinDragIndex: -1
+    property int pinDropIndex: -1
+    readonly property bool pinDragging: root.pinDragIndex >= 0
+
+    function beginPinDrag(i) {
+        if (i < 0 || i >= root.pinnedPlaces.length) return;
+        root.pinDragIndex = i;
+        root.pinDropIndex = i;
+    }
+    // The gap under a point, in the column's own coordinates: the first row
+    // whose middle is below the pointer wins, and past the last middle is the
+    // end of the list. Measured from the rows' LAYOUT positions, not from where
+    // they are currently drawn: the rows slide while a drag is live, and an
+    // answer that moved with them would chase itself.
+    function pinIndexAt(columnY) {
+        const n = pinnedRepeater.count;
+        for (let i = 0; i < n; i++) {
+            const row = pinnedRepeater.itemAt(i);
+            if (!row) continue;
+            if (columnY < row.y + row.height / 2)
+                return i;
+        }
+        return n;
+    }
+    // How far a row is moved out of the way, in pixels. A gap is a boundary
+    // between two slots (0..count): dragging DOWN moves what is between the old
+    // slot and the gap up one place, dragging up moves it down one. The dragged
+    // row itself never shifts -- its own translation is the pointer's.
+    function pinShiftFor(i) {
+        if (!root.pinDragging || i < 0) return 0;
+        const from = root.pinDragIndex;
+        const gap = root.pinDropIndex;
+        if (i === from) return 0;
+        const row = pinnedRepeater.itemAt(0);
+        const step = (row ? row.height : 30) + navColumn.spacing;
+        if (gap > from && i > from && i <= gap - 1) return -step;
+        if (gap < from && i >= gap && i < from) return step;
+        return 0;
+    }
+    // Where the placeholder line is drawn: the middle of the gap the rows have
+    // opened, in the column's coordinates.
+    //
+    // Computed from the rows' LAYOUT positions plus the same shift the rows
+    // themselves use -- not by asking the rows where they are drawn. The rows
+    // GLIDE to their new places, so a line that measured the drawn geometry
+    // would be reading positions from halfway through an animation and would
+    // never be told when they finished: the numbers below are final the moment
+    // the gap changes.
+    function pinGapY() {
+        const n = pinnedRepeater.count;
+        if (n === 0) return 0;
+        const row0 = pinnedRepeater.itemAt(0);
+        const rowN = pinnedRepeater.itemAt(n - 1);
+        if (!row0 || !rowN) return 0;
+        const h = row0.height;
+        const step = h + navColumn.spacing;
+        const top = i => row0.y + i * step;
+        const gap = root.pinDropIndex;
+        if (gap <= 0) return top(0) + root.pinShiftFor(0) - 2;
+        if (gap >= n) return top(n - 1) + root.pinShiftFor(n - 1) + h + 1;
+        const beforeBottom = top(gap - 1) + root.pinShiftFor(gap - 1) + h;
+        const afterTop = top(gap) + root.pinShiftFor(gap);
+        return (beforeBottom + afterTop) / 2 - 1;
+    }
+    function updatePinDrag(columnY) {
+        if (root.pinDragIndex < 0) return;
+        root.pinDropIndex = root.pinIndexAt(columnY);
+    }
+    // The same slot updatePinDrag finds from a coordinate, set by number: the
+    // checks pull a pin without a pointer, so they name the gap.
+    // The same list, replaced whole: a caller that already knows the order it
+    // wants (a check restoring what it changed) does not have to fake a drag,
+    // and assigning it HERE means the app's own write is the one that lands,
+    // instead of a hand-edited state file losing a race with it.
+    function replacePinFolders(paths) {
+        const list = (Array.isArray(paths) ? paths : [])
+            .filter(p => typeof p === "string" && p.length > 0);
+        Persistent.states.fileManagerPinnedPlaces = [...list];
+    }
+    function setPinDrop(gap) {
+        if (!root.pinDragging) return;
+        root.pinDropIndex = Math.max(0, Math.min(pinnedRepeater.count, Math.round(Number(gap) || 0)));
+    }
+    function finishPinDrag() {
+        const from = root.pinDragIndex;
+        const gap = root.pinDropIndex;
+        root.pinDragIndex = -1;
+        root.pinDropIndex = -1;
+        if (from < 0 || gap < 0) return;
+        const list = [...root.pinnedPlaces];
+        if (from >= list.length) return;
+        // The gap was measured with the row still in the list; taking it out
+        // first shifts every gap after it down by one.
+        const [carried] = list.splice(from, 1);
+        const target = Math.max(0, Math.min(list.length, gap > from ? gap - 1 : gap));
+        if (target === from) return;
+        list.splice(target, 0, carried);
+        // A NEW array, for the reason togglePinFolder gives: the adapter sees
+        // the assignment, not a splice of the array it already holds.
+        Persistent.states.fileManagerPinnedPlaces = list;
+    }
+
     readonly property var quickPlaces: [
         { label: Translation.tr("Home"), icon: "home", path: root.homeDir },
         { label: Translation.tr("Desktop"), icon: "desktop_windows", path: root.homeDir + "/Desktop" },
@@ -9567,6 +11370,19 @@ Item {
             historyLength: root.history.length,
             tabs: root.tabs.length,
             activeTab: root.activeTab,
+            // ── The tab strip as it is drawn ────────────────────────────
+            // The "+" is the next tab and has to sit AT THE TABS (asked
+            // 2026-11-12), so the assertion is addX against the last chip's
+            // right edge -- meaningless without the lane's own geometry in the
+            // same breath, which is why they are reported together.
+            tabStrip: {
+                chips: tabsRepeater.count,
+                laneX: Math.round(tabLane.mapToItem(root, 0, 0).x),
+                laneWidth: Math.round(tabLane.width),
+                addX: Math.round(newTabBtn.mapToItem(root, 0, 0).x),
+                addWidth: Math.round(newTabBtn.width),
+                addVisible: newTabBtn.visible,
+            },
             clipboard: root.clipboard.length,
             // How many times this app has put something on the DESKTOP's
             // clipboard: the internal list above can be full while the desktop
@@ -9578,6 +11394,11 @@ Item {
             renaming: root.renaming,
             volumes: root.volumes.length,
             udisks: root.udisksAvailable,
+            // What the STATUS BAR is saying about the machine's work: this
+            // window's own copies and the Drive's uploads alike, drawn from
+            // progress-hub's status file. Reported here, next to the rest of
+            // the window's state, because the bar is part of the window.
+            progress: JSON.parse(root.probeProgressLine()),
             // The fast path, as two numbers: the udev socket is being read
             // (hotplugEvents) and what came off it was acted on
             // (hotplugRefreshes). A watcher that is running but forwarding
@@ -9585,6 +11406,19 @@ Item {
             hotplug: (hotplugWatch.running ? "on" : "off") + "/" + root.hotplugEvents
                 + "/" + root.hotplugRefreshes,
             statusNote: root.statusNote,
+            // The read, as the status bar draws it: the model's own status, the
+            // delayed flag that decides whether the wait is announced, and the
+            // LINE that is on screen right now -- the last one being the only
+            // way to check the wording without a screenshot.
+            listing: {
+                status: folderModel.status,
+                loading: root.listingLoading,
+                slow: root.listingSlow,
+                line: statusLabel.text
+            },
+            // The transfer line, as it is drawn: the numbers the header shows,
+            // whether it is up, and how wide its fill is against its track.
+            transfer: JSON.parse(root.probeTransferLine()),
             storage: root.storageText
         });
     }
@@ -10018,6 +11852,101 @@ Item {
             selectionBorder: root.selectionBorder,
             selectionRail: root.selectionRail,
             selectionLane: root.selectionLane,
+            // The transfer line itself, so a check can ask what the header is
+            // SAYING about a copy rather than only that a copy happened.
+            transfer: JSON.parse(root.probeTransferLine())
+        });
+    }
+    function probeTransferLine() {
+        return JSON.stringify({
+            running: root.transferRunning,
+            done: root.transferDone,
+            total: root.transferTotal,
+            fraction: root.transferFraction,
+            itemsDone: root.transferItemsDone,
+            itemsTotal: root.transferItemsTotal,
+            label: root.transferLabel,
+            error: root.transferError,
+            text: transferLineText.text,
+            visible: transferLine.visible,
+            height: Math.round(transferLine.height),
+            barWidth: Math.round(transferBarFill.width),
+            barTrack: Math.round(transferBar.width),
+            y: Math.round(transferLine.mapToItem(root, 0, 0).y),
+            barHeight: root.addressBarHeight,
+            command: (transferProc.command || []).join(" ")
+        });
+    }
+    // ── Reading progress-hub, and saying it in words ───────────────────────
+
+    // The hub's status file, as jobs. Anything malformed is ignored rather than
+    // thrown: this runs once a second, and one bad read must not leave the bar
+    // stuck on the previous second's numbers -- or worse, break the window.
+    function readProgressStatus(text) {
+        if (typeof text !== "string" || text.length === 0) {
+            root.progressJobsJSON = "";
+            root.progressJobs = [];
+            return;
+        }
+        let parsed;
+        try { parsed = JSON.parse(text); } catch (e) { return; }
+        const jobs = (parsed && Array.isArray(parsed.jobs)) ? parsed.jobs : [];
+        const stamp = JSON.stringify(jobs);
+        if (stamp === root.progressJobsJSON) return;
+        root.progressJobsJSON = stamp;
+        root.progressJobs = jobs;
+    }
+
+    // One job, as the bar says it: name, what exactly, how far, how much, how
+    // fast. The order is the answer to "is it loading, and how much" -- the
+    // percentage before the byte counts, because that is the number the eye
+    // wants, and the counts are the detail under it.
+    function progressItemText(item) {
+        if (!item) return "";
+        const parts = [];
+        if (item.label) parts.push(item.label);
+        if (item.detail) parts.push(item.detail);
+        if (item.state === "queued") {
+            parts.push(Translation.tr("waiting"));
+        } else if (item.state === "finishing") {
+            parts.push(Translation.tr("finishing"));
+        } else if (item.fraction >= 0) {
+            parts.push(Math.round(item.fraction * 100) + "%");
+        }
+        // Byte counts in the same decimal units as the free-space figure; other
+        // units (frames, items) as the plain numbers they are.
+        const bytes = item.unit === "bytes" || item.unit === "";
+        if (item.total > 0) {
+            parts.push(bytes
+                ? root.transferSizeText(item.done) + " / " + root.transferSizeText(item.total)
+                : Math.round(item.done) + " / " + Math.round(item.total));
+        } else if (item.done > 0) {
+            parts.push(bytes ? root.transferSizeText(item.done) : String(Math.round(item.done)));
+        }
+        if (item.speed > 0 && bytes)
+            parts.push(root.transferSizeText(item.speed) + "/s");
+        return parts.join(" \u00b7 ");
+    }
+
+    function probeProgressLine() {
+        const items = root.progressItems;
+        const shown = progressStrip.visible ? progressStrip.children : null;
+        return JSON.stringify({
+            jobs: items.length,
+            texts: items.map(i => root.progressItemText(i)),
+            fractions: items.map(i => Math.round(i.fraction * 1000) / 1000),
+            states: items.map(i => i.state),
+            visible: progressStrip.visible,
+            stripWidth: Math.round(progressStrip.width),
+            storageLeft: Math.round(progressStrip.mapToItem(root, progressStrip.width, 0).x),
+            windowWidth: Math.round(root.width),
+            file: root.progressJobsJSON.length > 0,
+            path: root.progressStatusPath,
+            // The bar's own fill widths, so a check can assert that what is
+            // drawn matches what is reported rather than trusting the text.
+            bars: progressStrip.children ? progressStrip.children.map(c => c.children
+                ? c.children.filter(x => x.height !== undefined)
+                    .map(x => Math.round(x.width)) : []) : []
         });
     }
     function quietHudLines() {
@@ -10628,6 +12557,38 @@ Item {
         root.pasteInto(dest);
         return String(root.clipboard.length);
     }
+    // The collision question as it stands: whether it is up, what it found,
+    // and what is waiting behind it. A check can read this while the dialog
+    // is open without driving a popup.
+    function probeConflictState() {
+        return JSON.stringify({
+            asking: root.conflictAsking,
+            policy: root.conflictPolicy,
+            entries: root.conflictEntries,
+            pending: root.pendingTransfer ? root.pendingTransfer.sources.length : 0
+        });
+    }
+    // Answer the question the way a click on the button would.
+    function probeConflictAnswer(policy) {
+        const want = String(policy ?? "");
+        if (!root.conflictAsking) return "not-asking";
+        if (["keep", "replace", "skip"].indexOf(want) === -1) return "bad-policy";
+        root.answerConflict(want);
+        return want;
+    }
+    // A paste that carries its own answer, so replace and skip can be driven
+    // from a terminal without a modal dialog in the way.
+    function probePastePolicy(dir, policy) {
+        const dest = (dir === undefined || dir === null || String(dir) === "")
+            ? root.currentFolderPath() : String(dir);
+        const ask = String(policy ?? "");
+        const want = ["keep", "replace", "skip"].indexOf(ask) === -1 ? "keep" : ask;
+        const cutting = root.clipboard.every(c => c.cut);
+        const sources = root.clipboard.map(c => c.path);
+        if (sources.length === 0) return "0";
+        root.runTransfer(sources, dest, cutting, cutting, want);
+        return String(sources.length);
+    }
     // The same reading for one row, by index. The first row of any sorted list
     // is a folder, and a folder has no size -- which is the one column whose
     // answer needs a file to read.
@@ -10681,10 +12642,79 @@ Item {
                 width: Math.round(item.width),
                 height: Math.round(item.height),
                 active: item.active === true,
-                hovered: item.hovered === true
+                hovered: item.hovered === true,
+                // The KEYBOARD's marker: a rail row can be the place you are on
+                // and the row the arrows were left on at the same time, and
+                // that pair is exactly what "two rows lit at once" looks like
+                // from here.
+                keyFocused: item.keyFocused === true
             });
         }
         return JSON.stringify({ rows: rows, visible: navPane.visible });
+    }
+    // The pinned section as it is drawn: the order (both the list and the rows
+    // on screen), and -- while a row is being carried -- which slot the drop
+    // would land in. Same reason as probeNavQuick: an order is a thing a check
+    // can assert, and a pointer is not a thing a check can press.
+    function probePinned() {
+        const rows = [];
+        for (let i = 0; i < pinnedRepeater.count; i++) {
+            const item = pinnedRepeater.itemAt(i);
+            if (!item) continue;
+            const at = item.mapToItem(root, 0, 0);
+            rows.push({
+                label: item.label,
+                path: item.path,
+                x: Math.round(at.x),
+                y: Math.round(at.y),
+                width: Math.round(item.width),
+                height: Math.round(item.height),
+                active: item.active === true,
+                moving: item.moving === true,
+                dropBefore: item.dropBefore === true,
+                dropAfter: item.dropAfter === true,
+                // The layout facts: whether the column is actually placing
+                // this row, or it is merely parented somewhere that lets it
+                // exist at 0,0 with no width.
+                implicitWidth: Math.round(item.implicitWidth),
+                visible: item.visible === true,
+                parentKind: String(item.parent).split("(")[0],
+                parentWidth: item.parent ? Math.round(item.parent.width) : -1,
+                parentKindExpected: String(navColumn).split("(")[0]
+            });
+        }
+        const sign = h => ({
+            symbol: h.icon,
+            glyphWidth: Math.round(h.iconWidth),
+            labelLeft: Math.round(h.labelLeft),
+            divider: h.dividerDrawn === true,
+            dividerWidth: Math.round(h.dividerWidth),
+            dividerY: Math.round(h.dividerY)
+        });
+        return JSON.stringify({
+            rows: rows,
+            order: [...root.pinnedPlaces],
+            dragging: root.pinDragging,
+            dragIndex: root.pinDragIndex,
+            dropIndex: root.pinDropIndex,
+            visible: navPane.visible,
+            headingDrawn: navPane.visible && root.pinnedPlaces.length > 0,
+            // The two headings' signs: which glyph, how wide it came out, and
+            // where the words start. 0 of glyph beside a 23px label start is
+            // what a missing glyph would look like from here.
+            sections: { pinned: sign(pinnedHeading), quick: sign(quickHeading) },
+            // The placeholder line as it is drawn: visible, where, and in what
+            // colour -- the three answers to "is there a line between the
+            // rows", which is a question a number can carry.
+            line: {
+                visible: pinDropLine.visible === true,
+                // In the same coordinates as the rows above, so a check can
+                // compare the line against them without knowing the pane's
+                // own offset.
+                y: Math.round(pinDropLine.mapToItem(root, 0, 0).y),
+                color: String(pinDropLine.color)
+            }
+        });
     }
     // The navigation pane as drawn: the drive rows the pane is showing, the
     // order they are in, and whether the folded ones are on screen at all.
@@ -10726,7 +12756,7 @@ Item {
         // crumb's centre is the LABEL drawn over the crumb's MouseArea: the
         // label sits on top, does not accept mouse events, and the click falls
         // straight through to the MouseArea under it. A real pointer has done
-        // exactly that (clicking the crumb walked to /home/user), so the
+        // exactly that (clicking the crumb walked to the home folder), so the
         // question this answers is "is a MouseArea in the way or under it",
         // not "is the topmost child the MouseArea itself".
         function holdsClick(item) {
@@ -10787,6 +12817,43 @@ Item {
             shown: items.length,
             hidden: pathBox.crumbFit.hidden
         });
+    }
+    // ── Where each row's blank tail begins ───────────────────────────────
+    //
+    // The numbers `inNameBlank` compares a press against, read straight off the
+    // delegates that are on screen. Clicking empty space cannot be exercised
+    // from here -- this compositor takes no synthetic clicks -- so the geometry
+    // the hit test uses is what gets reported, rather than a copy of it. A row
+    // with no tail (name cut by the column) reports a 0 px range, which is the
+    // "nothing empty to aim at" case.
+    // The tail menu, composed exactly as the right-click composes it -- read
+    // through probeMenu so "Rename is in it, and enabled" is answered by the
+    // menu the app would really open.
+    function probeTailMenu(name) {
+        const p = root.currentFolderPath() + "/" + String(name ?? "");
+        return JSON.stringify(root.rowTailMenu(p).filter(i => i && i.id !== undefined)
+            .map(i => ({ id: i.id, label: i.label, enabled: i.enabled })));
+    }
+    function probeNameBlank() {
+        const content = detailsView.contentItem;
+        if (!content)
+            return "no details content";
+        const out = [];
+        for (const child of content.children) {
+            if (!child || typeof child.nameBlankRange !== "function")
+                continue;
+            const range = child.nameBlankRange();
+            const name = String(child.modelData?.name ?? "");
+            // The label's own numbers too: "the blank starts where the text ends"
+            // is only true if the range was measured off the painted text, and a
+            // contentWidth of 0 would put the whole cell in the blank.
+            const m = child.nameLabelMetrics ? child.nameLabelMetrics() : null;
+            out.push(`row ${child.index} "${name.slice(0, 30)}": blank x `
+                + `${Math.round(range[0])}..${Math.round(range[1])} (${Math.round(range[1] - range[0])} px wide)`
+                + (m ? ` | label x ${Math.round(m.left)} w ${Math.round(m.width)}`
+                    + ` content ${Math.round(m.content)} painted ${Math.round(m.painted)}` : ""));
+        }
+        return out.length > 0 ? out.join("\n") : "details list not visible";
     }
     function probeMenu() {
         return JSON.stringify(root.menuItems.map(i => ({ id: i.id, label: i.label, enabled: i.enabled })));
@@ -10937,6 +13004,11 @@ Item {
             // one that starts before its picture exists.
             ready: root.cachedCard(p).length > 0,
             cached: Object.keys(root.dragGhostCache ?? ({})).length,
+            // What is still waiting to be photographed: every row on screen is
+            // queued as it appears, so a press does not have to wait for a
+            // hover that may never happen.
+            queued: (root.dragWarmQueue ?? []).length,
+            pending: root.dragGhostGrabPending === true,
             // Where the hand holds it: the card's top-left, so it hangs off the
             // pointer's tip and travels with it.
             hotSpot: [root.dragGhostHotSpot.x, root.dragGhostHotSpot.y],
@@ -11010,6 +13082,65 @@ Item {
             rail: String(root.dropRailColor)
         });
     }
+    // `files probeDropFeedback <targetName> <sourceName>` -- what the list would
+    // PAINT while a drag from <sourceName> is over <targetName>, read off the
+    // live delegates rather than recomputed here: `mark` and `opacity` are the
+    // very properties the row binds to. Sets the state, reads it, puts it back,
+    // so running this on a window someone is using leaves no highlight behind.
+    //
+    // This is how the drag feedback is checked without a mouse: this compositor
+    // takes no synthetic drags, so "hold a file over a folder" cannot be
+    // performed, but the two answers it produces can be read.
+    function probeDropFeedback(targetName, sourceName) {
+        const folder = root.currentFolderPath();
+        const nameOf = v => String(v ?? "");
+        // "" means nothing at all, "." means the folder itself -- which is the
+        // pane's own destination (drop-pane), the state that draws the outline
+        // around the view.
+        const pathOf = v => nameOf(v) === "." ? folder
+            : (nameOf(v).length > 0 ? folder + "/" + nameOf(v) : "");
+        const desiredTarget = pathOf(targetName);
+        const desiredSource = pathOf(sourceName);
+
+        const savedTarget = root.dropTargetPath;
+        const savedSources = root.dragSourcePaths;
+        root.dropTargetPath = desiredTarget;
+        root.dragSourcePaths = desiredSource.length > 0 ? [desiredSource] : [];
+
+        const out = [];
+        const content = detailsView.visible ? detailsView.contentItem
+            : (tilesView.visible ? tilesView.contentItem : null);
+        if (content) {
+            for (const child of content.children) {
+                if (!child || child.modelData === undefined || child.markColor === undefined)
+                    continue;
+                out.push({
+                    name: String(child.modelData.name ?? ""),
+                    dir: child.modelData.isDir === true,
+                    mark: String(child.markColor),
+                    opacity: Math.round(Number(child.contentOpacity) * 100) / 100,
+                    target: root.isDropTarget(child.modelData.path),
+                    source: root.isDragSource(child.modelData.path)
+                });
+            }
+        }
+
+        // Read BEFORE the state is put back: the pane's answer is part of what
+        // was asked, and a restore followed by the question would always say
+        // "not lit" no matter what the drag was over.
+        const paneLit = root.isDropTarget(root.currentFolderPath());
+
+        root.dropTargetPath = savedTarget;
+        root.dragSourcePaths = savedSources;
+        return JSON.stringify({
+            target: desiredTarget, source: desiredSource,
+            wash: String(root.dropWashColor), rail: String(root.dropRailColor),
+            // The pane's own outline: true when the drop would land in the folder
+            // on screen rather than inside a folder row.
+            paneLit: paneLit,
+            rows: out
+        });
+    }
     // Every destination, walked off the LIVE item tree rather than counted in
     // the source: a DropArea that was declared and never enabled looks exactly
     // like one that is not there, and only the running tree can tell the two
@@ -11072,6 +13203,12 @@ Item {
     Component.onCompleted: {
         root.loadMountNames();
         root.loadColumnWidths();
+        // Before the first listing: a network folder read by an earlier run is
+        // drawn from this instead of from the mount.
+        root.loadRemoteCache();
+        // BEFORE history: the model is deliberately empty until this picks the
+        // listing route, and currentFolderPath() reads the route's answer.
+        root.beginListing(root.path);
         root.history = [root.currentFolderPath()];
         root.historyIndex = 0;
         // The folder this app was started in may have a view of its own.

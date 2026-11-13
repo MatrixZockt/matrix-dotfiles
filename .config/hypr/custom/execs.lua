@@ -170,3 +170,44 @@ hl.exec_cmd("hyprctl setcursor Bibata-Modern-Ice 24")
 -- The wrapper keeps it single-instance across config reloads, and no-ops
 -- silently until hyprpolkit-agent is actually installed.
 hl.exec_cmd("$HOME/.config/hypr/custom/scripts/polkit-agent.sh &")
+
+-- Panel care: cap the OLED's peak drive, every session.
+--
+-- The display is an OLED, so a sustained large bright field is cumulative wear
+-- rather than free light -- a document page or a light-mode app left open is
+-- real. custom/scripts/panel-care.py installs a screen shader that compresses
+-- highlights into 0.90 and leaves everything below 0.72 exactly as it was, so
+-- the dark desktop is untouched and only the brightest thing on screen is
+-- given up. SUPER+SHIFT+O turns it off; SUPER+SHIFT+ALT+O runs the uniform wash
+-- that evens out a ghost once it has appeared.
+--
+-- File scope, not a `hyprland.start` hook -- see the note at the top of this
+-- file, which is why the shell launch lives here too. `on` is idempotent: it
+-- records the shader it replaced once, so running it on every reload can never
+-- lose the original. It also heals a wash whose process was killed mid-run,
+-- which is the case worth having a login-time call for at all: the alternative
+-- is a grey screen nobody can explain.
+hl.exec_cmd("$HOME/.config/hypr/custom/scripts/panel-care.py on")
+
+-- ── Dictation: hold SUPER alone to talk ───────────────────────────────────
+-- The detector is NOT a Hyprland bind on purpose (see custom/keybinds.lua):
+-- binds on SUPER fire for chords too, and this build's Lua bind drops
+-- `long_press`. dictate-daemon.py reads the keyboards directly, so SUPER+Q and
+-- every other SUPER gesture stay exactly as they were, and it only arms when
+-- SUPER is held ALONE.
+--
+-- OWNERSHIP MOVED TO SYSTEMD (2026-11-09). This file used to spawn both
+-- processes itself, which covered login and config reloads -- and nothing else.
+-- When systemd-oomd killed the process group during a running session, there
+-- was no login and no reload to re-run these lines, and dictation stayed dead
+-- without a word of error. dictate-server.service and dictate-daemon.service
+-- (systemd --user, Restart=always) are now the owners: they start at login, at
+-- default.target, and come back within a second of being OOM-killed or
+-- crashing. The `start` below is only an idempotent nudge for the case of a
+-- reload right after the units were (re)installed -- `systemctl --user start`
+-- on a running unit is a no-op, so a reload can never stack a second recorder.
+-- The daemon keeps its pidfile guard, and the server checks the port, so even a
+-- nudge that raced a start is harmless. Logs: journalctl --user -u dictate-daemon
+-- -u dictate-server (the daemon also keeps daemon.log under
+-- $XDG_RUNTIME_DIR/ii-dictate/).
+hl.exec_cmd("systemctl --user start dictate-server.service dictate-daemon.service")

@@ -217,10 +217,10 @@ fi
 # ── The reload just handed the panel the WRONG refresh rate ─────────────────
 # A reload re-applies custom/general.lua's monitor rule, which asks for the
 # panel's PREFERRED mode -- 240 Hz. The owner's rule is the opposite: the
-# refresh follows the POWER MODE (power-saver 60 Hz, balanced/performance the
-# panel's preferred) and moves at no other time. So on power-saver this script
-# would leave a 60 Hz panel at 240 Hz until power-autoswitch's drift check
-# noticed, up to 30 s later.
+# refresh follows the POWER PROFILE (power-saver 60 Hz, balanced 120 Hz, and
+# performance the panel's preferred 240) and moves at no other time. So on
+# power-saver this script would leave a 60 Hz panel at 240 Hz until
+# power-autoswitch's drift check noticed, up to 30 s later.
 #
 # Asking that same script for the rate is the fix, and it is deliberately a
 # refresh-only pass: no CPU cap, no profile write, so no pkexec and no password

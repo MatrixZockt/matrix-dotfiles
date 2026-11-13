@@ -80,7 +80,7 @@ LAUNCHER = os.path.join(SHELL_DIR, "scripts/launch/filemanager.sh")
 # `readlink -f` before it computes the QML it execs, so on a machine whose
 # ~/.config is a symlink into a dotfiles repo the picker's argv carries the
 # REPO path (measured here: argv says
-# /home/user/hyprland/.config/quickshell/ii/filemanager-picker.qml) while
+# ~/hyprland/.config/quickshell/ii/filemanager-picker.qml) while
 # this side holds the ~/.config one. Compared unresolved, the match is simply
 # never true: picker_alive() reports "never came up" about a dialog that is on
 # screen, and at STARTUP_GRACE the request is answered cancelled and the job
@@ -89,6 +89,65 @@ LAUNCHER = os.path.join(SHELL_DIR, "scripts/launch/filemanager.sh")
 # mean the same file, so both are resolved before they are compared.
 PICKER_QML = os.path.realpath(os.path.join(SHELL_DIR, "filemanager-picker.qml"))
 POLL_TIMEOUT = 600.0  # give up on the picker after 10 minutes
+
+# ── ONE dialog, and no duplicates of it ──────────────────────────────────────
+#
+# A picker is a whole Quickshell instance: it takes a second or two to come up,
+# and until this pair of guards existed nothing stopped a second one from being
+# spawned on top of the first. The reported failure was exactly that: a download
+# where the dialog was slow to appear, five clicks on the button, and then FIVE
+# dialogs arriving together, each behind the other, none of them the one being
+# answered.
+#
+# Two rules, and between them the pile cannot form:
+#
+#   * PICKER_SLOT -- one picker process at a time. A request that arrives while
+#     a dialog is up waits for it instead of opening a second dialog under it,
+#     and gets its turn when that dialog is answered. (The order among requests
+#     that arrived at the same moment is not promised -- Python's lock does not
+#     define one. What is promised, and was the bug, is never two at once.)
+#   * DEDUPE -- the same request twice within a few seconds is one request. A
+#     re-click on "Save" while the first dialog is still coming up is a person
+#     who cannot see it yet, not a second download, and it is answered cancelled
+#     at once instead of queued.
+#
+# Neither rule can hang a caller: a picker that dies is detected in
+# wait_result(), and a dialog nobody answers ends at POLL_TIMEOUT.
+PICKER_SLOT = threading.Lock()
+# Requests that are showing a dialog (or waiting to) RIGHT NOW, by meaning.
+# A second identical request while one is pending is a re-click, not a second
+# download -- measured here: the dialog needs ~1.6s to come up, which is
+# exactly the window in which someone clicks "Save" again.
+_pending_lock = threading.Lock()
+_pending_keys = {}
+
+
+def request_key(job, app_id):
+    """What the request MEANS -- who asked, for what, in which folder, under
+    which name and title. Never the token: the frontend makes a fresh one per
+    call, so keying on it would make every request unique."""
+    return (str(app_id or ""), job["op"], job["dir"], job["name"], job["title"])
+
+
+def claim_request(job, app_id):
+    """Claim the right to show this request. None means it is already showing."""
+    key = request_key(job, app_id)
+    now = time.time()
+    with _pending_lock:
+        # A request that never reached its reply (a backend killed mid-dialog)
+        # must not block its key forever.
+        for stale in [k for k, seen_at in _pending_keys.items()
+                      if now - seen_at > POLL_TIMEOUT + 60]:
+            _pending_keys.pop(stale, None)
+        if key in _pending_keys:
+            return None
+        _pending_keys[key] = now
+        return key
+
+
+def release_request(key):
+    with _pending_lock:
+        _pending_keys.pop(key, None)
 
 # "Show me this file", as opposed to "pick one for me": the well-known bus
 # name every app hands a URI to when it wants an item revealed. See the module
@@ -351,7 +410,7 @@ class FileChooserBackend:
     def handle_call(self, connection, sender, object_path, interface_name,
                     method_name, parameters, invocation):
         try:
-            handle, _app_id, _parent, title, options = parameters.unpack()
+            handle, app_id, _parent, title, options = parameters.unpack()
         except (ValueError, TypeError):
             invocation.return_error_literal(
                 "org.freedesktop.DBus.Error.InvalidArgs", "bad arguments")
@@ -389,12 +448,30 @@ class FileChooserBackend:
         }
         # The QML side only knows 'open' (single pick / folder pick) and
         # 'save' (pick folder + type a name); SaveFiles maps to save.
-        print(f"[ii-portal] {method_name} token={token} -> spawn picker",
+        # A second click on a Save button is not a second dialog: see
+        # claim_request.
+        claim = claim_request(job, app_id)
+        if claim is None:
+            print(f"[ii-portal] {method_name} token={token} -> duplicate of the "
+                  f"dialog already showing, refused", file=sys.stderr)
+            GLib.idle_add(self._deliver, invocation, token, {"cancelled": True})
+            return
+        print(f"[ii-portal] {method_name} token={token} -> queued for the picker",
               file=sys.stderr)
-        spawn_picker(job)
 
         def worker():
-            result = wait_result(token)
+            # The spawn happens INSIDE the slot, so "a picker is running" and
+            # "this request is being shown" are the same fact and no second
+            # dialog can be started on top of the first.
+            result = {"cancelled": True}
+            try:
+                with PICKER_SLOT:
+                    print(f"[ii-portal] {method_name} token={token} -> spawn picker",
+                          file=sys.stderr)
+                    spawn_picker(job)
+                    result = wait_result(token)
+            finally:
+                release_request(claim)
             GLib.idle_add(self._deliver, invocation, token, result)
             return False
 

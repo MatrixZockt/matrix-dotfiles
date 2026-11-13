@@ -182,12 +182,30 @@ Window {
             icon: "desktop_windows",
             component: "DisplayConfig.qml"
         },
+        // Notifications proper: which apps may notify, and what each app has
+        // been allowed or blocked from. A new slug ("notifications"), so every
+        // existing deep link keeps landing where it did.
         {
             name: Translation.tr("Notifications"),
-            slug: "services",
+            slug: "notifications",
             section: "",
             group: Translation.tr("System"),
             icon: "notifications",
+            component: "NotificationsConfig.qml"
+        },
+        // The page that used to be LABELLED "Notifications" while holding AI,
+        // music recognition, networking, resources, save paths, search, weather
+        // and work safety -- none of which is a notification. Only the label
+        // changed; the slug is still "services", so a deep link or a search hit
+        // that already named it still lands here. It used to be the second
+        // entry called "Notifications" in the rail, which is what two pages with
+        // that name would have been.
+        {
+            name: Translation.tr("Services"),
+            slug: "services",
+            section: "",
+            group: Translation.tr("System"),
+            icon: "settings_suggest",
             component: "ServicesConfig.qml"
         },
         {

@@ -29,8 +29,10 @@
 set -euo pipefail
 
 # Home of the invoking user, resolved through `sudo` too (SUDO_USER), so this
-# works no matter whose checkout it runs from.
-USER_HOME="$(getent passwd "${SUDO_USER:-$USER}" | cut -d: -f6)"
+# works no matter whose checkout it runs from. An already-set USER_HOME wins,
+# which is what an elevation prompt that runs the script directly as root (no
+# SUDO_USER, $USER=root) needs in order to find the checkout at all.
+USER_HOME="${USER_HOME:-$(getent passwd "${SUDO_USER:-$USER}" | cut -d: -f6)}"
 SRC="$USER_HOME/.config/hypr/custom/sddm-theme"
 DST=/usr/share/sddm/themes/ii
 
@@ -45,6 +47,52 @@ install -m 644 \
     "$SRC/metadata.desktop" \
     "$SRC/angle-down.png" \
     "$DST"/
+
+# ---- the battery readout ---------------------------------------------------
+# The greeter's QML engine cannot open a file (no QML_XHR_ALLOW_FILE_READ reaches
+# it, no Process type, and the theme config is read once at startup so a value
+# baked into it goes stale), so the login screen's battery comes from a tiny Qt
+# plugin that reads /sys/class/power_supply. See
+# sddm-theme/battery/batteryplugin.cpp for the full argument and
+# sddm-theme/BatteryReadout.qml for why it cannot break the login screen.
+#
+# COMPILED HERE, not shipped in the repo: the plugin has to match the Qt the
+# greeter links against, and a checked-in binary would go stale the first time
+# Qt is upgraded -- silently, as a login screen that quietly stops showing a
+# number.
+#
+# Optional by design: the theme loads the readout through a Loader, so a failed
+# build leaves a login screen that is exactly what it was before, without the
+# battery row. It never leaves a broken one.
+install -d "$DST/battery"
+install -m 644 "$SRC/BatteryReadout.qml" "$DST"/
+install -m 644 "$SRC/battery/qmldir" "$DST/battery"/
+# A leftover plugin from an earlier run must not survive a failed rebuild: that
+# is the one case where an installed .so could have been built against a Qt
+# that is no longer here.
+rm -f "$DST/battery/libiosbatteryplugin.so"
+
+MOC=/usr/lib/qt6/moc
+[ -x "$MOC" ] || MOC="$(command -v moc || true)"
+BUILD=$(mktemp -d)
+trap 'rm -rf "$BUILD"' EXIT
+cp "$SRC/battery/batteryplugin.cpp" "$BUILD/"
+if [ -n "$MOC" ] && command -v g++ >/dev/null 2>&1 \
+   && pkg-config --exists Qt6Core Qt6Qml 2>/dev/null; then
+    if "$MOC" "$BUILD/batteryplugin.cpp" -o "$BUILD/batteryplugin.moc" \
+       && g++ -fPIC -shared -O2 -o "$BUILD/libiosbatteryplugin.so" \
+              "$BUILD/batteryplugin.cpp" \
+              $(pkg-config --cflags --libs Qt6Core Qt6Qml); then
+        install -m 755 "$BUILD/libiosbatteryplugin.so" "$DST/battery"/
+        echo "Battery readout: plugin built"
+    else
+        echo "Battery readout: plugin build FAILED -- the login screen installs" >&2
+        echo "  without the battery row (everything else is unaffected)." >&2
+    fi
+else
+    echo "Battery readout: no Qt6 development files (g++/moc/pkg-config)," >&2
+    echo "  so the login screen will not show the battery row." >&2
+fi
 
 # The layout fragments: the composed active.js is what the theme reads at
 # startup (choose it with set-login-layout.sh). A theme installed without it

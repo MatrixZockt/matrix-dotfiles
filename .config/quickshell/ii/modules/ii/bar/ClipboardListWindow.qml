@@ -599,6 +599,21 @@ Scope {
                     // next keystroke filtering from the stale text.
                     searchInput.clear();
                     root.cursor = 0;
+                    // ...and the list itself back to the TOP, which is the half
+                    // that was missing.
+                    //
+                    // The window is only hidden between opens, never destroyed,
+                    // so the ListView keeps its `contentY`. The scroll reset used
+                    // to live in searchInput.onTextChanged alone, and clearing
+                    // an EMPTY field emits nothing -- so a plain reopen (no
+                    // query left over) came back scrolled to wherever the last
+                    // session ended. The newest copy is row one, so it sat
+                    // scrolled off ABOVE the visible area and the card appeared
+                    // to open on older entries: "it doesn't show the actual
+                    // recent message copied at the top". Reset it here, on
+                    // every open, alongside the cursor.
+                    if (listView)
+                        listView.positionViewAtBeginning();
                     searchInput.forceActiveFocus();
                 } else {
                     // The window is off screen, so the keyboard has gone back to

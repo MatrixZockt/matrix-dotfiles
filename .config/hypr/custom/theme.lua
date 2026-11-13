@@ -35,8 +35,24 @@ M.current = nil
 -- primary #5F5F5F, outline #747474).
 M.THEMES = {
     dark = {
-        active_border    = "rgba(4b454d77)",
-        inactive_border  = "rgba(1e1a2033)",
+        -- The border colours are opaque enough to BE a colour.
+        --
+        -- They were `rgba(4b454d77)` and `rgba(1e1a2033)`: a violet-grey at
+        -- 47% and a warm near-black at 20%. A border that translucent is not
+        -- painted, it is COMPOSITED -- whatever is behind it comes through.
+        -- Over the wallpaper that read plum, and with a fullscreen window
+        -- under the transparent bar it took that window's tone instead, which
+        -- is the "weird brown/reddish edge around the window" report. Nothing
+        -- in the border was brown; the border had no colour of its own to be.
+        --
+        -- These are the shell's own tokens: m3primary (#cbc4cb) is the
+        -- light-grey accent every other accent on this desktop already uses
+        -- (and the accent the Thunderbird theme carries), and the unfocused
+        -- ring is a quiet neutral rather than a warm one. The alphas are high
+        -- enough that the wallpaper cannot tint them and low enough that a
+        -- 1px ring stays a hairline instead of a frame.
+        active_border    = "rgba(cbc4cb99)",
+        inactive_border  = "rgba(49464a4d)",
         background_color = "rgba(151217FF)",
         shadow           = "rgba(00000020)",
         dim_strength     = 0.05,

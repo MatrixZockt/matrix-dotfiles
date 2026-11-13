@@ -69,13 +69,41 @@ Singleton {
     property int pulseId: 0
     readonly property bool hasPulse: pulse !== null
 
+    // When the current pulse was fired, for the expiry below.
+    property real pulseAt: 0
+
     function blink(color, text) {
         pulseId += 1;
+        root.pulseAt = Date.now();
         pulse = { kind: "blink", color: color ?? Appearance.colors.colPrimary, text: text ?? "", id: pulseId };
     }
 
     function clearPulse() {
         pulse = null;
+    }
+
+    // The blink's own clock, here in the service rather than in whatever
+    // draws it. A blink is a one-shot: it paints the whole line for three
+    // quarters of a second and then it is over. When the expiry lived in the
+    // bar, anything that kept that bar's timer from firing left the pulse
+    // set, and a set pulse paints a SOLID full-width line AND outranks the
+    // meter -- so volume and brightness stopped responding too, which is
+    // exactly the "stuck on green no matter what I do" report.
+    //
+    // It polls the pulse's AGE rather than being armed by a change handler:
+    // a handler only runs if a notification arrives, and the whole failure
+    // being fixed here is a pulse that outlived every notification it had.
+    // `running` is bound to the pulse itself, so the clock starts whenever a
+    // pulse exists and stops when it is gone -- nothing to arm, nothing to
+    // strand.
+    Timer {
+        interval: 250
+        repeat: true
+        running: root.hasPulse
+        onTriggered: {
+            if (Date.now() - root.pulseAt >= 750)
+                root.clearPulse();
+        }
     }
 
     // ── The battery-alert face (low / critical) ─────────────────────────
@@ -237,6 +265,13 @@ Singleton {
     function meter(kind, value) {
         if (!root.meterEnabled)
             return;
+        // A value being SET is the user's own hand on the bar, and it
+        // outranks a status blink: the blink already had its beat, and while
+        // one is up the meter face is suppressed -- so a blink that somehow
+        // outlived its clock made volume and brightness look broken. Clearing
+        // it here is the reset, from the user's own action.
+        if (root.hasPulse)
+            root.clearPulse();
         root.meterKind = kind;
         root.meterPending = Math.max(0, Math.min(1, value ?? 0));
         root.meterLive = true;

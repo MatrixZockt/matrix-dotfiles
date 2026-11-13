@@ -338,4 +338,27 @@ cd "$HOME/.config/quickshell/ii"
 # watchdog's 5s tick anyway.
 exec 9>&-
 : > "${XDG_RUNTIME_DIR:-/tmp}/ii-shell.started" 2>/dev/null || true
+
+# ── THE SHELL RENDERS ON THE CHIP THE SCREEN IS PLUGGED INTO (2026-11-01) ──
+#
+# This machine has two graphics chips: the Intel one drives the laptop panel,
+# the NVIDIA 4070 is a discrete card used only when asked. The session used to
+# export __NV_PRIME_RENDER_OFFLOAD/__GLX_VENDOR_LIBRARY_NAME/__VK_LAYER_NV_optimus
+# globally, which told EVERY program -- this shell included -- to render on the
+# discrete card. Every frame was then rendered on one chip and copied to the
+# other for display: both stayed awake, the discrete card could never reach its
+# low-power state, and the desktop paid a copy per frame for nothing.
+#
+# Measured on 2026-11-01 with the variables in effect: the card sat at 31-41%
+# utilisation in 80 of 80 samples over 20 s, P5, ~10 W, with the desktop idle
+# and nothing open but a browser and this shell. That is the "why is my GPU at
+# 40% when nothing is running" report, and the shell was the client.
+#
+# The variables are gone from environment.d and the fish profile; this unset is
+# what makes the change reach the shell TODAY, because the systemd watchdog that
+# relaunches it holds the login environment from before the edit. `nvidia-run`
+# in the fish profile is the per-program opt-in for anything that wants the
+# discrete card on purpose.
+unset __NV_PRIME_RENDER_OFFLOAD __GLX_VENDOR_LIBRARY_NAME __VK_LAYER_NV_optimus
+
 exec qs -c ii >> /tmp/ii_shell.log 2>&1

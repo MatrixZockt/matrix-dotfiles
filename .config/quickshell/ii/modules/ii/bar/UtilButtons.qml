@@ -221,7 +221,7 @@ Item {
                 horizontalAlignment: Qt.AlignHCenter
                 fill: 0
                 text: switch(parent.profile) {
-                    case PowerProfile.PowerSaver: return "energy"
+                    case PowerProfile.PowerSaver: return "energy_savings_leaf"
                     case PowerProfile.Balanced: return "airwave"
                     case PowerProfile.Performance: return "local_fire_department"
                 }

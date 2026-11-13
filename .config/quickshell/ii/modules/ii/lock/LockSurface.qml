@@ -128,13 +128,61 @@ MouseArea {
         // pill toolbar (and passwordBox with it) is hidden, so focusing it
         // would silently focus nothing and the lock screen would come up
         // with no way to type a password.
-        (root.sheetMode ? sheetPassword : passwordBox).forceActiveFocus();
+        fieldItem().forceActiveFocus();
+    }
+    // The field the keyboard should land in, for whichever arrangement is up.
+    // A function rather than a property binding: the login template can be
+    // switched while the screen is locked, and the answer has to follow it.
+    function fieldItem() {
+        return root.sheetMode ? sheetPassword : passwordBox;
     }
     Connections {
         target: context
         function onShouldReFocus() {
             forceFieldFocus();
         }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // THE FIELD IS FOCUSED, NOT JUST FOCUSED ONCE (2026-11-05)
+    // ═════════════════════════════════════════════════════════════════════
+    // Opening the lid came back to a lock screen whose password box was not
+    // focused until the pointer moved a hair: typing did nothing and the focus
+    // line under the field stayed dark, then one small mouse move "fixed" it.
+    // That mouse move is the tell -- `onPositionChanged` below is what was
+    // doing the focusing, not the lock screen arriving.
+    //
+    // The cause is the order a sleep raises the lock in. before-sleep.sh takes
+    // the panel DOWN first and raises the lock behind it (its header is where
+    // that ordering is argued), so this surface is created on an output the
+    // compositor has not activated yet. `Component.onCompleted` calls
+    // forceActiveFocus() anyway, Qt discards it for an inactive surface, and
+    // nothing asks again when the lid opens -- so the first pointer motion was
+    // the first thing to ask a second time.
+    //
+    // The fix is to keep asking. `activeFocus` is the truth of whether the
+    // keyboard is in the field, so a cheap tick re-asserts it when it is
+    // missing and does nothing when it is not: no stolen focus, no flicker, and
+    // the same recovery for every other way this screen can lose its focus
+    // (the shell hot-reloading the surface, the compositor handing the keyboard
+    // elsewhere mid-lock). The wake path additionally calls the `lock focus`
+    // IPC, so the frame the user is already looking at is focused too.
+    function ensureFieldFocus() {
+        const field = fieldItem();
+        if (!field || !field.enabled)
+            return;
+        if (!field.activeFocus)
+            field.forceActiveFocus();
+    }
+    Timer {
+        id: focusGuard
+        interval: 400
+        repeat: true
+        // Only once the shared context has been handed over -- before that
+        // there is nothing to focus. The timer lives and dies with the surface
+        // itself, so it cannot run against an unlocked screen.
+        running: root.contextReady
+        onTriggered: root.ensureFieldFocus()
     }
     hoverEnabled: true
     acceptedButtons: Qt.LeftButton
@@ -1251,6 +1299,26 @@ MouseArea {
         // Not "greeter sddm", which is what the login screen prints: this is
         // a lock, and claiming to be a greeter would be a lie on screen.
         SheetTelemetry { text: "lock shell  OK"; horizontalAlignment: Text.AlignRight }
+        // ── what is left in the battery ────────────────────────────────
+        // Sheet is the only arrangement that had no battery readout: the
+        // toolbar layouts carry one in their right-hand island, and the ops
+        // HUD has its own PWR line, but sheet hides all of those. So the one
+        // screen you look at with the lid open and nobody logged in showed
+        // everything EXCEPT the number that decides whether you can unplug.
+        //
+        // Read from Battery (sysfs, see services/Battery.qml), so it moves
+        // while the screen is up; hidden on a machine with no pack.
+        SheetTelemetry {
+            visible: Battery.available
+            horizontalAlignment: Text.AlignRight
+            // "ac" is what the greeter's own sheet prints while the charger
+            // is in: charging, held at the charge cap, or full all mean the
+            // same thing on this line -- you are not eating the pack.
+            text: "battery " + Math.round(Battery.percentage * 100) + "%"
+                + (Battery.isPluggedIn ? "  ac" : "")
+            color: (Battery.isLow && !Battery.isCharging)
+                ? Appearance.colors.colError : Appearance.colors.colOnSurfaceVariant
+        }
     }
 
     // ---- the power controls, bottom-right -----------------------------

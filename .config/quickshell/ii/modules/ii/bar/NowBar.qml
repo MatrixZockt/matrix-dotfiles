@@ -72,7 +72,34 @@ Item {
     readonly property int modePomodoro: 2
     readonly property int modeAi: 3
     readonly property int modeTrading: 4
-    readonly property int modeCount: 5
+    // ── The activity tab ───────────────────────────────────────────────
+    // A package update, or a file coming down. This tab is NOT one of the
+    // ring's permanent five: it exists only while something is actually
+    // happening, so the island's ring grows by one tab for the duration and
+    // shrinks back afterwards. It is a real view in the ring rather than
+    // something painted over the live one -- an overlay collided with the
+    // performance readings it was drawn on top of, which is exactly the
+    // report this answers.
+    // ── Dictation, a real tab of the ring ──────────────────────────────
+    // NOT a badge beside the island and not a transient tab either: it is the
+    // sixth permanent view, so the island's own switcher (the arrows, the
+    // swipe, a cycle) lands on it like any other, and while SUPER is held the
+    // island walks to it by itself. Its idle state says what the gesture is,
+    // which is where a user finds it in the first place.
+    //
+    // Permanent rather than "only while recording" (the activity tab's shape)
+    // because a tab that appears and disappears cannot be tapped: the ring's
+    // indices would also move under the user's finger between swipes.
+    readonly property int modeDictation: 5
+    /// Something is running that has progress worth a tab: an update of a
+    /// DESKTOP APP (see PackageUpdate.showsInBar -- a library-only transaction
+    /// is silent by request), or a download from the bar's own downloader.
+    readonly property int modeProgress: 6
+    readonly property bool progressShowing: PackageUpdate.showsInBar
+        || GlobalStates.downloadProgress >= 0
+    readonly property bool dictationShowing: Dictation.showing
+
+    readonly property int modeCount: 6 + (root.progressShowing ? 1 : 0)
 
     property int mode: root.modePerf
 
@@ -145,7 +172,11 @@ Item {
     // is out of the auto rotation on purpose -- an active meter used to
     // hold the resting view for hours at a stretch; AI stays one swipe (or
     // one card tab) away, with the ticks announcing the landing.
-    readonly property bool audioPlaying: (MprisController.shownPlayer?.isPlaying ?? false)
+    // ANY app making sound, not just one with an MPRIS player: a game and
+    // Discord have no bus at all, and a browser's bus is unreliable, so asking
+    // a player kept the island on the resting view while sound was playing.
+    readonly property bool audioPlaying: MprisController.soundOutputActive
+        || (MprisController.shownPlayer?.isPlaying ?? false)
     // Pressing play should put the island on the media view -- and the sound
     // bar with it -- straight away, not up to `autoSwapDelayMs` later.
     //
@@ -185,7 +216,13 @@ Item {
             // (`warm` is unconditional), and the card left where it was gets
             // walked back to the media view by the standing swap once it
             // closes -- see onNowBarPanelOpenChanged.
-            if (!GlobalStates.nowBarPanelOpen && root.mode !== root.modeMedia)
+            // ...and never while the microphone is open. Dictation outranks
+            // sound: something starting to play mid-sentence (a notification
+            // chime, the track that was queued) used to yank the island to the
+            // media view and take the meter off the screen at the exact moment
+            // it mattered.
+            if (!GlobalStates.nowBarPanelOpen && root.mode !== root.modeMedia
+                    && !root.dictationShowing)
                 root.setMode(root.modeMedia);
         }
         root.prevAudioPlaying = root.audioPlaying;
@@ -206,9 +243,52 @@ Item {
     // user looks away.
     readonly property bool stopwatchShowing: root.stopwatchMode
         && (TimerService.stopwatchRunning || TimerService.stopwatchTime > 0)
-    readonly property int autoMode: (pomodoroRunning || stopwatchShowing)
-        ? root.modePomodoro
-        : (audioPlaying ? root.modeMedia : root.modePerf)
+    // Dictation first: the meter has to stay on screen while SUPER is held,
+    // whatever else starts or stops in the meantime.
+    readonly property int autoMode: root.dictationShowing
+        ? root.modeDictation
+        : root.progressShowing
+        ? root.modeProgress
+        : (pomodoroRunning || stopwatchShowing)
+            ? root.modePomodoro
+            : (audioPlaying ? root.modeMedia : root.modePerf)
+
+    // The activity tab comes and goes with the work itself. It is entered
+    // automatically (nobody wants to hunt for the tab that is showing the
+    // thing they started), and left automatically the moment the work ends --
+    // a tab that outlives its progress is a dead end, and the ring has no
+    // room for one. An open card is a deliberate act and is never taken
+    // away here, for the same reason the auto swap stands down for it.
+    onProgressShowingChanged: {
+        if (root.progressShowing) {
+            if (root.mode !== root.modeProgress && !GlobalStates.nowBarPanelOpen)
+                root.setMode(root.modeProgress);
+        } else if (root.mode === root.modeProgress) {
+            // NOT `autoMode` here. That property is itself derived from
+            // `progressShowing`, and inside this notification it can still
+            // hold the old answer -- 5 -- so the island would "leave" the
+            // tab by re-selecting it and stay parked on a tab that no longer
+            // exists. The fallback is spelled out instead.
+            root.setMode((root.pomodoroRunning || root.stopwatchShowing)
+                ? root.modePomodoro
+                : (root.audioPlaying ? root.modeMedia : root.modePerf));
+        }
+    }
+
+    // The dictation tab is permanent, but the island still goes to it by
+    // itself when the microphone opens -- nobody starts talking to watch the
+    // System tab -- and steps back to its resting view once the text is typed.
+    // The tab stays reachable either way.
+    onDictationShowingChanged: {
+        if (root.dictationShowing) {
+            if (!GlobalStates.nowBarPanelOpen)
+                root.setMode(root.modeDictation);
+        } else if (root.mode === root.modeDictation) {
+            root.setMode((root.pomodoroRunning || root.stopwatchShowing)
+                ? root.modePomodoro
+                : (root.audioPlaying ? root.modeMedia : root.modePerf));
+        }
+    }
 
     // The swap delay: any change (in the world or by the user) restarts this;
     // when it fires, the auto view wins. Roughly 5-10s to match the island's
@@ -300,7 +380,15 @@ Item {
     }
 
     onModeChanged: {
-        GlobalStates.nowBarMode = root.mode;
+        // The activity tab is the ISLAND's, and only while it exists: the
+        // popped-out card has its own five tabs and no sixth chip, so
+        // publishing 5 there would leave it with a view none of its tabs
+        // match. `nowBarMode` therefore keeps naming the real tab underneath,
+        // and the card is never dragged onto a tab it cannot show.
+        // The popped-out card has neither of the transient tabs -- it has its
+        // own fixed five -- so neither is published; see the note below.
+        if (root.mode !== root.modeProgress && root.mode !== root.modeDictation)
+            GlobalStates.nowBarMode = root.mode;
         root.swapHint = true;
         swapHintTimer.restart();
         // The shared waveform's door for THIS surface: the island only wants a
@@ -419,8 +507,10 @@ Item {
     function perfLoad(key) {
         if (key === "cpu") return SystemNow.cpuPct;
         if (key === "ram") return SystemNow.ramPct;
-        // The discrete card's utilization -- the card the gauge is named
-        // after. See SystemNow.gpuMetricPct for why it is not the renderer.
+        // The BUSIEST chip's load, not a named one: on this laptop the renderer
+        // is the iGPU and the 4070 only scans the panel out, so a gauge named
+        // after the discrete card read 0% while the machine drew. See
+        // SystemNow.gpuMetricPct.
         if (key === "gpu") return SystemNow.gpuMetricPct;
         if (key === "temp") return SystemNow.tempLoad(SystemNow.tempC);
         return -1;
@@ -739,12 +829,22 @@ Item {
                     b.triggered();
                 return;
             }
-            if (event.button === Qt.RightButton) {
-                GlobalStates.overviewMode = "desktops";
-                GlobalStates.overviewOpen = !GlobalStates.overviewOpen;
-            } else {
-                root.backgroundTap();
-            }
+            // A RIGHT click does nothing. On this touchpad a two-finger tap
+            // IS a right click (custom/general.lua: `tap_button_map =
+            // "1,2,3"`, two fingers -> right button), so this used to throw
+            // the desktops overview over the whole screen every time a tap
+            // landed on the island -- an ordinary tap while reaching for the
+            // clock or flicking the pointer across the bar.
+            //
+            // The press is still ACCEPTED and simply dropped, rather than
+            // removed from `acceptedButtons`: letting it through would hand it
+            // to the bar's own stretch MouseAreas underneath, which is another
+            // overview. Nothing is lost here -- SUPER+Tab, SUPER+Z and SUPER+D
+            // all open the overviews, and a left click on the island body
+            // still runs `backgroundTap()` below.
+            if (event.button === Qt.RightButton)
+                return;
+            root.backgroundTap();
         }
 
         onContainsMouseChanged: {
@@ -911,7 +1011,7 @@ Item {
         //
         // What the views ASK for, which is what sizes the island. Split out
         // from the width below so the two can differ without a binding loop.
-        readonly property real contentWidth: Math.max(pomodoroView.implicitWidth, mediaView.implicitWidth, aiView.implicitWidth, perfView.implicitWidth)
+        readonly property real contentWidth: Math.max(pomodoroView.implicitWidth, mediaView.implicitWidth, aiView.implicitWidth, perfView.implicitWidth, progressView.implicitWidth, dictationView.implicitWidth)
         // The FULL width of the island, not the widest view's width. This is
         // the fix for "the arrows are nowhere near the edge": the stage used
         // to be exactly as wide as the widest view and every view was CENTRED
@@ -999,6 +1099,273 @@ Item {
                 }
             }
             Behavior on scale { animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this) }
+        }
+
+        // ── 5 · Activity (only while there is something to watch) ──────
+        // An app being updated, or a file coming down. The tab exists only
+        // while that is true, and the island walks to it by itself; when the
+        // work ends the tab goes and the island returns to whatever it would
+        // otherwise show. Because it is a VIEW, the other tabs' labels can
+        // never show through it -- an overlay drawn on top of the live view
+        // collided with exactly those labels.
+        FadeView {
+            id: progressView
+            anchors.verticalCenter: parent.verticalCenter
+            viewIndex: root.modeProgress
+            implicitWidth: progressColumn.implicitWidth
+            width: stage.width
+            implicitHeight: root.height
+            on: root.mode === root.modeProgress
+
+            // Not `active`: a transaction that is only libraries must not put
+            // a line on the bar at all. See PackageUpdate.showsInBar.
+            readonly property bool updating: PackageUpdate.showsInBar
+            // 0..1, or -1 when the run has no measurable total (a single
+            // package with no upgrade list behind it). The bar sweeps an
+            // indeterminate segment then, rather than inventing a percentage.
+            readonly property real fraction: progressView.updating
+                ? PackageUpdate.fraction
+                : GlobalStates.downloadProgress
+            readonly property string label: {
+                if (progressView.updating) {
+                    const name = PackageUpdate.displayName;
+                    if (PackageUpdate.phase === "prepare" || !PackageUpdate.measured)
+                        return Translation.tr("Updating %1").arg(name);
+                    return Translation.tr("Updating %1 · %2%")
+                        .arg(name).arg(PackageUpdate.percent);
+                }
+                // Nothing live: the tab is on its way out (the fade lasts a
+                // beat longer than the state change), and a "Downloading ·
+                // -100%" would be nonsense. Empty, not a placeholder.
+                if (GlobalStates.downloadProgress < 0)
+                    return "";
+                return Translation.tr("Downloading %1 · %2%")
+                    .arg(GlobalStates.downloadName)
+                    .arg(Math.round(GlobalStates.downloadProgress * 100));
+            }
+            // Position of the indeterminate segment along the track, 0..1.
+            // Ignored whenever there is a real fraction to draw.
+            property real sweep: 0
+            SequentialAnimation {
+                running: progressView.on && progressView.fraction < 0
+                loops: Animation.Infinite
+                NumberAnimation {
+                    target: progressView
+                    property: "sweep"
+                    from: 0
+                    to: 1
+                    duration: 950
+                    easing.type: Easing.InOutQuad
+                }
+                NumberAnimation {
+                    target: progressView
+                    property: "sweep"
+                    from: 1
+                    to: 0
+                    duration: 950
+                    easing.type: Easing.InOutQuad
+                }
+            }
+
+            Column {
+                id: progressColumn
+                anchors.centerIn: parent
+                spacing: 3
+
+                Row {
+                    id: progressRow
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    spacing: 8
+
+                    // The app's own logo, through the icon theme: the same
+                    // picture its launcher shows. A library has none, so a
+                    // glyph stands in rather than leaving a hole.
+                    Image {
+                        id: progressLogo
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: progressView.updating && PackageUpdate.iconName !== ""
+                        source: visible
+                            ? Quickshell.iconPath(PackageUpdate.iconName, "")
+                            : ""
+                        width: 16
+                        height: 16
+                        sourceSize.width: 32
+                        sourceSize.height: 32
+                        fillMode: Image.PreserveAspectFit
+                        readonly property bool resolved: status === Image.Ready
+                    }
+                    MaterialSymbol {
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: !progressLogo.visible || !progressLogo.resolved
+                        text: progressView.updating
+                            ? (PackageUpdate.phase === "prepare" ? "download" : "package_2")
+                            : "download"
+                        iconSize: 16
+                        color: Appearance.colors.colPrimary
+                    }
+                    StyledText {
+                        anchors.verticalCenter: parent.verticalCenter
+                        font.pixelSize: Appearance.font.pixelSize.smallie
+                        color: Appearance.colors.colOnLayer0
+                        text: progressView.label
+                    }
+                }
+
+                // The progression itself, inside the tab it belongs to: a thin
+                // track under the sentence that fills with the real fraction.
+                Rectangle {
+                    id: progressTrack
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    width: Math.max(150, Math.min(260, progressRow.implicitWidth))
+                    height: 3
+                    radius: 1.5
+                    color: ColorUtils.transparentize(Appearance.colors.colOnLayer0, 0.76)
+
+                    Rectangle {
+                        id: progressFill
+                        height: parent.height
+                        radius: parent.radius
+                        color: Appearance.colors.colPrimary
+                        width: progressView.fraction >= 0
+                            ? progressTrack.width * Math.min(1, Math.max(0, progressView.fraction))
+                            : progressTrack.width * 0.3
+                        x: progressView.fraction >= 0
+                            ? 0
+                            : (progressTrack.width - width) * progressView.sweep
+                        Behavior on width {
+                            NumberAnimation { duration: 240; easing.type: Easing.OutQuad }
+                        }
+                    }
+                }
+            }
+        }
+
+
+        // ── 6 · Dictation (only while the microphone is open) ──────────
+        // A real view in the ring, like the activity tab, so it IS the island
+        // rather than a badge stuck beside it. The meter is fed by the level of
+        // the very PCM the daemon is recording -- a moving bar is proof the
+        // microphone is hearing something, not an animation that runs because
+        // the state says "recording".
+        FadeView {
+            id: dictationView
+            anchors.verticalCenter: parent.verticalCenter
+            viewIndex: root.modeDictation
+            implicitWidth: Math.max(210, dictationRow.implicitWidth + 26)
+            width: stage.width
+            implicitHeight: root.height
+            on: root.mode === root.modeDictation
+
+            // Travelling wave, so a quiet room still looks like listening: at
+            // the levels a still room produces every bar would otherwise be the
+            // same three pixels.
+            property real wave: 0
+            NumberAnimation on wave {
+                from: 0; to: 1; duration: 1100; loops: Animation.Infinite
+            }
+            // Dictation.level is the daemon's meter, normalised against THIS
+            // recording's own noise floor and peak (see Recorder in
+            // dictate-daemon.py), so 0 is a still room and 1 is as loud as the
+            // input gets -- whatever that input's gain is.
+            //
+            // Level owns the height: a bar with a quiet room is 5px and a bar
+            // with speech is 17px, and that difference is the whole point of
+            // showing a meter at all. The travelling wave only ripples the
+            // tops, so the pill still looks alive between words without
+            // drowning out the thing it is measuring.
+
+            Row {
+                id: dictationRow
+                anchors.centerIn: parent
+                spacing: 10
+
+                MaterialSymbol {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: Dictation.busy ? "graphic_eq" : "mic"
+                    iconSize: 17
+                    // Filled and tinted only while it is actually live; at rest
+                    // the tab looks like a hint, not like a running meter.
+                    fill: Dictation.showing ? 1 : 0
+                    color: Dictation.showing
+                        ? Appearance.colors.colPrimary
+                        : Appearance.colors.colOnLayer1Inactive
+                }
+
+                Row {
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 2.5
+                    visible: Dictation.showing
+                    Repeater {
+                        model: 7
+                        Rectangle {
+                            width: 3
+                            radius: 1.5
+                            anchors.verticalCenter: parent.verticalCenter
+                            // The formula lives HERE, in the binding, and not
+                            // in a helper function called from it. A function
+                            // call in this binding did not re-run when
+                            // Dictation.level changed -- measured: the bars sat
+                            // at the height they were first drawn at (9px) while
+                            // the same level drawn directly moved them 9px ->
+                            // 26px. Inline, the property reads are dependencies
+                            // in the usual way, so every bar follows the voice.
+                            height: {
+                                const wobble = 0.5 + 0.5 * Math.sin((dictationView.wave + index * 0.14) * Math.PI * 2);
+                                const base = 0.12 + 0.88 * Dictation.level;
+                                return 4 + 14 * Math.min(1, base * (0.82 + 0.18 * wobble));
+                            }
+                            color: ColorUtils.transparentize(Appearance.colors.colPrimary, 0.15)
+                            // No Behavior here. A 70ms height animation on top of
+                            // a level that the daemon already smooths (and that
+                            // arrives every 50ms) left the bars stuck at the
+                            // height they were created with: the binding
+                            // computed 17px while the pill drew 6px. The
+                            // smoothing that matters is upstream, in dBFS.
+                        }
+                    }
+                }
+
+                StyledText {
+                    anchors.verticalCenter: parent.verticalCenter
+                    font.pixelSize: Appearance.font.pixelSize.smallie
+                    color: Dictation.showing
+                        ? Appearance.colors.colOnLayer0
+                        : Appearance.colors.colOnLayer1Inactive
+                    // The idle line is where the gesture is learned: this tab is
+                    // permanent, and an empty tab would never tell anyone that
+                    // holding SUPER is what it is for.
+                    text: Dictation.busy
+                        ? Translation.tr("Transcribing…")
+                        : Dictation.listening
+                            ? Translation.tr("Listening… hold on, release to type")
+                            : Translation.tr("Hold SUPER to dictate")
+                }
+
+                // Which language it is actually hearing. Appears as soon as
+                // whisper has decided -- during a long hold that is a few
+                // seconds in, when the first chunk comes back, and it stays up
+                // through the transcribing tail. Nothing is shown before then
+                // on purpose: "auto" is a setting, not an answer, and a guess
+                // drawn from the PREVIOUS dictation would be worse than blank.
+                Rectangle {
+                    id: dictationLangChip
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: Dictation.showing && Dictation.languageLabel !== ""
+                    implicitWidth: dictationLangText.implicitWidth + 10
+                    implicitHeight: 16
+                    radius: 5
+                    color: ColorUtils.transparentize(Appearance.colors.colPrimary, 0.84)
+
+                    StyledText {
+                        id: dictationLangText
+                        anchors.centerIn: parent
+                        font.pixelSize: Appearance.font.pixelSize.smaller
+                        font.weight: 600
+                        color: Appearance.colors.colPrimary
+                        text: Dictation.languageLabel
+                    }
+                }
+            }
         }
 
         // ── 0 · Pomodoro ──────────────────────────────────────────────────
@@ -1268,7 +1635,11 @@ Item {
             // while it is paused, and only hands over to another app when
             // that app is actually making sound (see MprisController).
             readonly property var player: MprisController.shownPlayer
-            readonly property string title: MprisController.mediaTitle(player)
+            // One name, decided in MprisController: the AUDIBLE browser tab
+            // when a browser is the one making sound (its bus only knows the
+            // focused tab), else the player's track, else the app's own name
+            // for a game or Discord, which publish no player at all.
+            readonly property string title: MprisController.nowPlayingName
             // Some players report the artist as a plain string instead of a
             // list (a TypeError on .join() otherwise), so normalize both.
             readonly property string artists: {
@@ -1608,7 +1979,20 @@ Item {
                     // showing "play" (or "pause") while a song was actually
                     // running the other way. One flag, one truth: the island
                     // can no longer disagree with itself.
-                    icon: root.audioPlaying ? "pause" : "play_arrow"
+                    // When the sound is a browser, its MPRIS "isPlaying" is the
+                    // FOCUSED tab's state -- the button showed "play" while a
+                    // different tab was audible. The browser's own answer is
+                    // used instead, so the glyph matches what you can hear.
+                    readonly property bool browserTransport: MprisController.browserSounding
+                        || (MprisController.soundAppName === ""
+                            && MprisController.isBrowser(MprisController.shownPlayer))
+                    // `browserTabPlayingShown`, not the measured property: a
+                    // press states its intent at once (see MprisController),
+                    // so the glyph turns under the finger instead of a second
+                    // or two later, once a probe has caught up with the tab.
+                    icon: (browserTransport
+                        ? MprisController.browserTabPlayingShown
+                        : root.audioPlaying) ? "pause" : "play_arrow"
                     // Hover is the earliest moment we know a press is coming,
                     // and it is ~450ms before the click. Starting the waveform
                     // pipeline here means the sound bar is already moving by
@@ -1625,6 +2009,14 @@ Item {
                         // arrives without a hover (touchpad tap, keyboard
                         // activation). `warm()` is idempotent.
                         AudioVisualizer.warm();
+                        // A browser press must reach the AUDIBLE tab: the MPRIS
+                        // verb goes to the media-session tab, which is whichever
+                        // one is in front -- measured, that paused the previous
+                        // tab and left the sounding one running.
+                        if (mediaPlayButton.browserTransport) {
+                            MprisController.browserTabAction("toggle");
+                            return;
+                        }
                         const p = mediaView.player;
                         if (p) p.togglePlaying();
                     }
@@ -2691,6 +3083,7 @@ Item {
                 }
             }
         }
+
     }
 
     Row {

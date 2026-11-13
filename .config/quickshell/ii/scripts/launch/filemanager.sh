@@ -50,8 +50,14 @@ if [ "${1:-}" = "picker" ]; then
         echo "usage: filemanager.sh picker <token>" >&2
         exit 1
     fi
-    export II_FILES_PICKER="$token"
-    exec setsid qs -p "$picker_qml_path" >/dev/null 2>&1
+          export II_FILES_PICKER="$token"
+      # Its output goes to a file, not to the void: "the dialog did not appear"
+      # was undiagnosable for exactly as long as this said /dev/null. The portal
+      # backend already keeps the spawn's stderr next to it; this keeps the
+      # DIALOG's own words, which is what says why it never mapped.
+      picker_log="${XDG_RUNTIME_DIR:-/tmp}/ii-portal/picker-app.log"
+      mkdir -p "${picker_log%/*}" 2>/dev/null
+      exec setsid qs -p "$picker_qml_path" >>"$picker_log" 2>&1
 fi
 
 # ── Optional folder argument ─────────────────────────────────────────────

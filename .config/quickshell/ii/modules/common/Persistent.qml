@@ -114,7 +114,7 @@ Singleton {
             //
             // The dialog writes this the moment it ANSWERS, so the folder that
             // answered last time is the folder the next one opens in: upload
-            // from grafizum once and the second upload starts in grafizum.
+            // from a shared folder once and the second upload starts there.
             // Only an answer counts -- browsing somewhere and cancelling says
             // nothing about where the files you want live.
             property string pickerDir: ""

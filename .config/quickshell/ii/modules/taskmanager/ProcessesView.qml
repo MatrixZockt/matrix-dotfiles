@@ -78,6 +78,10 @@ ColumnLayout {
     // Column widths, in one place, so the header and the rows cannot drift.
     readonly property int statusWidth: 78
     readonly property int cpuWidth: 62
+    // The card's share per row. Same width as CPU on purpose: they are the
+    // two "what is this process costing me" numbers and are read one under
+    // the other.
+    readonly property int gpuWidth: 62
     readonly property int memoryWidth: 80
     readonly property int userWidth: 92
     readonly property int pidWidth: 56
@@ -144,11 +148,36 @@ ColumnLayout {
         Layout.fillWidth: true
         spacing: 6
 
+        // ── The search box, drawn properly (2026-11-12) ─────────────────
+        //
+        // The shared ToolbarTextField carries `padding: 10` and native
+        // rendering, which is fine at its own size but not in this toolbar:
+        // squeezed into 34 px it left a 14 px strip for a ~20 px line, so the
+        // placeholder was clipped against the top edge and its glyph advances
+        // were snapped one by one at this machine's 1.5x scale -- on screen
+        // "Search processes" read as "Se arch pro cesses". Measured on the
+        // real overlay before changing it.
+        //
+        // So: no vertical padding (the text takes the box's centre line),
+        // real side insets, Qt's own rasteriser with no hinting (even advances
+        // at fractional scale), and the same corner rounding as the buttons
+        // beside it instead of the capsule -- a lone pill between two rounded
+        // squares is what made the row look misaligned.
         ToolbarTextField {
             id: searchField
             Layout.fillHeight: false
-            implicitWidth: 200
+            Layout.preferredHeight: 34
+            Layout.alignment: Qt.AlignVCenter
+            implicitWidth: 220
             implicitHeight: 34
+            topPadding: 0
+            bottomPadding: 0
+            leftPadding: 14
+            rightPadding: 14
+            verticalAlignment: TextInput.AlignVCenter
+            renderType: Text.QtRendering
+            font.hintingPreference: Font.PreferNoHinting
+            colBackgroundRadius: Appearance.rounding.small
             placeholderText: Translation.tr("Search processes")
             text: ProcessList.query
             onTextChanged: ProcessList.query = text
@@ -358,6 +387,12 @@ ColumnLayout {
             Layout.preferredWidth: root.cpuWidth
             columnKey: "cpu"
             label: Translation.tr("CPU")
+            alignment: Text.AlignRight
+        }
+        HeaderCell {
+            Layout.preferredWidth: root.gpuWidth
+            columnKey: "gpu"
+            label: Translation.tr("GPU")
             alignment: Text.AlignRight
         }
         HeaderCell {
@@ -645,6 +680,32 @@ ColumnLayout {
                             if (cpu >= 25)
                                 return Appearance.colors.colError;
                             if (cpu >= 5)
+                                return Appearance.colors.colTertiary;
+                            return row.isSelected ? Appearance.colors.colOnSecondaryContainer : Appearance.colors.colOnLayer1;
+                        }
+                    }
+
+                    // The graphics card's share of this row. "—" rather than
+                    // "0%" on a machine with no NVIDIA card: a column of
+                    // zeroes reads as "measured, and idle", which would be a
+                    // claim this table cannot make.
+                    StyledText {
+                        Layout.preferredWidth: root.gpuWidth
+                        Layout.rightMargin: 6
+                        horizontalAlignment: Text.AlignRight
+                        text: GpuProcesses.available
+                            ? Math.round(row.modelData.gpu ?? 0) + "%"
+                            : "—"
+                        font {
+                            family: Appearance.font.family.numbers
+                            variableAxes: Appearance.font.variableAxes.numbers
+                            pixelSize: Appearance.font.pixelSize.smallie
+                        }
+                        color: {
+                            const gpu = row.modelData.gpu ?? 0;
+                            if (gpu >= 25)
+                                return Appearance.colors.colError;
+                            if (gpu >= 5)
                                 return Appearance.colors.colTertiary;
                             return row.isSelected ? Appearance.colors.colOnSecondaryContainer : Appearance.colors.colOnLayer1;
                         }

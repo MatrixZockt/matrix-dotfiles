@@ -78,7 +78,7 @@
 #                                 profile now, exit (no cap: no pkexec)
 set -uo pipefail
 
-HOME_DIR="${HOME:-/home/user}"
+HOME_DIR="${HOME:?HOME is not set}"
 BAT_PATH="${BAT_PATH:-/sys/class/power_supply/BAT0}"
 
 RAPL="/sys/class/powercap/intel-rapl:0"
@@ -303,6 +303,61 @@ PY
     mv -f "$tmp" "$II_CONFIG"
 }
 
+# ── asking polkit before asking polkit ──────────────────────────────────────
+# pkexec checks the grant at the instant it runs, and for the first seconds
+# after a wake (and right after login) that check answers "authenticate"
+# instead of the allow_active=yes this config grants: logind has not
+# re-activated the session yet, so the caller is an INACTIVE subject and the
+# action's allow_inactive is auth_admin. The daemon then either blocks on a
+# password dialog or dies with "Error creating textual authentication agent:
+# ... /dev/tty". Both measured 2026-11-04 on this machine: the dialog at
+# 11:09:26, seconds into a lid-open resume, and the tty error at 07:38:22 at
+# login. Neither is a decision the user made, and neither is a reason to
+# interrupt a resume with a password box.
+#
+# pkcheck asks the SAME question without ever prompting (it is called without
+# --allow-user-interaction): exit 0 means the grant is already in force, so
+# the write can go ahead passwordless. Anything else means "not yet", and this
+# tick is skipped -- the INTERVAL loop comes back seconds later and applies the
+# cap for real once logind has the session active again.
+#
+# The action probed is org.matrix.razercc.nvidia rather than fan or decode,
+# because all three carry the same exec.path annotation and polkit resolves
+# that to ONE of them: the dialog raised for a `pwrlimit` call at 11:09:26 was
+# titled "Writing the NVIDIA power-management settings". Probing the action
+# polkit actually picks is the only honest probe (all three share the same
+# defaults and the same rule today, so the answer is the same either way).
+#
+# Past GRANT_WAIT_MAX ticks the wait has stopped being a transient and become
+# a broken install (rule or policy missing). A background daemon must not paper
+# over that with a password box, so it says so in the journal once a minute and
+# keeps probing: a repaired install recovers on its own. The fix is
+# extras/etc/polkit-1/rules.d/60-razercc.rules, deployed by `make install`.
+GRANT_WAIT_MAX=12          # ~60 s at the default 5 s tick
+grant_misses=0
+
+grant_ready() {
+    command -v pkcheck >/dev/null 2>&1 || return 0   # cannot ask: old behaviour
+    pkcheck --action-id org.matrix.razercc.nvidia --process $$ >/dev/null 2>&1
+}
+
+elevation_ready() {
+    # One gate for both elevated writers (apply_cap and apply_epp).
+    [ "$DRY_RUN" = 1 ] && return 0
+    if grant_ready; then
+        grant_misses=0
+        return 0
+    fi
+    grant_misses=$((grant_misses + 1))
+    if [ "$grant_misses" -eq 1 ]; then
+        log "polkit grant not in force yet (session settling after wake/login) - waiting, no prompt"
+    elif [ "$grant_misses" -gt "$GRANT_WAIT_MAX" ] \
+        && [ $(( (grant_misses - GRANT_WAIT_MAX) % GRANT_WAIT_MAX )) -eq 0 ]; then
+        log "polkit grant still not in force after ${GRANT_WAIT_MAX} ticks - check extras/etc/polkit-1/rules.d/60-razercc.rules is installed; not prompting"
+    fi
+    return 1
+}
+
 # ── applying ────────────────────────────────────────────────────────────────
 apply_cap() {
     # $1/$2/$3 = pl1, pl2, turbo(0|1). No-op when already in force.
@@ -315,6 +370,9 @@ apply_cap() {
     if [ "$DRY_RUN" = 1 ]; then
         log "DRY-RUN would set cap ${pl1}/${pl2} W turbo=$turbo (currently: $cur)"
         return 0
+    fi
+    if ! elevation_ready; then
+        return 1
     fi
     local out
     if ! out="$(pkexec "$ELEVATE" pwrlimit "$pl1" "$pl2" "$turbo" 2>&1)"; then
@@ -349,6 +407,9 @@ apply_epp() {
     if [ "$DRY_RUN" = 1 ]; then
         log "DRY-RUN would set EPP $want (currently: ${cur:-unknown})"
         return 0
+    fi
+    if ! elevation_ready; then
+        return 1
     fi
     local out
     if ! out="$(pkexec "$ELEVATE" epp "$want" 2>&1)"; then

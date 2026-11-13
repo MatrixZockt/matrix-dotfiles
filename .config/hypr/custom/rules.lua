@@ -394,17 +394,31 @@ hl.window_rule({
 --
 -- Gtk will not set the selection without an input serial, so that helper maps
 -- a window for a fraction of a second to be given one, then hides it. This
--- rule is what keeps that window from being a window: floated (a 1x1 window in
--- the tiling layout would resize the user's other windows and then undo it),
--- sized to the one pixel it is, and with no shadow or blur to paint. Matching
--- on the app id is why the helper sets its prgname -- without it the class is
--- "python3" and this rule matches nothing.
+-- rule is what keeps that window from being a window at all.
+--
+-- MATCHED ON THE TITLE, and that is measured rather than preferred. It used to
+-- match the app id (`class = "^org%.ii%.ClipboardHelper$"`), which never fired:
+-- Gtk sets the toplevel's app id late, so at the moment rules are evaluated the
+-- class is still EMPTY. The window then came out TILED at 845x502 with a
+-- shadow, and every file copy flashed a window on screen for a frame -- the
+-- report this answers ("as if it would open a window and instantly close it").
+-- Measured with `hyprctl clients -j` while the helper ran: class match = no
+-- effect, `class = ".*"` and a title match = both applied. The title is set
+-- before the window exists, so it is the field that is actually there.
+--
+-- `opacity = "0 0"` and `no_anim` are the point: the window only has to exist
+-- long enough to be handed a serial. Measured with this rule: 1x1, floating,
+-- centred, invisible -- and the selection still published (`wl-paste` read the
+-- file:// URI back), so a fully transparent window is still ACTIVATED, which is
+-- all the helper needs.
 hl.window_rule({
     name  = "ii-clipboard-helper",
-    match = { class = "^org%.ii%.ClipboardHelper$" },
+    match = { title = "^ii clipboard$" },
     float = true,
     center = true,
     size = { 1, 1 },
     no_shadow = true,
     no_blur = true,
+    no_anim = true,
+    opacity = "0 0",
 })

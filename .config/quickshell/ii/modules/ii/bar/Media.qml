@@ -13,8 +13,13 @@ import Quickshell.Hyprland
 Item {
     id: root
     property bool borderless: Config.options.bar.borderless
-    readonly property MprisPlayer activePlayer: MprisController.activePlayer
-    readonly property string cleanedTitle: MprisController.mediaTitle(activePlayer) || Translation.tr("No media")
+    // Follows the app that is actually making sound (see MprisController).
+    // When that app has no player -- a game, Discord -- the widget names the
+    // app instead of claiming there is no media while it is plainly playing.
+    readonly property MprisPlayer activePlayer: MprisController.shownPlayer
+    // One name, decided in MprisController -- including the audible browser
+    // TAB, which the browser's single MPRIS session cannot report.
+    readonly property string cleanedTitle: MprisController.nowPlayingName || Translation.tr("No media")
 
     Layout.fillHeight: true
     implicitWidth: rowLayout.implicitWidth + rowLayout.spacing * 2

@@ -14,11 +14,11 @@ set -u
 # Two QML roots, because the app and the portal dialog are two different kinds
 # of surface: filemanager.qml is an ordinary desktop window, filemanager-picker.qml
 # is the layer-shell FileChooser dialog. The suite drives both.
-QML=/home/user/.config/quickshell/ii/filemanager.qml
-QML_PICKER=/home/user/.config/quickshell/ii/filemanager-picker.qml
+QML="${HOME}/.config/quickshell/ii/filemanager.qml"
+QML_PICKER="${HOME}/.config/quickshell/ii/filemanager-picker.qml"
 # The app's launcher, used where a person would use it: a window has no IPC
 # "show" to send (filemanager.qml), so re-opening one means launching one.
-LAUNCHER=/home/user/.config/quickshell/ii/scripts/launch/filemanager.sh
+LAUNCHER="${HOME}/.config/quickshell/ii/scripts/launch/filemanager.sh"
 SCRATCH="$HOME/fm-scratch-test"
 PORTAL="${XDG_RUNTIME_DIR:-/tmp}/ii-portal"
 LOG=/tmp/fm-suite.log
@@ -29,7 +29,7 @@ FAIL=0
 # resolves its own location with `readlink -f` before it execs Quickshell, so an
 # instance started THROUGH it -- which is what ensure_window does, and what a
 # person does -- carries the repo path in argv
-# (/home/user/hyprland/.config/quickshell/ii/filemanager.qml) while this file
+# (~/hyprland/.config/quickshell/ii/filemanager.qml) while this file
 # spells its paths under ~/.config. Measured 2026-10-14 against two live windows:
 # one matched this lookup, the other did not, and an unmatched instance is
 # unreachable by IPC. That is invisible for as long as the suite's own instance
@@ -2440,7 +2440,7 @@ boo "a file dropped on a folder is a copy" \
     "$(printf '%s' "$PLAN" | json '["action"]')" "copy"
 boo "and the transfer is the one file that was dropped" \
     "$(printf '%s' "$PLAN" | json '["work"]')" "[\"$SCRATCH/alpha.txt\"]"
-has "and it is a gio copy, the same machinery Paste uses" "$PLAN" "gio copy"
+has "and it is the transfer helper, the same machinery Paste uses" "$PLAN" "file-transfer.sh"
 has "into the folder it was dropped on" "$PLAN" "$SCRATCH/subdir"
 # The wire format again, on the way IN: a receiver that does not decode reads a
 # name with a space as a path that does not exist.

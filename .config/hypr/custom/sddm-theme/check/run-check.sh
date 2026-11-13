@@ -10,6 +10,12 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 cp "$SRC/Main.qml" "$TMP/"
 cp -r "$SRC/layouts" "$TMP/layouts" 2>/dev/null || true
+# The battery readout and its native module. The plugin itself is built by
+# install-sddm-theme.sh into the INSTALLED theme, so it is usually absent here:
+# the readout then fails to load, which is exactly the case this harness should
+# keep passing -- the login screen must never depend on it.
+cp "$SRC/BatteryReadout.qml" "$TMP/" 2>/dev/null || true
+cp -r "$SRC/battery" "$TMP/battery" 2>/dev/null || true
 cp -r "$DIR/SddmComponents" "$TMP/"
 cp "$DIR/harness.qml" "$TMP/"
 # Run with a hard timeout; a load failure prints QML errors but the engine

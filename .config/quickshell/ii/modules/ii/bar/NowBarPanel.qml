@@ -7,6 +7,7 @@ import Quickshell.Hyprland
 import Quickshell.Wayland
 import Quickshell.Services.Mpris as MprisSvc
 import Quickshell.Io
+import Quickshell.Services.Pipewire
 // For PowerProfiles + the PowerProfile enum: the three-button power-mode row
 // in the System tab writes PPD profiles directly (same live handle the quick
 // toggles use), so the Razer app is not needed for a profile switch.
@@ -255,6 +256,267 @@ Scope {
     readonly property int modeCount: 5
     readonly property int mode: GlobalStates.nowBarMode
     function setMode(m) { GlobalStates.nowBarMode = ((m % root.modeCount) + root.modeCount) % root.modeCount; }
+
+    // ── Which player the media page is showing ──────────────────
+    //
+    // `MprisController.shownPlayer` answers "who is sounding right now", which
+    // is the right answer for the island -- one line, one track -- and the
+    // wrong one for the card, which is where you go to look at the OTHER thing
+    // that is playing. So the card keeps its own pick, and falls back to the
+    // controller's answer whenever that pick has closed: a player leaving the
+    // bus must not leave the page pointing at nothing.
+    property var pickedPlayer: null
+
+    // Every player on the bus, in the order Quickshell reports them. NOT
+    // filtered to "is playing": a paused local player is usually the one the
+    // card was opened to start.
+    readonly property var livePlayers: {
+        const list = MprisSvc.Mpris.players?.values ?? []
+        return list.filter(p => p !== null && p !== undefined)
+    }
+
+    readonly property var mediaPlayer: {
+        // Read through the list rather than trusting the reference: QML nulls a
+        // destroyed object, but the pick itself would keep the page on nothing.
+        if (root.pickedPlayer && root.livePlayers.indexOf(root.pickedPlayer) >= 0)
+            return root.pickedPlayer
+        return MprisController.shownPlayer
+    }
+
+    // The shell's own player, by the bus MprisController already calls local.
+    // Everything else on the bus is a guest: a browser tab, another app.
+    readonly property var localMusicPlayer: {
+        const bus = MprisController.localBus
+        return root.livePlayers.find(p => String(p?.dbusName ?? "").startsWith(bus)) ?? null
+    }
+
+    // ── Outputs, per app ───────────────────────────────────────────────
+    //
+    // A browser is ONE MPRIS player however many tabs are making sound; the
+    // tabs only exist in PipeWire, one stream each. So the switcher is built
+    // from streams: every app with an output becomes a tab, and the tab lists
+    // that app's streams with a level on each.
+    readonly property var audioStreams: {
+        const out = []
+        for (const n of Audio.outputAppNodes) {
+            if (Audio.isSystemSoundNode(n)) continue
+            out.push(n)
+        }
+        // The output that started first comes first, by the order they were
+        // first seen -- see `seenOrder`. PipeWire ids cannot answer this.
+        out.sort((a, b) => (root.seenOrder[String(a?.id ?? "")] ?? 0)
+                         - (root.seenOrder[String(b?.id ?? "")] ?? 0))
+        return out
+    }
+
+    readonly property var audioApps: {
+        const groups = []
+        for (const n of root.audioStreams) {
+            const own = root.isOwnMusicStream(n)
+            const name = own ? "Music" : Audio.appNodeDisplayName(n)
+            let g = groups.find(x => x.name === name)
+            if (!g) {
+                g = {
+                    name: name,
+                    icon: own ? "" : Audio.appNodeIconName(n),
+                    material: own ? "music_note" : "",
+                    streams: []
+                }
+                groups.push(g)
+            }
+            g.streams.push(n)
+        }
+        return groups
+    }
+
+    // Is this stream the shell's own music player?
+    //
+    // Its stream says "mpv" and drags mpv's icon onto a tab that should read
+    // "Music". The one reliable link is the file: `playingPath` is what that
+    // player has open, and the stream's `media.name` is the same file's name.
+    function isOwnMusicStream(node): bool {
+        const media = String(node?.properties?.["media.name"] ?? "").trim()
+        const path = String(root.playingPath ?? "").trim()
+        if (media !== "" && path !== "") {
+            const base = path.split("/").pop()
+            if (base !== "" && (media === base || media.indexOf(base) >= 0 || base.indexOf(media) >= 0))
+                return true
+        }
+        // The player is `mpv` under the hood. When it is between tracks -- or
+        // the bus has not reported a path yet -- the file cannot match, so the
+        // shell's own player existing is the next best evidence. A separate
+        // mpv playing a video would be read as Music; that is the trade for
+        // not showing "mpv" where the player's name belongs.
+        const app = String(node?.properties?.["application.name"] ?? node?.name ?? "").toLowerCase()
+        return app === "mpv" && root.localMusicPlayer !== null
+    }
+
+    // Which tab is on. Empty means "whichever app the hero is on", so the card
+    // opens on what is playing rather than on PipeWire's node order.
+    property string audioAppName: ""
+
+    readonly property var audioApp: {
+        const exact = root.audioApps.find(g => g.name === root.audioAppName)
+        if (exact) return exact
+        const showing = String(root.mediaPlayer?.identity ?? "").toLowerCase()
+        if (showing !== "") {
+            const match = root.audioApps.find(g => {
+                const n = g.name.toLowerCase()
+                return n === showing || showing.includes(n) || n.includes(showing)
+            })
+            if (match) return match
+        }
+        return root.audioApps[0] ?? null
+    }
+
+    // Does this stream know what it is playing?
+    //
+    // Most apps put the file or track in `media.name`. Chromium says
+    // "Playback" for every one of its streams and ffplay says "ffplay", which
+    // is the app's own name rather than the thing playing -- neither is worth
+    // printing, and pretending otherwise put "Output 1" on the row.
+    function streamHasName(node, group): bool {
+        const media = String(node?.properties?.["media.name"] ?? "").trim()
+        if (media === "")
+            return false
+        const low = media.toLowerCase()
+        if (low === "playback" || low === "audio stream" || low === "audio")
+            return false
+        const app = String(group?.name ?? "").toLowerCase()
+        return !(app !== "" && low === app)
+    }
+
+    // The app's own title, exactly as the bar's now-playing widget reads it.
+    function playerTitleFor(group) {
+        const player = root.playerForGroup(group)
+        // A browser's bus knows only the tab holding its media session; the
+        // AUDIBLE tab is answered by the browser itself, so the row names the
+        // thing being heard rather than the tab that happens to be in front.
+        if (player !== null && MprisController.browserKey(player) !== ""
+                && MprisController.browserTabTitle !== "")
+            return String(MprisController.nowPlayingName).trim()
+        return String(MprisController.mediaTitle(player) ?? "").trim()
+    }
+
+    // The row under a tab: ONE row per desktop app.
+    //
+    // An app can open a stream per output -- a browser opens one per sounding
+    // tab -- but the thing being controlled is the APP: every one of those
+    // streams is driven by the same single player, so a row per stream only
+    // ever produced rows that fought each other over one transport, and the one
+    // that lost looked like it did nothing. One row per app, one honest control.
+    //
+    // It is named after what the app is playing: the stream's own `media.name`
+    // when that says something (mpv, a real file), otherwise the app's MPRIS
+    // title, and failing both its icon and name.
+    function streamRows(group) {
+        const streams = group?.streams ?? []
+        if (streams.length === 0)
+            return []
+        const named = streams.find(n => root.streamHasName(n, group))
+        const title = named
+            ? String(named?.properties?.["media.name"] ?? "").trim()
+            : root.playerTitleFor(group)
+        // No title anywhere: the app's own name, with `fallback` telling the row
+        // to put the app's icon beside it instead of showing an empty line.
+        return [{
+            node: streams[0],
+            label: title !== "" ? title : String(group?.name ?? ""),
+            fallback: title === ""
+        }]
+    }
+
+    // The player behind an app's output, when it has one.
+    //
+    // A PipeWire stream has no transport of its own -- play and stop are MPRIS
+    // verbs -- so a row borrows the player belonging to its app. No player
+    // means no transport buttons, rather than buttons that do nothing.
+    function playerForGroup(group) {
+        if (!group)
+            return null
+        if (group.name === "Music" && root.localMusicPlayer !== null)
+            return root.localMusicPlayer
+        const want = String(group.name ?? "").toLowerCase()
+        if (want === "")
+            return null
+        const found = root.livePlayers.find(p => {
+            const i = String(p?.identity ?? "").toLowerCase()
+            return i !== "" && (i === want || i.includes(want) || want.includes(i))
+        })
+        return found ?? null
+    }
+
+    // ── Which output started first ──────────────────────────────────────
+    //
+    // Node ids are NOT creation order: a stream that appeared later can carry a
+    // lower id than an older one (measured -- a fresh test stream at 101, the
+    // music stream at 121). So the order is observed here, by when each node
+    // was first seen, and pruned whenever the list changes so a recycled id
+    // cannot inherit the old stream's place in the queue.
+    property var seenOrder: ({})
+    property int seenCounter: 0
+    function noteSeenStreams() {
+        const next = {}
+        let changed = false
+        for (const n of Audio.outputAppNodes) {
+            const id = String(n?.id ?? "")
+            if (id === "")
+                continue
+            if (root.seenOrder[id] !== undefined) {
+                next[id] = root.seenOrder[id]
+            } else {
+                root.seenCounter += 1
+                next[id] = root.seenCounter
+                changed = true
+            }
+        }
+        if (changed || Object.keys(next).length !== Object.keys(root.seenOrder).length)
+            root.seenOrder = next
+    }
+    Connections {
+        target: Audio
+        function onOutputAppNodesChanged() {
+            root.noteSeenStreams()
+        }
+    }
+    Timer {
+        interval: 400
+        running: true
+        onTriggered: root.noteSeenStreams()
+    }
+    // Ask for the streams to be bound. Same call the mixer's rows make: a node
+    // is inert until something tracks it, and "inert" reads as 0% volume with
+    // a write path that silently does nothing.
+    PwObjectTracker {
+        objects: root.audioStreams
+    }
+
+    // Is the sound coming from somewhere other than the library?
+    //
+    // The tracklist under the hero is the scanned library's queue and
+    // describes nothing a browser is playing -- Brave's video was sitting on
+    // top of "kurayami no naka". So the list steps aside for exactly as long
+    // as a guest is actually sounding, and comes back the moment it stops.
+    readonly property bool foreignMediaPlaying: {
+        const p = root.mediaPlayer
+        if (!(p?.isPlaying ?? false)) return false
+        return p !== root.localMusicPlayer
+    }
+
+    // Whether the library queue belongs on screen.
+    //
+    // It is the MUSIC library's list, so it belongs to the Music tab and to
+    // nothing else. Keying it off "is a guest playing" was not enough: pausing
+    // the video brought the queue back under the other app's outputs, which is
+    // how a browser tab ended up with the song list beneath it. The tab now
+    // decides -- no Music tab, no queue -- and the space is handed to the
+    // outputs instead of standing empty.
+    readonly property bool musicTabSelected: {
+        if (root.audioApps.length === 0)
+            return true
+        return String(root.audioApp?.name ?? "") === "Music"
+    }
+
 
     // Does any surface actually want fresh llama.cpp numbers right now?
     //
@@ -807,6 +1069,100 @@ Scope {
         function open(): void { GlobalStates.nowBarPanelOpen = true; }
         function close(): void { root.close("ipc"); }
 
+        // What the player strip is showing, and which one the page is on.
+        //   qs -c ii ipc call nowbarPanel playersProbe
+        // Who the hero is on, and whether the library list is allowed to show.
+        //   qs -c ii ipc call nowbarPanel playersProbe
+        function playersProbe(): string {
+            return JSON.stringify({
+                count: root.livePlayers.length,
+                picked: String(root.pickedPlayer?.identity ?? ""),
+                shown: String(root.mediaPlayer?.identity ?? ""),
+                title: String(root.mediaPlayer?.trackTitle ?? ""),
+                others: root.livePlayers.filter(p => p !== root.mediaPlayer).map(p => String(p?.identity ?? "")),
+                local: String(root.localMusicPlayer?.identity ?? ""),
+                foreign: root.foreignMediaPlaying,
+                playlistVisible: root.musicTabSelected
+            });
+        }
+
+        // What the output tabs hold, where they sit, and what the levels read.
+        //   qs -c ii ipc call nowbarPanel streamsProbe
+        function nodeProbe(appName: string): string {
+            const g = root.audioApps.find(x => x.name === appName) ?? root.audioApp
+            const n = g?.streams?.[0]
+            return JSON.stringify({
+                id: n?.id,
+                state: String(n?.state ?? "(no state property)"),
+                props: n?.properties ?? {}
+            })
+        }
+
+        function streamsProbe(): string {
+            return JSON.stringify({
+                apps: root.audioApps.map(g => ({ name: g.name, streams: g.streams.length })),
+                selected: String(root.audioApp?.name ?? ""),
+                tabsIcons: root.audioApps.map(g => g.material !== "" ? g.material : g.icon),
+                order: root.audioStreams.map(n => String(n?.id ?? "") + ":" + String(root.seenOrder[String(n?.id ?? "")] ?? 0)),
+                musicLink: {
+                    playingPath: String(root.playingPath ?? ""),
+                    media: String(root.audioStreams[0]?.properties?.["media.name"] ?? ""),
+                    own: root.audioStreams.length > 0 ? root.isOwnMusicStream(root.audioStreams[0]) : false
+                },
+                appIcon: String(root.audioApp?.icon ?? ""),
+                multiOutput: (root.audioApp?.streams?.length ?? 0) > 1,
+                rows: root.streamRows(root.audioApp).map(r => ({
+                    label: r.label,
+                    fallback: r.fallback === true,
+                    node: r.node?.id,
+                    muted: (r.node?.audio?.muted ?? false) === true,
+                    player: String(root.playerForGroup(root.audioApp)?.identity ?? ""),
+                    playing: (root.playerForGroup(root.audioApp)?.isPlaying ?? false) === true,
+                    stopAvailable: typeof root.playerForGroup(root.audioApp)?.stop === "function"
+                })),
+                tabs: [Math.round(outputTabsRow.y), Math.round(outputTabsRow.height),
+                       Math.round(outputTabsRow.width)],
+                streams: [Math.round(outputStreamList.y), Math.round(outputStreamList.height)],
+                hero: [Math.round(heroSection.y), Math.round(heroSection.height)],
+                bar: [Math.round(panelMergedBar.y), Math.round(panelMergedBar.height)],
+                list: [Math.round(playlistSection.y), Math.round(playlistSection.height)],
+                playlistVisible: root.musicTabSelected
+            });
+        }
+
+        // The tab switch, and the two write paths the row controls use, so the
+        // section can be exercised without a pointer.
+        function selectApp(name: string): string {
+            root.audioAppName = String(name);
+            return String(root.audioApp?.name ?? "");
+        }
+        function setStreamVolume(appName: string, index: int, fraction: real): string {
+            const g = root.audioApps.find(x => x.name === appName) ?? root.audioApp;
+            const node = g?.streams?.[index];
+            if (!node) return "no stream";
+            Audio.markPerStreamAdjusted(node);
+            Audio.setNodeVolumeFraction(node, fraction);
+            return String(Math.round(Audio.nodeVolumeFraction(node) * 100));
+        }
+        function toggleStreamMute(appName: string, index: int): string {
+            const g = root.audioApps.find(x => x.name === appName) ?? root.audioApp;
+            const node = g?.streams?.[index];
+            if (!node) return "no stream";
+            if (!node.audio) return "no node audio";
+            Audio.markPerStreamAdjusted(node);
+            node.audio.muted = !(node.audio.muted === true);
+            return String(node.audio.muted === true);
+        }
+
+        // Pick by app name: case-insensitive, substring.
+        function pickPlayer(name: string): string {
+            const want = String(name).toLowerCase();
+            const found = root.livePlayers.find(p => String(p?.identity ?? "").toLowerCase().includes(want));
+            if (found !== undefined)
+                root.pickedPlayer = found;
+            return String(root.mediaPlayer?.identity ?? "");
+        }
+
         // What the card is doing right now, and how it last went away. The
         // dismissal paths are indistinguishable from outside the shell -- a
         // card that will not close looks the same whichever one is broken -- so
@@ -1135,6 +1491,13 @@ Scope {
     }
 
     onOpenChanged: {
+        // A fresh open starts from what is SOUNDING, not from the player picked
+        // on an earlier visit -- dropped before anything reads it, so
+        // `mediaPlayer` falls back to the controller's "who is playing now".
+        // (This is the card's only open handler: a second `onOpenChanged` on
+        // the same object is a duplicate signal handler, i.e. a parse error
+        // that takes the whole file -- and with it the panel -- out.)
+        if (root.open) root.pickedPlayer = null;
         // The motion starts FIRST: before the claims, before the state file is
         // written, before the timer-edit cancellation below. That ordering is
         // not tidying -- it is the same ordering the SUPER menu's own handler
@@ -2054,14 +2417,14 @@ Scope {
                                         Image {
                                             anchors.fill: parent
                                             anchors.margins: 3
-                                            source: MprisController.shownPlayer?.trackArtUrl ?? ""
-                                            visible: (MprisController.shownPlayer?.trackArtUrl ?? "") !== ""
+                                            source: root.mediaPlayer?.trackArtUrl ?? ""
+                                            visible: (root.mediaPlayer?.trackArtUrl ?? "") !== ""
                                             fillMode: Image.PreserveAspectCrop
                                             asynchronous: true
                                         }
                                         MaterialSymbol {
                                             anchors.centerIn: parent
-                                            visible: (MprisController.shownPlayer?.trackArtUrl ?? "") === ""
+                                            visible: (root.mediaPlayer?.trackArtUrl ?? "") === ""
                                             text: "music_note"
                                             iconSize: 46
                                             color: Appearance.colors.colOnLayer1Inactive
@@ -2094,7 +2457,7 @@ Scope {
                                         // to spare.
                                         StyledText {
                                             Layout.fillWidth: true
-                                            text: MprisController.mediaTitle(MprisController.shownPlayer)
+                                            text: MprisController.mediaTitle(root.mediaPlayer)
                                                 || Translation.tr("Nothing playing")
                                             font.pixelSize: Appearance.font.pixelSize.title
                                             font.weight: Font.DemiBold
@@ -2154,7 +2517,7 @@ Scope {
                                             enabled: root.seekable
                                             modeOn: MprisController.hasShuffle
                                             onTriggered: () => {
-                                                const p = MprisController.shownPlayer;
+                                                const p = root.mediaPlayer;
                                                 if (p) p.shuffle = !p.shuffle;
                                             }
                                         }
@@ -2165,7 +2528,7 @@ Scope {
                                             Layout.alignment: Qt.AlignVCenter
                                             glyph: "skip_previous"
                                             enabled: root.seekable
-                                            onTriggered: () => MprisController.shownPlayer?.previous()
+                                            onTriggered: () => root.mediaPlayer?.previous()
                                         }
 
                                         // Play/pause. It is BIGGER -- 34px
@@ -2192,9 +2555,9 @@ Scope {
                                             box: 34
                                             em: 26
                                             outlined: true
-                                            glyph: (MprisController.shownPlayer?.isPlaying ?? false)
+                                            glyph: (root.mediaPlayer?.isPlaying ?? false)
                                                 ? "pause" : "play_arrow"
-                                            onTriggered: () => MprisController.shownPlayer?.togglePlaying()
+                                            onTriggered: () => root.mediaPlayer?.togglePlaying()
                                         }
 
                                         TransportMark {
@@ -2203,7 +2566,7 @@ Scope {
                                             Layout.alignment: Qt.AlignVCenter
                                             glyph: "skip_next"
                                             enabled: root.seekable
-                                            onTriggered: () => MprisController.shownPlayer?.next()
+                                            onTriggered: () => root.mediaPlayer?.next()
                                         }
 
                                         // Loop: cycles None -> Playlist -> None
@@ -2218,7 +2581,7 @@ Scope {
                                             modeOn: MprisController.loopSupported
                                                 && MprisController.loopState === MprisSvc.MprisLoopState.Playlist
                                             onTriggered: () => {
-                                                const p = MprisController.shownPlayer;
+                                                const p = root.mediaPlayer;
                                                 if (!p) return;
                                                 const on = MprisController.loopState === MprisSvc.MprisLoopState.Playlist;
                                                 p.loopState = on ? MprisSvc.MprisLoopState.None
@@ -2294,22 +2657,254 @@ Scope {
                             showSpectrum: root.musicPlaying
                             active: root.seekable
                             position: root.displayPosition
-                            duration: MprisController.shownPlayer?.length ?? 0
-                            volume: MprisController.shownPlayer?.volume ?? 0
+                            duration: root.mediaPlayer?.length ?? 0
+                            volume: root.mediaPlayer?.volume ?? 0
                             onSeekRequested: f => root.seekToFraction(f)
                             onVolumeRequested: lvl => {
-                                const p = MprisController.shownPlayer;
+                                const p = root.mediaPlayer;
                                 if (p && p.volume !== undefined) p.volume = lvl;
                             }
                         }
 
 
 
+                        // ── Outputs, one tab per app ──────────────────────
+                        //
+                        // NOT one card per MPRIS player, which is what sat here:
+                        // a browser is ONE player however many tabs are making
+                        // sound, so several videos in Brave collapsed into a
+                        // single "Brave" entry with nothing to switch between.
+                        // The tabs only exist in PipeWire -- one stream per
+                        // playing tab -- so the tabs are built from streams, and
+                        // the selected app lists its streams with a level each.
+                        RowLayout {
+                            id: outputTabsRow
+                            Layout.fillWidth: true
+                            Layout.leftMargin: 26
+                            Layout.rightMargin: 26
+                            Layout.topMargin: 10
+                            spacing: 6
+                            visible: root.audioApps.length > 1
+
+                            Repeater {
+                                model: root.audioApps
+                                delegate: Rectangle {
+                                    id: outputTab
+                                    required property var modelData
+
+                                    readonly property bool selected: outputTab.modelData === root.audioApp
+
+                                    Layout.preferredHeight: 28
+                                    Layout.preferredWidth: outputTabRow.implicitWidth + 16
+                                    radius: 14
+                                    color: outputTab.selected
+                                        ? Appearance.colors.colSecondaryContainer
+                                        : (outputTabHover.hovered ? Appearance.colors.colLayer1Hover : Appearance.colors.colLayer1)
+                                    Behavior on color {
+                                        animation: Appearance.animation.elementMoveFast.colorAnimation.createObject(this)
+                                    }
+                                    HoverHandler {
+                                        id: outputTabHover
+                                        cursorShape: Qt.PointingHandCursor
+                                    }
+                                    TapHandler {
+                                        onTapped: {
+                                            root.audioAppName = outputTab.modelData.name
+                                            // And the hero, when this app has a
+                                            // player of its own: switching tabs
+                                            // switches the transport with them.
+                                            const want = outputTab.modelData.name.toLowerCase()
+                                            const p = root.livePlayers.find(x => String(x?.identity ?? "").toLowerCase().includes(want))
+                                            if (p) root.pickedPlayer = p
+                                        }
+                                    }
+
+                                    RowLayout {
+                                        id: outputTabRow
+                                        anchors.centerIn: parent
+                                        spacing: 5
+
+                                        MaterialSymbol {
+                                            Layout.preferredWidth: 15
+                                            Layout.preferredHeight: 15
+                                            visible: String(outputTab.modelData.material ?? "") !== ""
+                                            text: String(outputTab.modelData.material ?? "")
+                                            iconSize: 15
+                                            color: outputTab.selected
+                                                ? Appearance.colors.colOnSecondaryContainer
+                                                : Appearance.colors.colOnLayer0
+                                        }
+                                        Image {
+                                            Layout.preferredWidth: 15
+                                            Layout.preferredHeight: 15
+                                            source: String(outputTab.modelData.icon ?? "") !== ""
+                                                ? Quickshell.iconPath(outputTab.modelData.icon, true)
+                                                : ""
+                                            visible: String(outputTab.modelData.icon ?? "") !== ""
+                                            sourceSize.width: 30
+                                            sourceSize.height: 30
+                                            fillMode: Image.PreserveAspectFit
+                                            asynchronous: true
+                                        }
+                                        StyledText {
+                                            text: outputTab.modelData.name + " · " + outputTab.modelData.streams.length
+                                            font.pixelSize: Appearance.font.pixelSize.small
+                                            color: outputTab.selected
+                                                ? Appearance.colors.colOnSecondaryContainer
+                                                : Appearance.colors.colOnLayer0
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // The streams behind the selected tab: one row per
+                        // output, with its own level and mute. Scrolled rather
+                        // than capped, because an app can open as many streams
+                        // as it likes and the card cannot grow.
+                        StyledListView {
+                            id: outputStreamList
+                            Layout.fillWidth: true
+                            Layout.leftMargin: 26
+                            Layout.rightMargin: 26
+                            Layout.topMargin: 6
+                            Layout.preferredHeight: Math.min((root.streamRows(root.audioApp).length * 32), 112)
+                            Layout.maximumHeight: 112
+                            Layout.bottomMargin: 6
+                            visible: root.streamRows(root.audioApp).length > 0
+                            clip: true
+                            spacing: 2
+                            model: root.streamRows(root.audioApp)
+
+                            delegate: RowLayout {
+                                id: streamRow
+                                required property var modelData
+
+                                readonly property var player: root.playerForGroup(root.audioApp)
+                                readonly property bool fallback: streamRow.modelData?.fallback === true
+                                readonly property bool playing: (streamRow.player?.isPlaying ?? false) === true
+                                // One row per app, so the transport below is
+                                // simply that app's player.
+
+                                width: outputStreamList.width
+                                height: 30
+                                spacing: 6
+
+                                // The failsafe: an output that cannot name
+                                // itself shows its app's icon instead of a
+                                // vague word, with the app's name beside it.
+                                Image {
+                                    Layout.preferredWidth: 16
+                                    Layout.preferredHeight: 16
+                                    Layout.alignment: Qt.AlignVCenter
+                                    visible: streamRow.fallback && String(root.audioApp?.icon ?? "") !== ""
+                                    source: String(root.audioApp?.icon ?? "") !== ""
+                                        ? Quickshell.iconPath(String(root.audioApp.icon), true)
+                                        : ""
+                                    sourceSize.width: 32
+                                    sourceSize.height: 32
+                                    fillMode: Image.PreserveAspectFit
+                                    asynchronous: true
+                                }
+
+                                StyledText {
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideRight
+                                    text: String(streamRow.modelData?.label ?? "")
+                                    font.pixelSize: Appearance.font.pixelSize.small
+                                    color: Appearance.colors.colOnLayer0
+                                }
+
+                                // Play / pause this app: its player's real
+                                // pause, the same verb the hero button uses.
+                                // Never a mute dressed up as a pause.
+                                Item {
+                                    Layout.preferredWidth: 22
+                                    Layout.preferredHeight: 22
+                                    Layout.alignment: Qt.AlignVCenter
+                                    visible: streamRow.player !== null
+                                    HoverHandler { cursorShape: Qt.PointingHandCursor }
+                                    TapHandler {
+                                        onTapped: {
+                                            if (streamRow.player)
+                                                streamRow.player.togglePlaying()
+                                        }
+                                    }
+                                    MaterialSymbol {
+                                        anchors.centerIn: parent
+                                        text: streamRow.playing ? "pause" : "play_arrow"
+                                        iconSize: 18
+                                        fill: streamRow.playing ? 1 : 0
+                                        color: Appearance.colors.colOnLayer0
+                                    }
+                                }
+
+                                // Stop. Guarded because it is the one MPRIS verb
+                                // a player is allowed to be missing.
+                                Item {
+                                    Layout.preferredWidth: 22
+                                    Layout.preferredHeight: 22
+                                    Layout.alignment: Qt.AlignVCenter
+                                    visible: streamRow.player !== null
+                                    HoverHandler { cursorShape: Qt.PointingHandCursor }
+                                    TapHandler {
+                                        onTapped: {
+                                            const p = streamRow.player
+                                            if (p && typeof p.stop === "function")
+                                                p.stop()
+                                        }
+                                    }
+                                    MaterialSymbol {
+                                        anchors.centerIn: parent
+                                        text: "stop"
+                                        iconSize: 18
+                                        color: Appearance.colors.colOnLayer1Inactive
+                                    }
+                                }
+
+                                Item {
+                                    Layout.preferredWidth: 22
+                                    Layout.preferredHeight: 22
+                                    Layout.alignment: Qt.AlignVCenter
+                                    HoverHandler { cursorShape: Qt.PointingHandCursor }
+                                    TapHandler {
+                                        onTapped: {
+                                            const node = streamRow.modelData?.node
+                                            if (!node || !node.audio) return
+                                            Audio.markPerStreamAdjusted(node)
+                                            node.audio.muted = !(node.audio.muted === true)
+                                        }
+                                    }
+                                    MaterialSymbol {
+                                        anchors.centerIn: parent
+                                        text: (streamRow.modelData?.node?.audio?.muted === true) ? "volume_off" : "volume_up"
+                                        iconSize: 18
+                                        color: Appearance.colors.colOnLayer0
+                                    }
+                                }
+                            }
+                        }
+
+                        // The space the hidden library list leaves behind goes
+                        // here. Without it the ColumnLayout handed ~147px of
+                        // slack to whatever it could stretch, and the player
+                        // cards fell from y=139 to y=286 -- a gap under the
+                        // seek bar with nothing in it.
+                        Item {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            visible: !root.musicTabSelected
+                        }
+
                         // ── The playlist ─────────────────────────────────
                         Rectangle {
+                            id: playlistSection
                             Layout.fillWidth: true
                             Layout.fillHeight: true
                             Layout.minimumHeight: 120
+                            // Held back, not deleted: a browser's video has no
+                            // business sitting on top of the library queue.
+                            visible: root.musicTabSelected
                             color: "transparent"
                             border.width: 0
 
@@ -4917,6 +5512,15 @@ ColumnLayout {
                                             if (k === "ram")
                                                 return Translation.tr("%1 of %2 GB").arg(root.formatKB1(ResourceUsage.memoryUsed)).arg(root.formatKB1(ResourceUsage.memoryTotal));
                                             if (k === "gpu") {
+                                                // The percentage above is the busiest
+                                                // chip's (see SystemNow.gpuMetricPct),
+                                                // and the cap below describes the 4070 --
+                                                // so it is only true while the 4070 is
+                                                // the chip that won. Under the iGPU's
+                                                // number it said "cap 115 W · boost",
+                                                // the same mismatch the 0% was.
+                                                if (!SystemNow.gpuMetricDiscrete)
+                                                    return Translation.tr("iGPU · renderer");
                                                 // Same three words the Razer app's GPU
                                                 // page uses (see gpu_state_pill there), so
                                                 // the two panels can no longer read as
@@ -5772,7 +6376,7 @@ ColumnLayout {
 
                                         Repeater {
                                             model: [
-                                                { p: PowerProfile.PowerSaver,  icon: "energy",                tint: "#43d17c" },
+                                                { p: PowerProfile.PowerSaver,  icon: "energy_savings_leaf",   tint: "#43d17c" },
                                                 { p: PowerProfile.Balanced,    icon: "airwave",               tint: Appearance.colors.colPrimary },
                                                 { p: PowerProfile.Performance, icon: "local_fire_department", tint: "#ff6d1f" }
                                             ]
@@ -6090,7 +6694,7 @@ ColumnLayout {
     }
 
     // ── Media facts ──────────────────────────────────────────────────────
-    readonly property var player: MprisController.shownPlayer
+    readonly property var player: root.mediaPlayer
     readonly property string artistText: {
         const a = root.player?.trackArtists ?? "";
         return Array.isArray(a) ? a.join(", ") : String(a);
@@ -6171,7 +6775,7 @@ ColumnLayout {
         // at all. See `localMatch` and the note on `position`.
         if (root.localMatch)
             return;
-        const p = MprisController.shownPlayer;
+        const p = root.mediaPlayer;
         if (!p)
             return;
         root._posBase = p.position ?? 0;
@@ -6186,10 +6790,10 @@ ColumnLayout {
      * the observation that the two are describing the same file on the same
      * player, which is the only thing the answer is used for.
      */
-    readonly property bool localMatch: (MprisController.shownPlayer?.length ?? 0) > 0
+    readonly property bool localMatch: (root.mediaPlayer?.length ?? 0) > 0
         && MusicPlayer.hasTrack
         && Math.abs(MusicPlayer.duration
-            - (MprisController.shownPlayer?.length ?? 0)) < 1.5
+            - (root.mediaPlayer?.length ?? 0)) < 1.5
 
     readonly property real position: {
         // Read the ticker so this re-evaluates as playback proceeds.
@@ -6213,7 +6817,7 @@ ColumnLayout {
         if (root.localMatch)
             return MusicPlayer.position;
 
-        const p = MprisController.shownPlayer;
+        const p = root.mediaPlayer;
         if (!p)
             return 0;
         if (root._posStamp === 0)
@@ -6246,10 +6850,10 @@ ColumnLayout {
     Timer {
         interval: 500
         repeat: true
-        running: MprisController.shownPlayer !== null
+        running: root.mediaPlayer !== null
         onTriggered: {
             root._posTick++;
-            const p = MprisController.shownPlayer;
+            const p = root.mediaPlayer;
             if (!p)
                 return;
             const reported = p.position ?? 0;
@@ -6265,7 +6869,7 @@ ColumnLayout {
     // MPRIS does signal a track change, and that is the one moment the base
     // must be thrown away outright rather than carried forward.
     Connections {
-        target: MprisController.shownPlayer
+        target: root.mediaPlayer
         function onPositionChanged() {
             root.syncPosition();
         }
@@ -6295,8 +6899,8 @@ ColumnLayout {
 
     /** Can this player be seeked at all? Some MPRIS implementations cannot. */
     readonly property bool seekable:
-        (MprisController.shownPlayer?.positionSupported ?? false)
-        && (MprisController.shownPlayer?.length ?? 0) > 0
+        (root.mediaPlayer?.positionSupported ?? false)
+        && (root.mediaPlayer?.length ?? 0) > 0
 
     /**
      * Is music actually PLAYING? (requested 2026-10-03)
@@ -6329,7 +6933,7 @@ ColumnLayout {
      * the spectrum -- so pausing takes it away and resuming brings it back.
      */
     readonly property bool musicPlaying:
-        MprisController.shownPlayer?.isPlaying ?? false
+        root.mediaPlayer?.isPlaying ?? false
 
     /** Where the bar and the clocks read from: the drag, or the truth. */
     readonly property real displayPosition: root.scrubbing
@@ -6343,7 +6947,7 @@ ColumnLayout {
      * the last resync was ago.
      */
     function seekToFraction(f) {
-        const p = MprisController.shownPlayer;
+        const p = root.mediaPlayer;
         if (!p || !root.seekable) return;
         const len = p.length ?? 0;
         if (len <= 0) return;
@@ -6494,7 +7098,7 @@ ColumnLayout {
 
     /** "M:SS left" — the number that answers "do I have time". */
     function timeLeft() {
-        const len = MprisController.shownPlayer?.length ?? 0;
+        const len = root.mediaPlayer?.length ?? 0;
         if (!len) return "";
         // root.position, not the raw MPRIS value: this label used to read the
         // same frozen snapshot the scrubber did, so "1:37 left" sat unchanged

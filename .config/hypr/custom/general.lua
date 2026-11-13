@@ -356,7 +356,18 @@ hl.config({
             -- warns about, one key further down: the table REPLACES the base
             -- block, and what is left out silently disappears.
             --
-            -- 1 / 2 / 3 fingers -> left / right / middle, the standard map.
+            -- 1 / 2 / 3 fingers -> left / right / middle, the standard map,
+            -- spelled the way the compositor reads it: `lrm`.
+            --
+            -- The previous value here was the literal "1,2,3". Hyprland's own
+            -- help text for this key is "[lrm/lmr]" and anything else hits
+            --     Tap button mapping unknown
+            -- in the compositor (that string is in /usr/bin/Hyprland, next to
+            -- the load path), which means the value was IGNORED and libinput's
+            -- default left in place. That also explains why the earlier
+            -- experiments here -- "1,2,0", "1,2,-1" -- "changed nothing
+            -- observable": none of those were valid either, so none of them
+            -- were ever applied. `lrm` is the map this line always meant.
             --
             -- The third entry is what makes a THREE-finger tap arrive at the
             -- focused application as a MIDDLE CLICK, and middle click is
@@ -384,7 +395,7 @@ hl.config({
             -- modifier-free bind on the middle button, so a middle click is
             -- consumed by the compositor and never reaches an application.
             -- That holds no matter which layer synthesised it.
-            tap_button_map = "1,2,3",
+            tap_button_map = "lrm",
         },
     },
 })
@@ -923,6 +934,22 @@ local function fourFingersConfirmed()
     if not ts then return false end
     if (os.time() - math.floor(ts)) > 3 then return false end
     return true
+end
+
+-- How many REAL contacts the shell's tracker saw just now, or nil when the
+-- answer is not fresh (file missing, no timestamp, older than 3s). The same
+-- file fourFingersConfirmed reads; this one answers only "how many", because
+-- a phantom swipe is decided by a CONTRADICTION, not by an absence.
+local function padFingersFresh()
+    local file = io.open(padFingersStateFile(), "r")
+    if not file then return nil end
+    local text = file:read("*a") or ""
+    file:close()
+    local fingers = tonumber(text:match('"fingers"%s*:%s*(%d+)'))
+    local ts = tonumber(text:match('"ts"%s*:%s*([0-9%.]+)'))
+    if not fingers or not ts then return nil end
+    if (os.time() - math.floor(ts)) > 3 then return nil end
+    return fingers
 end
 
 -- (The swipe trace helper, `trace`, is DEFINED HERE rather than beside the
@@ -3783,7 +3810,10 @@ hl.gesture({
                 -- at the top, and again during the first 3% of travel in
                 -- update(): the shell's reader can land a few milliseconds
                 -- after the compositor's own libinput detection.
-                confirmed = fourFingersConfirmed() }
+                confirmed = fourFingersConfirmed(),
+                -- Highest real contact count seen during the swipe; start()
+                -- seeds it so a gesture whose fingers never move still counts.
+                padMax = padFingersFresh() or 0 }
             -- The RAW event, dumped once per gesture. The timing arithmetic in
             -- finish() needs a timestamp field, and this build's gesture event
             -- has never been confirmed to carry the one that code assumed --
@@ -3883,6 +3913,13 @@ hl.gesture({
             local dy = tonumber(delta.y) or 0
             d.dy = d.dy + dy
             if d.dy < 0 then d.dy = 0 end -- one-way: this is a dismiss gesture
+            -- The pad's live contact count, as a HIGH-WATER MARK over the
+            -- gesture (see finish()). Reading it once at the END is what made
+            -- a real four-finger close fail: the last sample lands as the
+            -- fingers are already lifting, so a genuine push reported 1-3
+            -- contacts and was thrown away as a phantom.
+            local pn = padFingersFresh()
+            if pn and pn > (d.padMax or 0) then d.padMax = pn end
             -- Second chance at the pad confirmation, while the swipe is still
             -- shorter than the dead travel below (so nothing has moved yet and
             -- this is still "the start"): the shell reads the contacts off
@@ -4100,7 +4137,46 @@ hl.gesture({
             -- No speed term. See the note above: distance alone decides, and
             -- the phantom swipes this pad emits cannot reach a quarter of the
             -- screen, so nothing else has to stand between them and a close.
-            local commit = not e.cancelled and moved > needsScreen
+            --
+            -- THAT MEASUREMENT NO LONGER HOLDS (2026-11-06). Re-measured with
+            -- nobody on the pad, a phantom four-finger swipe travelled 605
+            -- logical px -- 0.56 of the screen, well past the 0.22 mark -- and
+            -- closed the focused window. Consecutive phantom swipes now reach
+            -- 400-600px, so the distance rule cannot tell them from a
+            -- deliberate push, and every open window was a swipe away from
+            -- closing (reported as "the window glitches when I press Ctrl+C":
+            -- typing puts a palm near the pad).
+            --
+            -- So the pad's own contacts are consulted again, but as a
+            -- CONTRADICTION rather than a requirement: when the shell's
+            -- tracker is fresh and says fewer than four fingers are on the
+            -- pad, this swipe cannot be the four-finger close-drag and does
+            -- not close anything. When the answer is missing or stale the
+            -- distance rule decides exactly as before -- which is what keeps
+            -- a real push working even when the tracker misses its start
+            -- (measured: the same real push read pad44 true, false, false).
+            -- Read as a MAXIMUM over the gesture, not as "what is on the pad
+            -- right now": at release the fingers are leaving, so the live
+            -- count is 0-3 even for a real four-finger push (measured: a real
+            -- close attempt logged padn=1 at finish and was refused -- "closing
+            -- apps with four fingers never worked as badly as this").
+            -- padn here is therefore the gesture's PEAK, which is what a real
+            -- four-finger push always reaches.
+            --
+            -- A phantom, by contrast, is a PALM: ONE contact resting on the
+            -- pad while libinput calls it a four-finger swipe. One contact is
+            -- the phantom's signature; three is not -- a real push was logged
+            -- at padn=3 mid-gesture, and refusing that (the first version of
+            -- this guard demanded all four) is what made the gesture feel
+            -- laggy and unreliable. Erring permissive on purpose: a gesture
+            -- that does not work is worse than a phantom slipping through.
+            --
+            -- 0 = the tracker never answered (missing or stale file): no
+            -- information, not a contradiction, so the distance rule decides
+            -- exactly as it always did.
+            local padFingers = d.padMax or 0
+            local phantom = padFingers == 1
+            local commit = not e.cancelled and moved > needsScreen and not phantom
             -- Traced UNCONDITIONALLY, including the non-committing case. A
             -- trace that only appears on success cannot answer "why did it not
             -- close", which is the question that matters when a dismiss gesture
@@ -4119,10 +4195,11 @@ hl.gesture({
             -- diagnosing. A log line that can throw is worse than no log line,
             -- because it converts a silent failure into a loud one that still
             -- loses the behaviour.
-            tracef("4f-down finish: %s moved=%.0f dy=%.0f need>%.0f speed=%.0f pad44=%s commit=%s",
+            tracef("4f-down finish: %s moved=%.0f dy=%.0f need>%.0f speed=%.0f pad44=%s padn=%s phantom=%s commit=%s",
                 tostring(findWindow(d.addr) and (findWindow(d.addr).class or "?")),
                 tonumber(moved) or 0, tonumber(d.dy) or 0, tonumber(needsScreen) or 0,
-                tonumber(speed) or 0, tostring(d.confirmed), tostring(commit))
+                tonumber(speed) or 0, tostring(d.confirmed),
+                tostring(padFingers), tostring(phantom), tostring(commit))
             if commit then
                 restoreMoveAnim()
                 -- Traced, because this branch is where "the swipe did nothing"

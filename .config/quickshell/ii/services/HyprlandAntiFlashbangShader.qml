@@ -4,6 +4,8 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Services.Mpris
+import qs.services
 import qs.modules.common
 
 /**
@@ -79,10 +81,109 @@ Singleton {
     readonly property bool enabled: intent !== "off"
     readonly property bool weak: intent === "weak"
 
+    // ── The video hold ───────────────────────────────────────────────────
+    //
+    // The shader's gate asks "has this frame gone blank white", and a VIDEO is
+    // the one thing that answers that constantly: a cut to a white slide, a
+    // bright sky, an explosion, a title card blinking on and off. Each of those
+    // is a legitimate white frame and each one gets dimmed, so watching a film
+    // turns into a fight with the effect that is meant to protect you.
+    //
+    // So while media is PLAYING, the level is held at off. `intent` is left
+    // untouched -- it is the user's setting, it is what the sidebar and the
+    // persistence file keep, and it must survive the film ending -- and only
+    // what is written to the compositor changes. Playback stopping puts the
+    // remembered level straight back.
+    //
+    // Which players count. MPRIS cannot tell a video from an audio stream: a
+    // browser publishes the same one title for a YouTube video and for a web
+    // radio station. The list below is therefore by APP -- browsers and video
+    // players suspend, everything else (Spotify, the shell's own iiMusic, mpd,
+    // cmus) is left alone, because those never put white frames on screen. The
+    // cost of the heuristic is that music playing in a browser also suspends
+    // the shader; the cost of the opposite default is the effect glitching
+    // through every video, which is what was reported.
+    readonly property var videoApps: [
+        "brave", "chromium", "chrome", "vivaldi", "opera", "edge",
+        "firefox", "zen", "librewolf", "waterfox",
+        "mpv", "vlc", "celluloid", "haruna", "totem", "smplayer",
+        "kodi", "freetube", "qutebrowser", "epiphany"
+    ]
+
+    function isVideoPlayer(player) {
+        const identity = String(player?.identity ?? "").toLowerCase();
+        // The bus name carries an instance suffix (…MediaPlayer2.brave.instance2189035),
+        // so it is matched from the start rather than by containment.
+        const marker = "org.mpris.mediaplayer2.";
+        const bus = String(player?.dbusName ?? "").toLowerCase();
+        const tail = bus.indexOf(marker) >= 0
+            ? bus.slice(bus.indexOf(marker) + marker.length).split(".")[0]
+            : "";
+        for (const name of root.videoApps) {
+            if (identity.includes(name))
+                return true;
+            if (tail !== "" && tail.startsWith(name))
+                return true;
+        }
+        return false;
+    }
+
+    // Read from the MPRIS map itself, not from MprisController's filtered array.
+    //
+    // That array is a `var` rebuilt by a filter, and it was measured here
+    // arriving late at its first read: after a shell reload the shader stayed on
+    // for the whole first video even though the bus said "Playing", while every
+    // pause/play transition after that landed correctly. A hold that arrives
+    // late is the glitch this exists to prevent, so the answer is recomputed
+    // BOTH ways -- event-driven when the controller's array changes (the common
+    // case, immediate) and on a slow poll (the arrival, and any signal a given
+    // Quickshell build does not emit).
+    property var videoPlayers: []
+    property bool videoPlaying: false
+
+    function refreshVideoHold() {
+        const playing = (Mpris.players.values ?? [])
+            .filter(p => p?.isPlaying === true && root.isVideoPlayer(p));
+        root.videoPlayers = playing;
+        // Assigning the same boolean does not emit, so a poll that changes
+        // nothing costs nothing: no write, no re-apply.
+        root.videoPlaying = playing.length > 0;
+    }
+
+    Timer {
+        interval: 1500
+        repeat: true
+        running: true
+        triggeredOnStart: true
+        onTriggered: root.refreshVideoHold()
+    }
+
+    Connections {
+        target: MprisController
+        function onPlayingPlayersChanged() { root.refreshVideoHold(); }
+    }
+    readonly property string videoName:
+        root.videoPlaying ? String(root.videoPlayers[0]?.identity ?? "") : ""
+
+    // Cleared when the user sets a level BY HAND during playback -- a click that
+    // visibly does nothing reads as a broken switch -- and re-armed when the
+    // video stops, so the next one holds again.
+    property bool autoHold: true
+    readonly property bool heldByVideo: root.videoPlaying && root.autoHold
+    onVideoPlayingChanged: if (!root.videoPlaying) root.autoHold = true
+    onHeldByVideoChanged: root.apply()
+
+    // What the compositor should hold: the user's level, or nothing while a
+    // video is up. Every write and every reconcile reads THIS, never `intent`
+    // directly, so the two can never disagree.
+    readonly property string effectivePath:
+        root.heldByVideo ? "" : root.pathFor(root.intent)
+
     readonly property var levels: ({ "off": "", "weak": weakShaderPath, "strong": shaderPath })
 
     Component.onCompleted: {
         root.intent = Persistent.states?.antiFlashbang ?? "strong";
+        root.refreshVideoHold();
         root.refresh();
     }
 
@@ -113,10 +214,14 @@ Singleton {
     }
 
     function setLevel(level) {
+        // Asked for by hand while a video plays: honour it for the rest of that
+        // playback instead of having the hold undo the click on the next frame.
+        if (root.videoPlaying)
+            root.autoHold = false;
         root.intent = level;
         if (Persistent.states)
             Persistent.states.antiFlashbang = level;
-        root.apply(root.pathFor(level));
+        root.apply();
     }
 
     // ── Writing: queued, one process at a time ───────────────────────────
@@ -124,11 +229,12 @@ Singleton {
     // during the first click's `hyprctl` used to be swallowed. The newest wanted
     // path is held here and written as soon as the running one exits; only the
     // last one matters, the ones in between are already superseded.
-    property string queuedPath: ""
     property bool hasQueued: false
 
-    function apply(path) {
-        root.queuedPath = path;
+    // No path argument, deliberately: the path is read from `effectivePath` when
+    // the queued write actually runs, so a video starting or stopping between
+    // the click and the write cannot be undone by the click's older answer.
+    function apply() {
         root.hasQueued = true;
         root.drainWrites();
     }
@@ -136,7 +242,7 @@ Singleton {
     function drainWrites() {
         if (writeProc.running || !root.hasQueued)
             return;
-        const path = root.queuedPath;
+        const path = root.effectivePath;
         root.hasQueued = false;
         const shader = JSON.stringify(path); // a Lua string literal
         const damage = path === "" ? 2 : 1;
@@ -169,14 +275,14 @@ Singleton {
     // missing it is put back. A shader that is someone else's is left alone for
     // as long as we are off, so this never stomps another program's effect.
     function reconcile() {
-        const want = root.pathFor(root.intent);
+        const want = root.effectivePath;
         if (want === root.activePath)
             return;
         const foreign = root.activePath !== "" && root.activePath !== root.shaderPath
             && root.activePath !== root.weakShaderPath;
         if (foreign && want === "")
             return;
-        root.apply(want);
+        root.apply();
     }
 
     Process {
@@ -221,7 +327,9 @@ Singleton {
     Timer {
         interval: 5000
         repeat: true
-        running: root.intent !== "off"
+        // Only while something is supposed to BE on screen: during a video hold
+        // the answer is "nothing", and there is no drift to chase.
+        running: root.effectivePath !== ""
         onTriggered: root.refresh()
     }
 
@@ -233,7 +341,8 @@ Singleton {
         function alternate(): void { root.alternate(); }
         function set(level: string): void { root.setLevel(level); }
         function status(): string {
-            return `${root.intent} (compositor holds "${root.activePath}")`;
+            return `${root.intent} (compositor holds "${root.activePath}")`
+                + (root.heldByVideo ? ` | held off for ${root.videoName || "video"}` : "");
         }
     }
 }

@@ -533,6 +533,26 @@ Timer {
         return entry;
     }
 
+    // ── Streams adjusted on their own ───────────────────────────────────
+    //
+    // `applyRememberedVolumes` pushes an APP's remembered level onto every
+    // stream that app opens, every 1.5s. That is right for the mixer, whose
+    // rows are apps -- and wrong for a row that is one stream: the write lands,
+    // then the next sweep snaps it back to the app's value, so the control
+    // looks dead (measured: set to 70%, back to 35% inside two seconds).
+    //
+    // So a stream that was adjusted individually is remembered here, by node
+    // id, and the sweep skips it. Marks are session-only and cleared with the
+    // node: there is nothing to persist, because the value lives on the stream.
+    property var perStreamAdjusted: ({})
+    function markPerStreamAdjusted(node) {
+        if (!node || node.id === undefined || node.id === null)
+            return;
+        const next = Object.assign({}, root.perStreamAdjusted);
+        next[String(node.id)] = true;
+        root.perStreamAdjusted = next;
+    }
+
     function setAppVolume(key: string, node, volume: real) {
         if (node?.audio)
             node.audio.volume = volume;
@@ -563,6 +583,8 @@ Timer {
             return;
         for (const node of root.outputAppNodes) {
             if (root.isSystemSoundNode(node))
+                continue;
+            if (root.perStreamAdjusted[String(node.id)] === true)
                 continue;
             const key = root.appNodeIdentityKeys(node)[0];
             const entry = key ? saved[key] : null;

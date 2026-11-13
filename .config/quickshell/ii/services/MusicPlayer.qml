@@ -364,6 +364,42 @@ Singleton {
         root.refreshQueue();
     }
 
+    /**
+     * Start the music saved on THIS PC -- the three-finger tap's last resort.
+     *
+     * The gesture means "play/pause what I was playing", and when the thing
+     * that was playing is gone (its browser tab was closed, the player quit)
+     * something has to be better than nothing. That something is the local
+     * library: the song it was left on, else the playlist it was left on, else
+     * anything the scan found.
+     *
+     * The remembered song is only used when the scan still lists it. mpv would
+     * answer a deleted file with silence and an error nobody reads, and a
+     * gesture that looks broken is worse than one that starts a different
+     * song.
+     *
+     * @returns true when something was actually started.
+     */
+    function startRemembered() {
+        root.ensureDaemon();
+        const remembered = String(Persistent.states.music.lastSongPath ?? "");
+        if (remembered !== "" && root.library.some(pl => pl.tracks.some(t => t.path === remembered))) {
+            root.queueTrack(remembered);
+            return true;
+        }
+        const names = [
+            String(Persistent.states.music.selectedPlaylist ?? ""),
+            ...(Persistent.states.music.recentPlaylists ?? []).map(n => String(n)),
+            ...root.library.map(pl => String(pl.name ?? "")),
+        ];
+        const name = names.find(n => n !== ""
+            && root.library.some(pl => pl.name === n && pl.tracks.length > 0));
+        if (name === undefined)
+            return false;
+        root.playPlaylist(name, 0);
+        return true;
+    }
+
     /** Append one track to the running queue (and play it if idle). */
     function queueTrack(path) {
         root.cmd(["loadfile", path, root.hasTrack ? "append" : "replace"]);

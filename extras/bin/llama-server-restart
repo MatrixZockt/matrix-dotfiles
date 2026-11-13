@@ -2,6 +2,6 @@
 # Restart the local llama-server service
 
 echo "🔄 Restarting llama-server..."
-/home/user/.local/bin/llama-server-stop
+${HOME}/.local/bin/llama-server-stop
 echo ""
-/home/user/.local/bin/llama-server-start
+${HOME}/.local/bin/llama-server-start

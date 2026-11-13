@@ -111,7 +111,7 @@ fi
 
 # ── The served model NAME ───────────────────────────────────────────────────
 # Without this, the only id the server advertises is the absolute path of the
-# .gguf (`/home/user/Models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf`), in /v1/models
+# .gguf (`~/Models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf`), in /v1/models
 # and in every response body. Clients that build a model picker out of
 # /v1/models -- Claude Desktop's gateway screen does exactly that -- cannot use
 # a filesystem path as a model name and report "Gateway returned no usable

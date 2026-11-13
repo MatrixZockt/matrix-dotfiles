@@ -19,13 +19,32 @@
 #   So "lagging" is now the OR of two hardware facts:
 #
 #       tasks stalling    PSI cpu some avg10 >= CPU_LAG (default 20%), OR
-#       cores throttled   fastest core at <= CLOCK_LINE (default 1200 MHz)
+#       cores throttled   fastest core at <= CLOCK_LINE (80% of base clock)
+#                         AND PSI cpu some avg10 >= CPU_LAG_FLOOR (default 8%)
 #
 #   and Performance is raised only when the CPU is pegged AND one of those
 #   holds, for CONSECUTIVE samples. A machine that is merely busy at full
 #   clock -- compiling, encoding, a game -- without a stall and without being
 #   throttled is not the case this exists for, and neither is anything that
 #   is not the CPU.
+#
+# WHY THE THROTTLE BRANCH NEEDS A STALL FLOOR (2026-11-04)
+#   A slow clock under saturation is not lag, and treating it as lag is what
+#   this branch did until today. Measured three times in one afternoon --
+#   13:16:45, 14:30:17, 15:31:55 -- the trigger fired at 95-99% busy with the
+#   fastest core at 1300-1400 MHz, PSI 3%, the GPU at 0% and the desktop not
+#   lagging at all; each time it pulled Performance (120/160 W, fans up) and
+#   the owner asked why. What was running was ordinary background load --
+#   browser, editor, emulator, this agent -- saturating 32 threads under the
+#   balanced 35/45 W cap. An all-core load clocks down there BECAUSE the cap
+#   is doing its job, and with PSI at 3% nothing was waiting on a core at all.
+#
+#   So the clock is a THROTTLE signal and PSI is the LAG signal, and the
+#   throttle branch only escalates when a stall is on top of it. The 20 W eco
+#   incident this branch was built for -- 94.4% busy, PSI 10.3%, 727-900 MHz
+#   -- still clears the 8% floor with room to spare, so the rescue it exists
+#   for is untouched; what stops is the case where the machine is honestly
+#   busy at the cap it was told to hold.
 #
 #   CPU_BUSY is 90%, not 98%. Measured with real work (not a `yes` burn): a
 #   vitest run plus the Android emulator on this 32-thread chip peaked at
@@ -69,11 +88,15 @@
 # hold before it touches anything:
 #
 #   * BOTH conditions must exceed their line for CONSECUTIVE samples
-#     (default 3 x 5 s = 15 s of sustained peg AND stall), not one bad
-#     window. A short compile, a page load, a browser spell -- none of them
-#     last that long at 98 % with a stall on top.
+#     (default 2 x 2 s = 4 s of sustained peg AND stall), not one bad
+#     window. Retimed 2026-10-27: at 3 x 5 s the ladder needed 15 s of
+#     sustained peg, but every real spike on this machine dies in 4-10 s --
+#     the journal showed streaks dying at 1/3 and 2/3 all evening with no
+#     raise since 19:57, so the machine crawled through every lag episode
+#     on the 20 W eco cap. 4 s at >=90 % WITH a stall on top is still not
+#     a page load.
 #   * A minimum COOLDOWN between actions, so a flapping machine cannot get
-#     profile flips every 15 s.
+#     profile flips every COOLDOWN.
 #   * Every decision is logged to the journal (systemd user service), so
 #     "why did it fire" is always answerable.
 # The two lines, calibrated on this machine (32 hardware threads, measured
@@ -90,6 +113,9 @@
 # band and well clear of the 1x band.
 CPU_BUSY=${CPU_BUSY:-90}        # overall CPU utilisation that counts as pegged
 CPU_LAG=${CPU_LAG:-20}          # PSI cpu "some avg10" that counts as lagging
+# The throttle branch's own floor, so a slow clock alone cannot escalate:
+# see the 2026-11-04 note in the header.
+CPU_LAG_FLOOR=${CPU_LAG_FLOOR:-8}   # PSI cpu "some avg10" the throttle branch also needs
 # THE THROTTLE LINE IS DERIVED FROM THE CHIP, NOT HARD-CODED (2026-10-26).
 #
 # It was 1200 MHz, calibrated on the 20 W eco cap where the fastest core sat
@@ -116,8 +142,8 @@ fi
 # 2026-10-26 17:20:41, the incident all of this comes from: 94.4% busy, PSI
 # 10.3%, 727-900 MHz, profile power-saver (20 W PL1, turbo off) while the AC
 # was plugged in. Nothing queued -- everything just ran at ~800 MHz.
-CONSECUTIVE=${CONSECUTIVE:-3}   # samples BOTH must persist (x INTERVAL)
-INTERVAL=${INTERVAL:-5}         # seconds between samples
+CONSECUTIVE=${CONSECUTIVE:-2}   # samples BOTH must persist (x INTERVAL)
+INTERVAL=${INTERVAL:-2}         # seconds between samples
 COOLDOWN=${COOLDOWN:-300}       # min seconds between actions
 RESTORE_QUIET=${RESTORE_QUIET:-90}  # calm seconds before backing out of performance
 
@@ -455,7 +481,7 @@ stand_down() {
     blink green "Failsafe: CPU calm — back to ${mode}"
 }
 
-log "watching the CPU only: fires after ${CONSECUTIVE} samples at >=${CPU_BUSY}% busy AND (>=${CPU_LAG}% PSI lag OR <=${CLOCK_LINE} MHz), interval ${INTERVAL}s, cooldown ${COOLDOWN}s"
+log "watching the CPU only: fires after ${CONSECUTIVE} samples at >=${CPU_BUSY}% busy AND (>=${CPU_LAG}% PSI lag OR (<=${CLOCK_LINE} MHz AND >=${CPU_LAG_FLOOR}% PSI), interval ${INTERVAL}s, cooldown ${COOLDOWN}s"
 log "ignoring memory, io and GPU: they are not the CPU being pegged"
 if [ "${FAILSAFE_ESCALATE:-0}" = "1" ]; then
     log "action: ESCALATE (opt-in) -- performance profile + GPU Dynamic Boost; auto-restore after ${RESTORE_QUIET}s calm"
@@ -477,13 +503,21 @@ while true; do
     if [ "$busy" -ge "$CPU_BUSY" ]; then
         if [ "$lag" -ge "$CPU_LAG" ]; then
             hot=1; why="tasks stalling (${lag}% PSI)"
-        elif [ "$freq" -le "$CLOCK_LINE" ]; then
-            hot=1; why="cores throttled (${freq} MHz, line ${CLOCK_LINE})"
+        elif [ "$freq" -le "$CLOCK_LINE" ] && [ "$lag" -ge "$CPU_LAG_FLOOR" ]; then
+            # Throttled AND stalling. The clock on its own is not lag: an
+            # all-core load running at the cap it was given clocks down on
+            # purpose and stalls nobody (2026-11-04, see the header).
+            hot=1; why="cores throttled (${freq} MHz, line ${CLOCK_LINE}) with ${lag}% PSI"
         fi
     fi
 
     if [ "$hot" = "1" ]; then
         count=$((count + 1))
+        # A pegged sample restarts the calm window: RESTORE_QUIET promises
+        # EVERY one of the last 90 s below both lines, so a spike in the
+        # middle of the quiet stretch must push the stand-down out, not
+        # sail past it on the strength of the first calm second.
+        quiet_since=0
         log "cpu pegged ${busy}% busy, ${why} (${count}/${CONSECUTIVE})"
         if [ "$count" -ge "$CONSECUTIVE" ]; then
             now=$(date +%s)

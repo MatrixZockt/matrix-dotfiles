@@ -4,6 +4,11 @@ pragma ComponentBehavior: Bound
 import qs.modules.common
 import qs
 import qs.services
+// NotificationUtils (the shared app-identity matcher behind the per-app mute).
+// Without this import every mute check threw "ReferenceError: NotificationUtils
+// is not defined", which aborted onNotification before anything was recorded --
+// the whole feature silently did nothing.
+import qs.modules.common.functions
 import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -134,6 +139,51 @@ Singleton {
         if (!(requested > 0)) requested = root.popupMaxMs;
         return Math.min(requested, root.popupMaxMs);
     }
+    // ── The last few that came through ──────────────────────────────────
+    //
+    // Dismissing a notification used to erase it: `list` is what the sidebar
+    // draws, what the bell counts and what the file keeps, so once a card was
+    // gone there was no way back to "what did that actually say?". This is the
+    // record of what ARRIVED, kept for the last `historyMax` of them, and
+    // dismissing never touches it -- the rewind button at the bottom of the
+    // notification panel reads it (NotificationList.qml).
+    //
+    // In memory only, deliberately. This is a glance back at the last few
+    // things that happened, not an archive: it starts empty on every shell
+    // start, which keeps it out of the config directory, out of a file that
+    // grows without limit, and out of "why is a notification from Tuesday
+    // still on my disk". 30 is a comfortable page of them.
+    readonly property int historyMax: 30
+    property var history: []
+
+    function archive(notification) {
+        const entry = {
+            "notificationId": notification.notificationId,
+            "appName": notification.appName ?? "",
+            "appIcon": notification.appIcon ?? "",
+            "summary": notification.summary ?? "",
+            "body": notification.body ?? "",
+            "image": notification.image ?? "",
+            "urgency": String(notification.urgency ?? "normal"),
+            "time": notification.time,
+            "archivedAt": Date.now(),
+        };
+        // Newest last in storage, so trimming the oldest is one shift().
+        const next = root.history.slice();
+        next.push(entry);
+        while (next.length > root.historyMax)
+            next.shift();
+        root.history = next;
+    }
+
+    // Newest first: the order a history is read in. A new array, so the
+    // view's binding re-evaluates when `history` is replaced.
+    readonly property var historyNewestFirst: root.history.slice().reverse()
+
+    function clearHistory() {
+        root.history = [];
+    }
+
     property var latestTimeForApp: ({})
 
     // ── "point at the newest one" (the bar's bell) ──────────────────────
@@ -548,12 +598,9 @@ Singleton {
     // whole point, because none of those three spellings equals another and a
     // sender picks whichever it likes.
     function identityText(value) {
-        if (typeof value !== "string" || value.length === 0)
-            return "";
-        return value.split("/").pop()
-            .replace(/\.desktop$/i, "")
-            .replace(/\.(png|svg|xpm|ico|jpe?g|gif)$/i, "")
-            .toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+        // Shared with the Settings page, which decides what the Mute switch
+        // means: see NotificationUtils.normalizeAppIdentity.
+        return NotificationUtils.normalizeAppIdentity(value);
     }
 
     readonly property var selfSoundingTokens: root.selfSoundingApps.map((a) => root.identityText(a))
@@ -625,6 +672,135 @@ Singleton {
         Audio.playSystemSoundFile(target, gain);
     }
 
+    // ── Per-app mute ────────────────────────────────────────────────────
+    //
+    // REQUESTED (2026-11-13): "allow me to manually mute notifications of
+    // certain apps", with a way to see what each app was allowed and what it
+    // was blocked from.
+    //
+    // A muted app gets no popup, no chime and no card in the notification
+    // centre -- the three things a notification IS here. It is not dropped
+    // silently, though: `recordApp` counts it, so the Settings page can say
+    // "12 blocked" and show the last summary it swallowed, which is the
+    // difference between "muted" and "broken" when a mail client goes quiet.
+    //
+    // DND (`silent`, above) is still the whole-desktop switch; this is per app
+    // and persists in the config file.
+    readonly property var mutedApps: Config?.options.notifications.mutedApps ?? []
+
+    // Every spelling this sender answers to, including the window class the
+    // tray registry resolves -- the class is the one identity that survives a
+    // sender with a localised or truncated name (see senderClass).
+    function identitiesOf(appName, desktopEntry, appIcon) {
+        const list = [appName, desktopEntry, appIcon];
+        const cls = TrayApps.classForNotification({
+            appName: appName,
+            desktopEntry: desktopEntry,
+            appIcon: appIcon,
+        });
+        if (cls && cls.length > 0)
+            list.push(cls);
+        return list;
+    }
+
+    function isMuted(appName, desktopEntry, appIcon) {
+        return NotificationUtils.isIdentityMuted(
+            root.identitiesOf(appName, desktopEntry, appIcon), root.mutedApps);
+    }
+
+    function isAppMuted(appName) {
+        return NotificationUtils.isIdentityMuted([appName], root.mutedApps);
+    }
+
+    function setAppMuted(appName, muted) {
+        Config.options.notifications.mutedApps = NotificationUtils.withAppMuted(
+            root.mutedApps, appName, muted);
+        return Config.options.notifications.mutedApps;
+    }
+
+    // ── What each app was allowed, and what was blocked ─────────────────
+    //
+    // Keyed by normalized identity, and PERSISTED, because the Settings page is
+    // a separate process: it cannot read this singleton's memory, only
+    // `${cache}/notifications/apps.json`. Counts survive a shell restart for the
+    // same reason -- a tally that reset on every reload would answer "allowed"
+    // with 0 for everything every morning.
+    readonly property int appStatsMax: 60
+    property var appStats: ({})
+
+    function recordApp(appName, appIcon, summary, outcome) {
+        const key = root.identityText(appName ?? "");
+        if (key.length === 0)
+            return;
+        const prev = root.appStats[key] ?? {
+            name: appName ?? "",
+            appIcon: "",
+            allowed: 0,
+            blocked: 0,
+            lastSummary: "",
+            lastTime: 0,
+        };
+        const next = Object.assign({}, prev);
+        next.name = appName ?? prev.name;
+        if (typeof appIcon === "string" && appIcon.length > 0)
+            next.appIcon = appIcon;
+        if (outcome === "blocked")
+            next.blocked = (prev.blocked ?? 0) + 1;
+        else
+            next.allowed = (prev.allowed ?? 0) + 1;
+        next.lastSummary = summary ?? "";
+        next.lastTime = Date.now();
+        next.lastOutcome = outcome;
+        next.muted = root.isAppMuted(appName ?? "");
+
+        const merged = Object.assign({}, root.appStats);
+        merged[key] = next;
+        // Bounded: the file is a tally for the Settings page, not an archive of
+        // every app that has ever spoken to this desktop.
+        const keys = Object.keys(merged);
+        if (keys.length > root.appStatsMax) {
+            keys.sort((a, b) => (merged[a].lastTime || 0) - (merged[b].lastTime || 0));
+            for (const k of keys.slice(0, keys.length - root.appStatsMax))
+                delete merged[k];
+        }
+        root.appStats = merged;
+        root.saveAppStats();
+    }
+
+    function saveAppStats() {
+        appsFileView.setText(JSON.stringify(root.appStats, null, 2));
+    }
+
+    // The apps that were already in the notification history when this feature
+    // first ran still deserve a row: without this, the page would open empty on
+    // a machine that has been receiving notifications for months.
+    function seedAppStatsFromList() {
+        const merged = Object.assign({}, root.appStats);
+        let changed = false;
+        root.list.forEach((notif) => {
+            if (notif.isSignal)
+                return;
+            const key = root.identityText(notif.appName ?? "");
+            if (key.length === 0 || merged[key])
+                return;
+            merged[key] = {
+                name: notif.appName ?? "",
+                appIcon: notif.appIcon ?? "",
+                allowed: 1,
+                blocked: 0,
+                lastSummary: notif.summary ?? "",
+                lastTime: notif.time ?? 0,
+                lastOutcome: "allowed",
+                muted: root.isAppMuted(notif.appName ?? ""),
+            };
+            changed = true;
+        });
+        if (changed) {
+            root.appStats = merged;
+            root.saveAppStats();
+        }
+    }
+
     property int idOffset
     signal initDone();
     signal notify(notification: var);
@@ -646,6 +822,18 @@ Singleton {
 
         onNotification: (notification) => {
             notification.tracked = true
+            // ── A muted app stops here ─────────────────────────────────
+            //
+            // Counted, then dismissed: no popup, no chime, no card. The
+            // sender is told the notification is gone (dismiss watches the
+            // DBus NotificationClosed signal) instead of being left to
+            // believe a card is waiting to be read.
+            if (root.isMuted(notification.appName ?? "", notification.desktopEntry ?? "", notification.appIcon ?? "")) {
+                root.recordApp(notification.appName, notification.appIcon, notification.summary, "blocked");
+                notification.dismiss();
+                return;
+            }
+            root.recordApp(notification.appName, notification.appIcon, notification.summary, "allowed");
             root.playNotificationSound(notification);
             const newNotifObject = notifComponent.createObject(root, {
                 "notificationId": notification.id + root.idOffset,
@@ -653,6 +841,12 @@ Singleton {
                 "time": Date.now(),
             });
 			root.list = [...root.list, newNotifObject];
+
+			// Remembered before anything can dismiss it. A transient is
+			// feedback and a signal is the clipboard's own card, so neither
+			// belongs in a history of notifications.
+			if (!newNotifObject.isTransient && !newNotifObject.isSignal)
+				root.archive(newNotifObject);
 
             // Popup
             if (!root.popupInhibited) {
@@ -816,6 +1010,7 @@ Singleton {
 
             console.log("[Notifications] File loaded")
             root.idOffset = maxId
+            root.seedAppStatsFromList()
             root.initDone()
         }
         onLoadFailed: (error) => {
@@ -825,6 +1020,35 @@ Singleton {
                 notifFileView.setText(stringifyList(root.list));
             } else {
                 console.log("[Notifications] Error loading file: " + error)
+            }
+        }
+    }
+
+    // The per-app tally the Settings page reads. Separate from the notification
+    // file above: that one is what the centre draws and is rewritten on every
+    // dismiss, this one only changes when an app's counts do.
+    FileView {
+        id: appsFileView
+        path: Qt.resolvedUrl(Directories.notificationsAppsPath)
+        onLoaded: {
+            let loaded = {};
+            try {
+                loaded = JSON.parse(appsFileView.text()) ?? {};
+            } catch (e) {
+                loaded = {};
+            }
+            // In-memory entries win: they are newer than the file (an event may
+            // have been recorded before this load finished).
+            const merged = Object.assign({}, loaded);
+            for (const key of Object.keys(root.appStats))
+                merged[key] = Object.assign({}, loaded[key] ?? {}, root.appStats[key]);
+            root.appStats = merged;
+        }
+        onLoadFailed: (error) => {
+            if (error === FileViewError.FileNotFound) {
+                console.log("[Notifications] No app tally yet, creating one.")
+                root.appStats = ({});
+                root.saveAppStats();
             }
         }
     }
@@ -897,6 +1121,41 @@ Singleton {
         // is the only way to see whether they collide, and a run of them is
         // also 30-odd rows in the user's own history afterwards. Tests have
         // to be able to leave the shell as they found it.
+        // `notifications historyDump` -- exactly what the rewind view draws.
+        // The view is only reachable by a click that cannot be delivered to
+        // this compositor from a script, so this is the same data, in words.
+        function historyDump(): string {
+            if (root.history.length === 0)
+                return "history empty";
+            return `${root.history.length}/${root.historyMax} remembered\n`
+                + root.historyNewestFirst.map((n, i) =>
+                    `${i}: app="${n.appName}" time=${n.time} "${(n.summary || "").slice(0, 40)}"`).join("\n");
+        }
+
+        // `notifications apps` -- every app this daemon has seen, what it was
+        // allowed and blocked, and whether it is muted right now. The mute
+        // switch lives in another process (the settings app), so this is how
+        // the daemon side is checked without a mouse.
+        function apps(): string {
+            const keys = Object.keys(root.appStats);
+            if (keys.length === 0)
+                return "no apps recorded";
+            keys.sort((a, b) => (root.appStats[b].lastTime || 0) - (root.appStats[a].lastTime || 0));
+            return `muted=${root.mutedApps.length ? root.mutedApps.join(", ") : "(none)"}\n`
+                + keys.map((k) => {
+                    const s = root.appStats[k];
+                    return `${s.name}${root.isAppMuted(s.name) ? " [muted]" : ""}: allowed=${s.allowed ?? 0} blocked=${s.blocked ?? 0} last=\"${(s.lastSummary || "").slice(0, 40)}\"`;
+                }).join("\n");
+        }
+
+        // `notifications mute <appName> <true|false>` -- the switch, from a
+        // script. Writes the same config key the Settings page writes.
+        function mute(appName: string, muted: string): string {
+            const on = String(muted).toLowerCase() === "true" || String(muted) === "1";
+            const list = root.setAppMuted(appName, on);
+            return `${appName} -> ${on ? "muted" : "allowed"}; muted list: ${list.length ? list.join(", ") : "(none)"}`;
+        }
+
         function clear(): string {
             const had = root.list.length;
             root.discardAllNotifications();
@@ -930,3 +1189,4 @@ Singleton {
         }
     }
 }
+

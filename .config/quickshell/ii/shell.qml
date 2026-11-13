@@ -48,6 +48,18 @@ ShellRoot {
     // those two no longer live in different corners of the desktop.
     SignalToast {}
 
+    // The top-left transcript card: the sentence the last dictation produced,
+    // held for a few seconds with a countdown and a Copy button, then deleted
+    // (file and all). Nothing else in the stack keeps a transcript, so this is
+    // the only chance to rescue one that never reached a text box.
+    TranscriptCard {}
+
+    // The fullscreen dictation tell: a small pill that drops out of the top edge
+    // while a dictation is live and a fullscreen window covers the screen. The
+    // bar's dictation pill sits in the bar, which a fullscreen app does not show,
+    // so without this there is no way to see that the microphone is running.
+    DictationIndicator {}
+
     // Stuff for every panel family
 
     Component.onCompleted: {
@@ -597,9 +609,17 @@ ShellRoot {
     //   4 fingers -> showDesktop (REVERSED, requested): jump to an empty
     //     desktop, a second tap comes back. The desktops overview that used
     //     to live here moved to SUPER+D (custom/keybinds.lua).
-    //   3 fingers -> PLAY/PAUSE of whatever MPRIS player is active. With no
-    //     player at all it falls back to the wallpaper carousel, which is what
-    //     it used to do unconditionally. Plain navigation: no tap path flips
+    //   3 fingers -> SILENCE EVERYTHING, then bring back the last. One tap
+    //     stops every source that is making sound (a video, the local music,
+    //     both); the next tap resumes only the one that was heard last and
+    //     leaves the rest stopped. Toggling a single player -- whatever the
+    //     island happened to follow -- was the old behaviour and it left the
+    //     other source talking.
+    //
+    //     With nothing sounding and nothing silenced by the switch, the old
+    //     chain still applies: what was heard last, then anything else played
+    //     this session, then the music saved on this PC, and only with nothing
+    //     anywhere the wallpaper carousel. Plain navigation: no tap path flips
     //     the desktop into its edit mode any more.
     // (The 4-finger SWIPE up on an empty desktop is a different gesture: it
     // opens this same carousel with follow-finger animation. Its begin/end
@@ -641,34 +661,55 @@ ShellRoot {
                     console.log(`[tap] 3-finger tap ignored: ${Date.now() - root.lastWorkspaceEventAt}ms after a desktop switch`);
                     return;
                 }
-                // Three fingers is PLAY/PAUSE whenever there is anything to
-                // play or pause. MPRIS is the right level for this: it is
-                // whatever the active player is -- mpv, Spotify, a browser,
-                // a video -- so one gesture covers "song or video or whatever"
-                // without this shell knowing what any of them are.
+                // Stop everything. The tap is a silence switch, not a
+                // per-player toggle: with a video in Brave and music loaded,
+                // the old path silenced one of them and the other kept
+                // talking. EVERY source is stopped here -- browser tabs (both
+                // of them), mpv, the shell's own player -- and the gesture
+                // ends. The following press brings back only the one that was
+                // heard last, decided by the switch's own memory (see
+                // `tapSwitch`), never by a guess at what is playing.
+                const handled = MprisController.tapSwitch();
+                if (handled !== "") {
+                    console.log(`[tap] 3-finger tap: ${handled}`);
+                    return;
+                }
+                // Nothing to stop and nothing remembered: start something, the
+                // way the tap always could. MPRIS is the right level for this:
+                // it is whatever the active player is -- mpv, Spotify, a
+                // browser, a video -- so one gesture covers "song or video or
+                // whatever" without this shell knowing what any of them are.
                 //
                 // `togglePlaying` rather than reading isPlaying and picking a
                 // verb: the player owns that state, and a paused player still
                 // has to be resumable, so both directions go through it.
-                const player = MprisController.activePlayer;
-                if (player) {
-                    try {
-                        player.togglePlaying();
-                    } catch (error) {
-                        // A player object can die under us (the daemon
-                        // restarted, the bus name went away). Calling into a
-                        // destroyed QObject throws here, and swallowing it
-                        // would put the gesture back to doing nothing at all
-                        // -- with the music stopped and no way back from the
-                        // gesture. Say what happened and leave the shell
-                        // alive; the media keys still work regardless.
-                        console.warn(`[tap] play/pause failed: ${error}`);
-                    }
+                const played = MprisController.toggleBest();
+                if (played !== "") {
+                    console.log(`[tap] 3-finger tap: ${played}`);
                     return;
                 }
-                // No player at all. Fall through to the old behaviour rather
+                // Nothing on the bus could play: the tab this was on is closed
+                // and no other player is left. The music saved on this PC is
+                // the last resort, in two steps.
+                //
+                // A track already loaded makes this a REAL play/pause -- the
+                // gesture has to be able to stop the local player too, which
+                // is the one thing a "start something" fallback must not
+                // break. Only with nothing loaded is it a start, and then it
+                // picks up where the library was left.
+                if (MusicPlayer.hasTrack) {
+                    MusicPlayer.playPause();
+                    console.log("[tap] 3-finger tap: local music");
+                    return;
+                }
+                if (MusicPlayer.startRemembered()) {
+                    console.log("[tap] 3-finger tap: local music, where the library was left");
+                    return;
+                }
+                // Nothing anywhere. Fall through to the old behaviour rather
                 // than making the gesture do nothing, since a desktop with no
-                // media running has no play/pause to perform.
+                // media running and no music on disk has no play/pause to
+                // perform.
                 Quickshell.execDetached(["hyprctl", "eval", "require('custom.popup').wallpaperCarousel()"]);
                 return;
             }

@@ -5,9 +5,9 @@ in vec2 v_texcoord;
 uniform sampler2D tex;
 out vec4 fragColor;
 
-// See anti-flashbang.glsl for the gate (a white-dominant frame) and how its
-// thresholds were measured. The weak level uses the same test; only the strength
-// of the dim is gentler.
+// See anti-flashbang.glsl for the gate (a large white patch) and why it is
+// measured that way. The weak level uses the same test and only differs in how
+// far it dims.
 //
 // WHY 0.15 (2026-10-23). Weak is the level the sidebar button turns on first, so
 // it has to be visible on a white page -- a 0.12 dim ended white at 0.88, which
@@ -17,10 +17,12 @@ out vec4 fragColor;
 const float PEAK = 0.15;      // white-dominant frame ends at 1.0 - PEAK = 0.85
 
 const float WHITE = 0.88;
-const float HOT_LOW = 0.42;   // see the measured note in anti-flashbang.glsl
-const float HOT_HIGH = 0.58;
-const float MEAN_LOW = 0.35;
-const float MEAN_HIGH = 0.52;
+const float HOT_LOW = 0.16;
+const float HOT_HIGH = 0.30;
+const float BLOCK_LOW = 0.50;
+const float BLOCK_HIGH = 0.75;
+const float MEAN_LOW = 0.16;  // see the note in anti-flashbang.glsl
+const float MEAN_HIGH = 0.30;
 
 float luma(vec3 c) {
     return dot(c, vec3(0.2126, 0.7152, 0.0722));
@@ -29,29 +31,35 @@ float luma(vec3 c) {
 void main() {
     vec4 pixColor = texture(tex, v_texcoord);
 
-    float hot = 0.0;
+    float white[25];
     float sum = 0.0;
-    float samples = 0.0;
-    // WHY 5x5, NOT 10x10 (2026-10-27). This grid runs for every pixel of
-    // every frame: at 2560x1600 the 10x10 asked ~410 million questions a
-    // frame and measured +11 ms of compositor time, which held the whole
-    // desktop to 36 fps in eco and 45 fps on AC regardless of the panel's
-    // refresh -- the gate was paid for on every pixel instead of once.
-    // The taps are every other row and column of the calibrated grid (the
-    // positions the thresholds were measured against), so the gate still
-    // answers the same way; 25 taps measured at the panel's full rate.
-    for (float x = 0.05; x < 1.0; x += 0.2) {
-        for (float y = 0.05; y < 1.0; y += 0.2) {
-            float l = luma(texture(tex, vec2(x, y)).rgb);
-            hot += step(WHITE, l);
+    int i = 0;
+    for (int xi = 0; xi < 5; ++xi) {
+        for (int yi = 0; yi < 5; ++yi) {
+            float l = luma(texture(tex, vec2(0.05 + 0.2 * float(xi), 0.05 + 0.2 * float(yi))).rgb);
+            white[i] = step(WHITE, l);
             sum += l;
-            samples += 1.0;
+            ++i;
         }
     }
-    hot /= samples;
-    float mean = sum / samples;
 
-    float gate = smoothstep(HOT_LOW, HOT_HIGH, hot) * smoothstep(MEAN_LOW, MEAN_HIGH, mean);
+    float hot = 0.0;
+    for (int k = 0; k < 25; ++k)
+        hot += white[k];
+    hot /= 25.0;
+    float mean = sum / 25.0;
+
+    float block = 0.0;
+    for (int gy = 0; gy < 4; ++gy) {
+        for (int gx = 0; gx < 4; ++gx) {
+            int a = gy * 5 + gx;
+            block = max(block, (white[a] + white[a + 1] + white[a + 5] + white[a + 6]) * 0.25);
+        }
+    }
+
+    float gate = max(smoothstep(HOT_LOW, HOT_HIGH, hot),
+                     smoothstep(BLOCK_LOW, BLOCK_HIGH, block))
+               * smoothstep(MEAN_LOW, MEAN_HIGH, mean);
     float opacity = PEAK * gate;
 
     fragColor = vec4(pixColor.rgb * (1.0 - opacity), pixColor.a);

@@ -9,6 +9,11 @@ directories, the .desktop parser, and the field-code rules.
          "apps": [{"id": "vim.desktop", "name": "Vim", "icon": "vim",
                    "generic": "Text editor", "terminal": false}, ...]}
 
+    open-with.py check PATH
+        {"mime": "video/mp4", "default": "mpv.desktop"}
+        The two answers a double-click needs, and nothing else: the type, and
+        which app the desktop would hand the file to. No list, no launch.
+
     open-with.py run PATH DESKTOP_ID
         Launch that application on that file. Exit status is the answer.
 
@@ -36,6 +41,7 @@ process is started detached so the file manager is not its parent.
 """
 
 import json
+import mimetypes
 import os
 import shlex
 import subprocess
@@ -140,6 +146,33 @@ def matches(entry_mimes, mime):
     return False
 
 
+def guess_mime(path):
+    """The file's type, from its NAME -- deliberately not from its bytes.
+
+    `xdg-mime query filetype` reads the file, because that is how it sniffs
+    content, and over the network a read is a download: measured on the Google
+    Drive mount it took 2.7s warm and over 30s cold. That is not just slow --
+    the file manager has ONE process slot for these questions, so an answer
+    that arrives late lands on whatever was asked next (the chooser's own list
+    arrived as "Could not read the list of applications", which was the type
+    query's output being read as JSON).
+
+    The extension is what every desktop looks at FIRST anyway -- glib's own
+    guess is name-first, content-second -- so the name is asked here, and
+    `xdg-mime` is kept for a name that says nothing (no extension, or one
+    nobody has ever heard of), where a sniff is the only answer there is.
+    """
+    mime = mimetypes.guess_type(os.path.basename(path))[0] or ""
+    if mime:
+        return mime
+    try:
+        out = subprocess.run(["xdg-mime", "query", "filetype", path],
+                             capture_output=True, text=True, timeout=2)
+        return out.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
 def default_for(mime):
     """The default app's desktop id, straight out of gio -- the same answer the
     desktop itself would use, so the chooser cannot disagree with a plain
@@ -164,16 +197,15 @@ def uri_for(path):
     return "file://" + urllib.parse.quote(os.path.abspath(path), safe="/")
 
 
+def cmd_check(path):
+    """What a double-click needs, and the cheapest way to ask it."""
+    mime = guess_mime(path) or "application/octet-stream"
+    print(json.dumps({"mime": mime, "default": default_for(mime)}))
+    return 0
+
+
 def cmd_list(path):
-    mime = ""
-    try:
-        out = subprocess.run(["xdg-mime", "query", "filetype", path],
-                             capture_output=True, text=True, timeout=5)
-        mime = out.stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        pass
-    if not mime:
-        mime = "application/octet-stream"
+    mime = guess_mime(path) or "application/octet-stream"
 
     default_id = default_for(mime)
     apps = installed()
@@ -262,6 +294,8 @@ def main(argv):
     verb = argv[1]
     if verb == "list":
         return cmd_list(argv[2])
+    if verb == "check":
+        return cmd_check(argv[2])
     if verb == "run" and len(argv) >= 4:
         return cmd_run(argv[2], argv[3])
     sys.stderr.write("unknown request: %s\n" % verb)

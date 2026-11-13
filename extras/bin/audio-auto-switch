@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# Make a newly connected Bluetooth headset the default output.
+#
+# The problem this solves is not "PipeWire does not notice the device". It is
+# that WirePlumber remembers the sink you last picked as an EXPLICIT default:
+#
+#   ~/.local/state/wireplumber/default-nodes
+#   default.configured.audio.sink=alsa_output.usb-Corsair_...analog-stereo
+#
+# A configured default outranks automatic priority selection forever after, so
+# a headset that connects afterwards is present in `wpctl status`, is loud, and
+# still receives nothing: it is simply not the default, and nothing moves the
+# running streams. Selecting it by hand is what the user was doing on every
+# connection, which is the thing worth automating.
+#
+# Why not `module-switch-on-connect` (the pulse layer's own module, which is
+# what most desktops use)? It was tried here and it did not move the default
+# for a newly created sink on this PipeWire build (1.6.x / pulse 17.0), with
+# `ignore_virtual=false` and no blocklist match. It also cannot be told "only
+# Bluetooth": its only filter is a blocklist of names, so a dock or USB DAC
+# would take over as well. A watcher that reads the device's own properties is
+# both provable and narrow, and it is four dozen lines.
+#
+# What counts as the device you just connected is `device.api = "bluez5"` --
+# the property bluez5 itself sets on the node -- rather than the sink's name,
+# which is a vendor string that changes per headset.
+#
+# AUDIO_AUTOSWITCH_PATTERN exists so the switching path can be tested without
+# Bluetooth hardware: point it at any other sink property, create that sink,
+# and watch the default move.
+
+set -uo pipefail
+
+PATTERN="${AUDIO_AUTOSWITCH_PATTERN:-device.api = \"bluez5\"}"
+SETTLE_TRIES="${AUDIO_AUTOSWITCH_TRIES:-6}"
+SETTLE_DELAY="${AUDIO_AUTOSWITCH_DELAY:-1}"
+
+log() { printf '%s\n' "$*"; }
+
+# Every sink whose section of `pactl list sinks` contains the pattern, as
+# "<index>\t<name>" lines, oldest first.
+#
+# `pactl list sinks` separates devices with a blank line, so awk reads it in
+# paragraph mode; parsing the human-readable listing rather than `list short`
+# is deliberate, because the properties -- the only place `device.api` lives --
+# are not in the short form.
+matching_sinks() {
+    pactl list sinks 2>/dev/null | AUDIO_AUTOSWITCH_PATTERN="$PATTERN" awk '
+        BEGIN { RS = ""; FS = "\n" }
+        {
+            if (index($0, ENVIRON["AUDIO_AUTOSWITCH_PATTERN"]) == 0) next
+            idx = ""; name = ""
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /^Sink #/) idx = substr($i, 7)
+                else if ($i ~ /^[ \t]*Name: /) {
+                    name = $i
+                    sub(/^[ \t]*Name: /, "", name)
+                }
+            }
+            if (idx != "" && name != "") printf "%s\t%s\n", idx, name
+        }'
+}
+
+# Move what is currently playing onto the new device.
+#
+# Setting the default only affects streams that START afterwards; everything
+# already running stays where it was, which is the half of "it did not switch"
+# that looks like the setting was ignored. A headset that becomes the default
+# but plays nothing is not a switch.
+move_streams() {
+    local sink="$1" id
+    pactl list short sink-inputs 2>/dev/null | cut -f1 | while read -r id; do
+        [[ -n "$id" ]] && pactl move-sink-input "$id" "$sink" 2>/dev/null
+    done
+}
+
+# The newest matching sink, made the default. Returns non-zero when there is
+# nothing to switch to yet, which is the normal state for the first second or
+# two after a connection: bluez announces the device before the sink exists,
+# and WirePlumber may recreate the sink when it moves the device to the A2DP
+# profile. The caller retries, so a transient gap is not a failure.
+switch_to_match() {
+    local last idx name current
+    last="$(matching_sinks | tail -n1)"
+    [[ -z "$last" ]] && return 1
+
+    idx="${last%%$'\t'*}"
+    name="${last#*$'\t'}"
+
+    current="$(pactl get-default-sink 2>/dev/null)"
+    if [[ "$current" == "$name" ]]; then
+        # Already correct -- for example a re-connect that reused the node.
+        # Streams are still moved, since they may be sitting on the old sink.
+        move_streams "$name"
+        return 0
+    fi
+
+    if pactl set-default-sink "$name" 2>/dev/null; then
+        log "default output -> $name (sink $idx)"
+        move_streams "$name"
+        return 0
+    fi
+
+    log "could not set default -> $name (sink $idx)"
+    return 1
+}
+
+log "watching for new sinks matching: $PATTERN"
+
+# The subscription is re-established rather than trusted: pipewire-pulse can be
+# restarted (an update, `systemctl --user restart pipewire-pulse`, a crash)
+# without this unit being restarted, and a watcher whose stream ended would sit
+# there silently doing nothing forever.
+while :; do
+    pactl subscribe 2>/dev/null | while IFS= read -r event; do
+        # Only `new`. A `change` event fires for every volume step, profile
+        # change and port switch; acting on those would drag the default back
+        # to the headset the moment you deliberately chose the speakers.
+        case "$event" in
+            *"Event 'new' on sink"*) ;;
+            *) continue ;;
+        esac
+
+        for ((try = 1; try <= SETTLE_TRIES; try++)); do
+            sleep "$SETTLE_DELAY"
+            switch_to_match && break
+        done
+    done
+
+    log "pulse subscription ended; reconnecting in 2s"
+    sleep 2
+done

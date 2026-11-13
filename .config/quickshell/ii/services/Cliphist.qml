@@ -180,6 +180,16 @@ Singleton {
         wipeProc.running = true;
     }
 
+    // While this is in the future, clipboard changes are NOT announced. Dictation
+    // is the reason: it sets the selection to paste a sentence and puts the old
+    // text back a moment later, and two "Copied" cards for a sentence the user
+    // never copied is noise on their screen. See dictate.sh (paste_text), which
+    // asks for the window over IPC before it touches anything.
+    property double quietUntil: 0
+    function quiet(ms) {
+        root.quietUntil = Date.now() + Math.max(0, Number(ms ?? 0));
+    }
+
     // ── Noticing that something was copied ──────────────────────────────
     // NOT `Quickshell.clipboardText`, which is what this used to listen to. Under
     // Wayland a client only learns about the clipboard from a selection OFFER, and
@@ -195,6 +205,10 @@ Singleton {
         running: true
         stdout: SplitParser {
             onRead: line => {
+                // A change we caused ourselves (see quietUntil): the clipboard did
+                // change, but there is nothing to tell the user about.
+                if (Date.now() < root.quietUntil)
+                    return;
                 root.pendingChange = true
                 root.pendingOwnCopy = root.shellCopied()
                 root.toastRetries = 0
@@ -531,6 +545,11 @@ Singleton {
 
         function update(): void {
             root.refresh()
+        }
+        // "a copy is happening, do not announce the next change(s)": called by
+        // the dictation script around its own clipboard write.
+        function quietFor(ms: string): void {
+            root.quiet(ms)
         }
     }
 }

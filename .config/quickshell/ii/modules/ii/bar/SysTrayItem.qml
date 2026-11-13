@@ -30,6 +30,39 @@ MouseArea {
     // would be a stray shape with nothing to divide.
     property bool showHoverPlate: false
 
+    // ── Reopening an app that hides itself ──────────────────────────────────
+    // `item.activate()` re-raises the app's window exactly where it last was,
+    // so after asking the app to come back the window is pulled to the
+    // workspace the user is actually on (TrayApps.bringToActive). It has to
+    // POLL: activate() is fire-and-forget, and an Electron app needs to
+    // un-hide and commit a frame first.
+    //
+    // The clock lives HERE, one Timer per tray icon, scoped to the thing that
+    // was clicked -- NOT in the TrayApps singleton. A version with the timer
+    // and its counters in the singleton drove the shell's main thread to 100%
+    // of a core (measured: 106% with it, 21% without, same restart twice).
+    property string revealCls: ""
+    property int revealTries: 0
+    property bool revealMoved: false
+
+    Timer {
+        id: revealTimer
+        interval: 120
+        repeat: true
+        running: false
+        onTriggered: {
+            const st = TrayApps.bringToActive(root.revealCls);
+            root.revealTries += 1;
+            if (st.moved)
+                root.revealMoved = true;
+            // A deadline, plus an early stop once the window has been moved
+            // and stays put -- a menu-only tray daemon owns no window and must
+            // not be polled forever.
+            if (root.revealTries >= 25 || (root.revealMoved && !st.moved && st.found > 0))
+                revealTimer.running = false;
+        }
+    }
+
     // The window class of this item, when the app behind it is one the
     // shell has parked. Non-empty means "there is a window in the tray and
     // this icon is the way back to it".
@@ -72,11 +105,18 @@ MouseArea {
             root.itemPressed();
             // Parked window first: restoring it IS the user's click. With
             // nothing parked, the app's own activate() is still the right
-            // answer -- for most tray items it is the only thing there is.
-            if (root.parkedClass !== "")
+            // answer -- for most tray items it is the only thing there is --
+            // and the poll above then moves the window to this workspace.
+            if (root.parkedClass !== "") {
                 TrayApps.show(root.parkedClass);
-            else
+            } else {
+                root.revealCls = TrayApps.classForTrayItem(root.item);
                 item.activate();
+                root.revealTries = 0;
+                root.revealMoved = false;
+                if (root.revealCls !== "")
+                    revealTimer.restart();
+            }
             break;
         case Qt.RightButton:
             if (item.hasMenu)

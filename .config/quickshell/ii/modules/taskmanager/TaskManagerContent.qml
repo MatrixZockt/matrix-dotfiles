@@ -673,13 +673,31 @@ Item {
     readonly property bool onScreenNow: root.visible
         && root.Window.window !== null
         && root.Window.window.visible
-    onIsListPageChanged: ProcessList.setActive("taskmanager", root.isListPage && root.onScreenNow)
-    onVisibleChanged: ProcessList.setActive("taskmanager", root.isListPage && root.onScreenNow)
-    onOnScreenNowChanged: ProcessList.setActive("taskmanager", root.isListPage && root.onScreenNow)
+    // The GPU column rides the same gate as the process table: same surfaces,
+    // same condition. Reading the card costs a process spawn that OPENS the
+    // device, so it must stop the moment the table leaves the screen.
+    onIsListPageChanged: {
+        ProcessList.setActive("taskmanager", root.isListPage && root.onScreenNow);
+        GpuProcesses.setActive("taskmanager", root.isListPage && root.onScreenNow);
+    }
+    onVisibleChanged: {
+        ProcessList.setActive("taskmanager", root.isListPage && root.onScreenNow);
+        GpuProcesses.setActive("taskmanager", root.isListPage && root.onScreenNow);
+    }
+    onOnScreenNowChanged: {
+        ProcessList.setActive("taskmanager", root.isListPage && root.onScreenNow);
+        GpuProcesses.setActive("taskmanager", root.isListPage && root.onScreenNow);
+    }
     // Opened directly on a list page (QS_TM_KEY=apps): no change signal ever
     // fires, so the initial state has to be applied by hand too.
-    Component.onCompleted: ProcessList.setActive("taskmanager", root.isListPage && root.onScreenNow)
-    Component.onDestruction: ProcessList.setActive("taskmanager", false)
+    Component.onCompleted: {
+        ProcessList.setActive("taskmanager", root.isListPage && root.onScreenNow);
+        GpuProcesses.setActive("taskmanager", root.isListPage && root.onScreenNow);
+    }
+    Component.onDestruction: {
+        ProcessList.setActive("taskmanager", false);
+        GpuProcesses.setActive("taskmanager", false);
+    }
     readonly property color pageAccent: {
         const entry = root.railModel.find(e => e.key === root.selectedKey);
         return entry ? entry.accent : Appearance.colors.colPrimary;

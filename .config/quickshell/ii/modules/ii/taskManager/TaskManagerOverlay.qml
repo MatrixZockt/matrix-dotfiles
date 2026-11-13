@@ -159,8 +159,32 @@ Scope {
                 right: true
             }
 
+            // Escape closes, from the WINDOW rather than from something inside
+            // the card.
+            //
+            // The card used to carry a FocusScope with `focus: root.open` and
+            // `Keys.onEscapePressed`, and it was the only thing that ever
+            // answered the key. That works only while the FocusScope IS the
+            // focused item: the moment the search field takes focus (which is
+            // immediately, and on every click), or the compositor releases the
+            // key without a focus handover, the key arrives at the surface and
+            // nothing consumes it -- a popup that ignores Escape. A Shortcut on
+            // the window is evaluated before item-level focus matters, so the
+            // key is answered whenever this surface owns the keyboard, whatever
+            // is focused inside it.
+            Shortcut {
+                sequence: "Escape"
+                enabled: root.open
+                onActivated: root.close("escape")
+            }
+
             // A press on the backdrop closes, like every other overlay here.
+            // Full-surface, so a click anywhere beside the card lands here and
+            // simply puts the popup away; `enabled` says the same thing a
+            // second time so the intent survives anyone editing the mask.
             MouseArea {
+                id: clickCatcher
+                enabled: root.open
                 anchors.fill: parent
                 onClicked: root.close("backdrop click")
             }
@@ -183,6 +207,19 @@ Scope {
                 border.color: Appearance.colors.colLayer0Border
                 clip: true
 
+                // The card TAKES the press, so "click outside" means outside.
+                //
+                // Without this the card is only a painted rectangle: it has no
+                // handler of its own, so a click on its padding or on an empty
+                // part of the table falls through to the backdrop catcher
+                // underneath and closes the popup the user was working in.
+                // Declared BEFORE the content, so every real control inside the
+                // card sits above it and keeps its own clicks.
+                MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+                }
+
                 TaskManagerUI.TaskManagerContent {
                     id: content
                     anchors.fill: parent
@@ -194,14 +231,10 @@ Scope {
                     onQuitRequested: root.close("content quitRequested (Escape inside)")
                 }
 
-                // Escape closes the surface. On the Overlay layer the shell
-                // does not get the key for free, so the focus is claimed by
-                // the card and the key is handled here.
-                FocusScope {
-                    anchors.fill: parent
-                    focus: root.open
-                    Keys.onEscapePressed: root.close("focus scope Escape")
-                }
+                // Escape is answered by the Shortcut at the surface level (see
+                // the top of this PanelWindow), not from here: a handler that
+                // needs focus inside the card stops working the moment anything
+                // in the card owns the focus instead.
             }
         }
     }

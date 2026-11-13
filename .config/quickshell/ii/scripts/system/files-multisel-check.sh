@@ -8,7 +8,7 @@
 # app's pointer gesture reaches -- openMenu + runMenu -- so what it proves is
 # what a right-click runs.
 set -u
-QML_PICKER=/home/user/.config/quickshell/ii/filemanager-picker.qml
+QML_PICKER="${HOME}/.config/quickshell/ii/filemanager-picker.qml"
 SCRATCH="$HOME/fm-scratch-multisel"
 PORTAL="${XDG_RUNTIME_DIR:-/tmp}/ii-portal"
 LOG=/tmp/fm-multisel.log

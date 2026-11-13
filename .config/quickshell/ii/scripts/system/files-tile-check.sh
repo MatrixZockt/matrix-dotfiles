@@ -5,7 +5,7 @@
 # picker instance over IPC (same recipe as files-check.sh) and asserts the
 # numbers the grid reports through probeTileCell.
 set -u
-QML_PICKER=/home/user/.config/quickshell/ii/filemanager-picker.qml
+QML_PICKER="${HOME}/.config/quickshell/ii/filemanager-picker.qml"
 SCRATCH="$HOME/fm-scratch-tile"
 PORTAL="${XDG_RUNTIME_DIR:-/tmp}/ii-portal"
 TOKEN="fmtileck$$"

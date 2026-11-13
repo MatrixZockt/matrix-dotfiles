@@ -235,6 +235,11 @@ Singleton {
     // the `depth` is what indents them.
     readonly property var rows: {
         const _ = root.revision;
+        // The GPU figures arrive on their own cadence -- the card is sampled by
+        // GpuProcesses, not by the process table -- so these rows have to be
+        // rebuilt when those move as well, or the GPU column would only ever
+        // change on a sample where the process list happened to change too.
+        const _gpu = GpuProcesses.revision;
         const list = root.filtered;
         if (!root.grouped) {
             return list.map(process => ({
@@ -248,7 +253,8 @@ Singleton {
                 user: process.user,
                 state: process.state,
                 cpu: process.cpu,
-                memory: process.memory
+                memory: process.memory,
+                gpu: GpuProcesses.percentFor([process.pid])
             }));
         }
 
@@ -285,6 +291,10 @@ Singleton {
                 state: heaviest.state,
                 cpu: members.reduce((sum, p) => sum + (p.cpu ?? 0), 0),
                 memory: members.reduce((sum, p) => sum + (p.memory ?? 0), 0),
+                // The whole application's share of the card: a browser is its
+                // gpu-process plus every renderer, and "Brave 34%" only
+                // answers "what is using my GPU" if it counts all of them.
+                gpu: GpuProcesses.percentFor(members.map(p => p.pid)),
                 count: members.length,
                 expanded: root.expandedGroups.includes(key),
                 members: members

@@ -315,6 +315,18 @@ if [ -f "${II_LOCK_RAISE_FAILED:-/tmp/ii-lock-raise-failed}" ]; then
     timeout 3 qs -c "${qsConfig:-ii}" ipc call lock activate >/dev/null 2>&1 \
         && rm -f "${II_LOCK_RAISE_FAILED:-/tmp/ii-lock-raise-failed}" 2>/dev/null || true
 fi
+
+# 1b. The password field, already focused.
+#
+# A resume hands back a lock screen that was raised BEFORE the sleep, behind a
+# panel that was already off -- so the lock surface took focus while the
+# compositor had not activated it, Qt dropped that focus, and the field only
+# became focused on the first pointer motion. That is the "I have to wiggle the
+# mouse before I can type" report of 2026-11-05. LockSurface.qml re-asserts
+# focus by itself now, within a fraction of a second; this is the immediate
+# version of the same thing, for the frame the user is already looking at.
+# Harmless while unlocked: no lock surface exists, so nothing is listening.
+timeout 3 qs -c "${qsConfig:-ii}" ipc call lock focus >/dev/null 2>&1 || true
 # The line this whole record exists for. A panel that is still off here has
 # already had the retries in wake_now, and before-sleep.sh's net is still armed
 # to try again -- but the record is what turns "it came back dark" from a

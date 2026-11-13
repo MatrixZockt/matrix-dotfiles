@@ -387,7 +387,7 @@ PanelWindow {
         // browser's "Add file" passes no current_folder -- so in that (the
         // common) case the dialog reopens where the last one ANSWERED, from
         // Persistent.states.pickerDir. That is the request: pick a file in
-        // grafizum once, and the next "add file" starts in grafizum instead of
+        // a shared folder once, and the next "add file" starts there instead of
         // home.
         if (root.pickerStartDir.length > 0)
             content.pickerNavigate(root.pickerStartDir);
@@ -497,6 +497,8 @@ PanelWindow {
         function forgetSize(path: string): void { FolderSizes.forget(path); }
         function probeVolumes(): string { return content.probeVolumes(); }
         function probeMenu(): string { return content.probeMenu(); }
+        // Where each details row's blank (folder-background) tail begins.
+        function probeNameBlank(): string { return content.probeNameBlank(); }
         // The tile cell the grid chose for the pane's width.
         function probeTileCell(): string { return content.probeTileCell(); }
         // The dialog's view controls: list/grid, tile size, hidden files. This

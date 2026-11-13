@@ -134,5 +134,5 @@ hl.env("XCURSOR_SIZE", "24")
 -- ~/.local/share/cursor-shims/Adwaita is a symlink to the real Bibata theme,
 -- so the *name* "Adwaita" now resolves to the user's cursor everywhere.
 -- Path is applied after theme state in libXcursor, so it covers every app.
-hl.env("XCURSOR_PATH", (os.getenv("HOME") or "/home/user") .. "/.local/share/cursor-shims:~/.local/share/icons:~/.icons:/usr/share/icons:/usr/share/pixmaps")
+hl.env("XCURSOR_PATH", (os.getenv("HOME") or "") .. "/.local/share/cursor-shims:~/.local/share/icons:~/.icons:/usr/share/icons:/usr/share/pixmaps")
 hl.env("HYPRCURSOR_THEME", "Bibata-Modern-Ice")

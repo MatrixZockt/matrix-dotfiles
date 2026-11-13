@@ -10,7 +10,17 @@ Rectangle {
 
     property bool show: false
     default property alias contentData: contentColumn.data
-    property real backgroundHeight: dialogBackground.implicitHeight
+    /// The dialog's OPEN height. 0 means "as tall as the content needs"; the
+    /// sidebar dialogs pass a fixed number instead. It must not be read back
+    /// from `dialogBackground.implicitHeight`: that property is driven down to
+    /// 0 when the dialog closes, so a binding to it was captured collapsed and
+    /// every dialog after the first opened as a zero-height sliver, contents
+    /// spilling out and buttons on top of the text. `onShowChanged` used to
+    /// assign implicitHeight as well, which killed the binding for good.
+    property real backgroundHeight: 0
+    readonly property real openHeight: backgroundHeight > 0
+        ? backgroundHeight
+        : contentColumn.implicitHeight + dialogBackground.radius * 2
     property real backgroundWidth: 350
     property real backgroundAnimationMovementDistance: 60
     
@@ -30,7 +40,6 @@ Rectangle {
 
     onShowChanged: {
         dialogBackgroundHeightAnimation.easing.bezierCurve = (show ? Appearance.animationCurves.emphasizedDecel : Appearance.animationCurves.emphasizedAccel)
-        dialogBackground.implicitHeight = show ? backgroundHeight : 0
     }
 
     radius: Appearance.rounding.screenRounding - Appearance.sizes.hyprlandGapsOut + 1
@@ -48,10 +57,10 @@ Rectangle {
         radius: Appearance.rounding.large
         color: Appearance.m3colors.m3surfaceContainerHigh // Use opaque version of layer3
         
-        property real targetY: root.height / 2 - root.backgroundHeight / 2
+        property real targetY: root.height / 2 - root.openHeight / 2
         y: root.show ? targetY : (targetY - root.backgroundAnimationMovementDistance)
         implicitWidth: root.backgroundWidth
-        implicitHeight: contentColumn.implicitHeight + dialogBackground.radius * 2
+        implicitHeight: root.show ? root.openHeight : 0
         Behavior on implicitHeight {
             NumberAnimation {
                 id: dialogBackgroundHeightAnimation

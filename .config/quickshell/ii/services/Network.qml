@@ -337,7 +337,7 @@ Singleton {
                         continue;
                     const dev = line.slice(0, eq);
                     // The prefix length is NetworkManager bookkeeping, not
-                    // part of the address; "192.168.1.100/24" in a tooltip
+                    // part of the address; "192.168.1.50/24" in a tooltip
                     // reads as a typo.
                     const addr = line.slice(eq + 1).split("/")[0];
                     if (addr.length === 0)

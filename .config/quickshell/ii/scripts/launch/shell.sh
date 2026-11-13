@@ -341,8 +341,8 @@ exec 9>&-
 
 # ── THE SHELL RENDERS ON THE CHIP THE SCREEN IS PLUGGED INTO (2026-11-01) ──
 #
-# This machine has two graphics chips: the Intel one drives the laptop panel,
-# the NVIDIA dGPU is a discrete card used only when asked. The session used to
+# On a hybrid laptop two chips exist: the integrated one drives the panel, the
+# discrete card is used only when asked. The session used to
 # export __NV_PRIME_RENDER_OFFLOAD/__GLX_VENDOR_LIBRARY_NAME/__VK_LAYER_NV_optimus
 # globally, which told EVERY program -- this shell included -- to render on the
 # discrete card. Every frame was then rendered on one chip and copied to the

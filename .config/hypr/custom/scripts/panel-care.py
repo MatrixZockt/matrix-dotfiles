@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Panel care for the OLED panel.
 
-This machine's display is a Samsung OLED (eDP-1, 2560x1600). An OLED does not
+Written for an OLED panel (the one this desk has is an eDP panel at 2560x1600;
+on an LCD the shader is harmless but pointless). An OLED does not
 burn a backlight through a mask like an LCD: every pixel is its own light, and
 every pixel ages in proportion to how hard and how long it has been driven. A
 large bright field held in the same place -- a document page, a light-mode app,

@@ -1,0 +1,46 @@
+# The hold-SUPER dictation daemon: reads the keyboards below the compositor and
+# records while SUPER is held alone.
+#
+# Same reason as dictate-server.service: execs.lua covers login and config
+# reloads, but not a process group being killed under a running session (oomd
+# did exactly that on 2026-11-09 10:22, and dictation stayed dead). A unit with
+# Restart=on-failure brings it back in about two seconds, whatever killed it --
+# OOM, a crash, or someone closing the wrong thing.
+#
+# It needs no display server of its own: it watches /dev/input and writes
+# status.json for the shell's pill. The typing half (dictate.sh) is spawned per
+# dictation and inherits the session environment below, which is why
+# WAYLAND_DISPLAY and PATH are set explicitly here rather than assumed -- a user
+# unit gets the manager's environment, and a stale or partial one would break
+# paste/wtype without any error the user could see.
+[Unit]
+Description=Hold-SUPER dictation daemon (records below the compositor, types the words)
+After=default.target dictate-server.service ydotoold.service
+# ydotoold is what makes the final Ctrl+V reach XWayland apps; the daemon itself
+# only needs it at the moment a dictation is typed, but starting both together
+# keeps the socket from being missing on the first hold after a reboot.
+Wants=dictate-server.service ydotoold.service
+PartOf=default.target
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/bin:/opt/cuda/bin
+# Passed through from the session rather than hardcoded: the socket name is
+# wayland-1 today, and a literal here would quietly break typing on a boot
+# where it is not.
+PassEnvironment=WAYLAND_DISPLAY DISPLAY
+ExecStart=/usr/bin/python3 %h/.config/hypr/custom/scripts/dictate-daemon.py
+# on-failure with no restart budget: a crash or SIGKILL (oomd, a bad device)
+# must come back at once -- a daemon that is down means the SUPER gesture
+# silently does nothing -- but two exits are deliberate and must stay put: the
+# duplicate guard exits 0 when a hand-started copy already owns the pidfile
+# (otherwise this unit would spin every 2 s), and SIGTERM from a stop exits 0.
+Restart=on-failure
+RestartSec=2
+StartLimitIntervalSec=0
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dictate-daemon
+
+[Install]
+WantedBy=default.target

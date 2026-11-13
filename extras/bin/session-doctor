@@ -55,35 +55,22 @@ for unit in shell-watchdog.service; do
     esac
 done
 
-# ── Did the GPU pin work? ────────────────────────────────────────────────
+# ── Is the discrete card asleep? ────────────────────────────────────────
 echo
 echo "${bold}── GPU ───────────────────────────────────────────────────${off}"
 if [ -z "$WD" ]; then
     note "skipped (no desktop session)"
 else
-    # Count nvidia fds held by the compositor. This is THE number: the whole
-    # point of AQ_DRM_DEVICES is that Hyprland never opens the dGPU, so zero
-    # here means the pin took and the dGPU can power down.
+    # A compositor that opened the card keeps it awake, so the fd count is the
+    # number that matters. Card-agnostic: an integrated-only machine simply
+    # counts zero and moves on.
     hp=$(pgrep -x Hyprland | head -1)
     if [ -n "$hp" ]; then
-        if tr '\0' '\n' < "/proc/$hp/environ" 2>/dev/null | grep -q AQ_DRM_DEVICES; then
-            pin=$(tr '\0' '\n' < "/proc/$hp/environ" 2>/dev/null | sed -n 's/^AQ_DRM_DEVICES=//p')
-            note "compositor was started with AQ_DRM_DEVICES=$pin"
-        else
-            note "no AQ_DRM_DEVICES in the compositor's environment"
-        fi
         fds=$(ls -l "/proc/$hp/fd" 2>/dev/null | grep -c nvidia)
         if [ "$fds" -eq 0 ]; then
-            ok "Hyprland holds 0 nvidia fds -- the dGPU can idle"
+            ok "Hyprland holds no nvidia fds -- the discrete card can idle"
         else
-            warn "Hyprland still holds $fds nvidia fds"
-            if tr '\0' '\n' < "/proc/$hp/environ" 2>/dev/null | grep -q AQ_DRM_DEVICES; then
-                note "the pin WAS set but Hyprland opened the dGPU anyway"
-                note "-> the value is being read too late, or is being ignored"
-            else
-                note "the pin never reached the compositor; ~4 W is being spent"
-                note "expected source: ~/.config/fish/conf.d/aq-drm-devices.fish"
-            fi
+            warn "Hyprland holds $fds nvidia fds (the card stays awake)"
         fi
     fi
     if [ -n "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null)" ]; then

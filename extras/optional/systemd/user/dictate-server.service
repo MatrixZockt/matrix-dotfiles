@@ -1,0 +1,45 @@
+# The warm whisper.cpp server that dictation transcribes against.
+#
+# WHY A UNIT AND NOT JUST execs.lua
+# ---------------------------------
+# custom/execs.lua starts this at login and on every Hyprland config reload.
+# That covers "the desktop came up", but not the case that actually happened on
+# 2026-11-09 10:22:43: systemd-oomd killed the process group this was started
+# from, and with no login and no reload to re-run execs.lua, dictation was dead
+# until the next reboot. A unit with Restart=always gets it back by itself,
+# within a second of anything taking it down, and it survives a shell restart,
+# an OOM sweep and a crashed launcher the same way.
+#
+# `run` is the foreground form of dictate-server.sh: it execs whisper-server in
+# place of the shell, so systemd supervises the real process and `SIGTERM` on
+# the unit stops the server rather than a wrapper. The script resolves which
+# build to use (CUDA first, CPU fallback) and which model ii-dictate.conf names,
+# the same way the hand-started path does -- one place decides, two ways to run.
+#
+# It holds the model (and the CUDA context) in memory so a dictation comes back
+# in ~0.2 s instead of the second or two a fresh process spends loading weights.
+# Loopback only: nothing leaves the machine.
+[Unit]
+Description=Warm whisper.cpp server for hold-SUPER dictation (127.0.0.1:8917)
+# There is no graphical-session.target on this setup; default.target is the
+# only anchor that actually starts. It needs no display, so early is fine.
+After=default.target sound.target
+PartOf=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.config/hypr/custom/scripts/dictate-server.sh run
+# on-failure, not always: a crash, a SIGKILL (what oomd sends) and a failed
+# model load all get restarted, while a deliberate `dictate-server.sh stop` or a
+# `systemctl --user stop` stays stopped instead of fighting the user.
+Restart=on-failure
+RestartSec=2
+# A dead GPU context or a bad model path must never leave dictation in a
+# permanent "gave up" state, so give the restarts no budget.
+StartLimitIntervalSec=0
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dictate-server
+
+[Install]
+WantedBy=default.target

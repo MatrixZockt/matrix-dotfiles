@@ -32,12 +32,11 @@
 #            balanced      quiet       35 /  45 W     on
 #            performance   noisy       vendor (120/160)
 #
-#     2. THE PANEL REFRESH. This panel's EDID advertises a 48-240 Hz range but
-#        DRM exposes exactly one mode (2560x1600@240), so Hyprland's monitor
-#        rule can never reach a lower rate on its own. Verified 2026-10-10
-#        that `hyprctl eval` with hl.monitor() DOES accept a 60 Hz mode, so
-#        power-saver drops the panel to 60 Hz and the others restore the
-#        panel's preferred (240 Hz). `hyprctl keyword` does not work on this
+#     2. THE PANEL REFRESH. A panel can advertise a wide refresh range while
+#        DRM exposes a single mode, so a compositor monitor rule cannot reach a
+#        lower rate on its own. Verified 2026-10-10 that `hyprctl eval` with
+#        hl.monitor() DOES accept a 60 Hz mode, so power-saver drops the panel
+#        to 60 Hz and the others restore the panel's preferred rate. `hyprctl keyword` does not work on this
 #        build -- it is a non-legacy (Lua) parser and answers "keyword can't
 #        work with non-legacy parsers. Use eval."
 #
@@ -86,8 +85,18 @@ NO_TURBO="/sys/devices/system/cpu/intel_pstate/no_turbo"
 
 ELEVATE="/usr/local/sbin/power-helper"
 II_CONFIG="$HOME_DIR/.config/illogical-impulse/config.json"
+# The output and its mode are DISCOVERED, not assumed: this ran for one laptop
+# panel at one resolution, which meant every other machine got a monitor rule
+# naming an output it does not have. MONITOR and PANEL_MODE still override, for
+# the case where detection picks the wrong head.
+detect_monitor() {
+    command -v jq >/dev/null 2>&1 || return 1
+    hyprctl -j monitors 2>/dev/null \
+        | jq -r 'sort_by(.focused | not) | .[0].name // empty' 2>/dev/null
+}
+MONITOR="${MONITOR:-$(detect_monitor || true)}"
 MONITOR="${MONITOR:-eDP-1}"
-PANEL_MODE="${PANEL_MODE:-2560x1600}"
+PANEL_MODE="${PANEL_MODE:-}"
 DISPLAY_SCALE_FILE="$HOME_DIR/.cache/display/scale"
 
 # Panel bit depth, restated in every rule this script applies.
@@ -443,6 +452,13 @@ hypr_signature() {
     return 1
 }
 
+panel_preferred_hz() {
+    command -v jq >/dev/null 2>&1 || return 1
+    hyprctl -j monitors 2>/dev/null | jq -r --arg m "$MONITOR" \
+        '.[] | select(.name==$m) | (.availableModes // [])
+         | map(split("@")[1] // "" | sub("Hz$";"") | tonumber? // 0) | max // empty' 2>/dev/null
+}
+
 panel_refresh() {
     hyprctl monitors 2>/dev/null \
         | awk -v m="Monitor $MONITOR" '$0 ~ m {f=1} f && /@/ {print $1; exit}'
@@ -453,20 +469,27 @@ apply_refresh() {
     local want="$1" cur scale mode
     hypr_signature || { log "no live Hyprland socket - refresh left alone"; return 1; }
     cur="$(panel_refresh)"
-    local cur_hz="${cur##*@}"
+    local cur_hz="${cur##*@}" res="${cur%%@*}"
+    [ -n "$res" ] || res="$PANEL_MODE"
     scale="$(readfile "$DISPLAY_SCALE_FILE")"
     [ -n "$scale" ] || scale="1.5"
 
     if [ "$want" = "preferred" ]; then
         case "$cur_hz" in
-            240*|preferred|"") log "refresh already at panel preferred ($cur)"; return 0 ;;
+            preferred|"") log "refresh already at panel preferred ($cur)"; return 0 ;;
+        esac
+        local pref
+        pref="$(panel_preferred_hz || true)"
+        case "$cur_hz" in
+            "$pref"*) [ -n "$pref" ] && { log "refresh already at panel preferred ($cur)"; return 0; } ;;
         esac
         mode="preferred"
     else
         case "$cur_hz" in
             "${want}.0"*|"${want}.00"*) log "refresh already ${want} Hz ($cur)"; return 0 ;;
         esac
-        mode="${PANEL_MODE}@${want}"
+        [ -n "$res" ] || { log "no panel mode known for $MONITOR - refresh left alone"; return 1; }
+        mode="${res}@${want}"
     fi
 
     if [ "$DRY_RUN" = 1 ]; then
@@ -486,8 +509,15 @@ apply_refresh() {
     case "$after" in
         *"${want}."*|*"${want}.0"*) return 0 ;;
     esac
-    if [ "$want" = "preferred" ] && [ "${after##*@}" = "240.00000" ]; then
-        return 0
+    if [ "$want" = "preferred" ]; then
+        # Accept when the rate Hyprland reports is the panel's own maximum. With
+        # no number to compare against (no jq), Hyprland accepted the rule and
+        # there is nothing better to check.
+        local pref
+        pref="$(panel_preferred_hz || true)"
+        if [ -z "$pref" ] || [ "${after##*@}" = "${pref}.00000" ] || [ "${after##*@}" = "${pref}" ]; then
+            return 0
+        fi
     fi
     log "WARNING refresh did not take (asked $mode, reads $after)"
     return 1

@@ -1175,7 +1175,7 @@ end
 
 --#! Panel
 -- ── Panel care: the OLED's two knobs ────────────────────────────────────────
--- This display is a Samsung OLED (eDP-1, 2560x1600). Every pixel emits, and
+-- This display is an OLED panel. Every pixel emits, and
 -- every pixel ages in proportion to how hard and how long it has been driven,
 -- so a large bright field held in one place leaves a ghost -- first temporary
 -- retention, then burn-in. The desktop cannot make an app not be bright, and it

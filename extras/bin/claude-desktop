@@ -56,15 +56,15 @@ find_x_display() {
     return 1
 }
 
-# The scale the compositor is actually running, so a fractional panel (this one
-# is 2560x1600 at 1.5) gets its own value instead of whatever the app guesses.
+# The scale the compositor is actually running, so a fractional desktop gets its
+# own value instead of whatever the app guesses. 1 is the neutral fallback.
 panel_scale() {
     local s
     s=$(hyprctl monitors -j 2>/dev/null | python3 -c '
 import json,sys
 try: print(json.load(sys.stdin)[0]["scale"])
 except Exception: print("")' 2>/dev/null)
-    case "$s" in ''|*[!0-9.]*) s=1.5 ;; esac
+    case "$s" in ''|*[!0-9.]*) s=1 ;; esac
     printf '%s' "$s"
 }
 

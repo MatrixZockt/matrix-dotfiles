@@ -88,6 +88,10 @@ cp extras/optional/systemd/user/llama-server-local.service ~/.config/systemd/use
 systemctl --user daemon-reload && systemctl --user enable --now llama-server-local
 ```
 
+The same folder also holds the two dictation units (`dictate-server`, `dictate-daemon`);
+copy them the same way if you use the dictation feature. The login nudge in
+`custom/execs.lua` checks for the unit first, so without it nothing fails.
+
 **Not in this repo, on purpose:** wallpapers and other third-party art, anything
 specific to one machine's hardware, and every secret, hostname or personal path.
 Wallpapers are not kept here at all — no picture ships and `~/Pictures/Wallpapers` is

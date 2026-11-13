@@ -182,7 +182,18 @@ RENDER="${FREEBUFF_DESKTOP_RENDER:-auto}"
 # trade goes the other way:
 #
 #     FREEBUFF_DESKTOP_SCALE=1 freebuff-desktop
-SCALE="${FREEBUFF_DESKTOP_SCALE:-1.5}"
+# Same rule as the other wrappers: take the compositor's scale, do not bake one
+# desk's panel into the default. FREEBUFF_DESKTOP_SCALE still overrides.
+compositor_scale() {
+    local s
+    s=$(hyprctl monitors -j 2>/dev/null | python3 -c '
+import json,sys
+try: print(json.load(sys.stdin)[0]["scale"])
+except Exception: print("")' 2>/dev/null)
+    case "$s" in ''|*[!0-9.]*) s=1 ;; esac
+    printf '%s' "$s"
+}
+SCALE="${FREEBUFF_DESKTOP_SCALE:-$(compositor_scale)}"
 
 # Xwayland is started by the compositor and its display number is not stable,
 # and DISPLAY is not exported in every session, so find a live socket instead

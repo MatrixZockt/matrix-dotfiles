@@ -210,4 +210,7 @@ hl.exec_cmd("$HOME/.config/hypr/custom/scripts/panel-care.py on")
 -- nudge that raced a start is harmless. Logs: journalctl --user -u dictate-daemon
 -- -u dictate-server (the daemon also keeps daemon.log under
 -- $XDG_RUNTIME_DIR/ii-dictate/).
-hl.exec_cmd("systemctl --user start dictate-server.service dictate-daemon.service")
+-- The units are optional (extras/optional/systemd/user). Without them this is a
+-- no-op instead of two failed starts in the journal on every login.
+hl.exec_cmd("[ -f \"$HOME/.config/systemd/user/dictate-server.service\" ] "
+    .. "&& systemctl --user start dictate-server.service dictate-daemon.service")

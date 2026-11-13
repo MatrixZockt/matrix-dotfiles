@@ -443,7 +443,7 @@ stand_down() {
         quiet_since=0
         last_action=0
         notify -i "local_fire_department" "Performance mode is yours" \
-            "Machine has been quiet for ${RESTORE_QUIET}s. Leaving the CPU profile and the GPU boost exactly as your Performance mode set them."
+            "Machine has been quiet for ${RESTORE_QUIET}s. Leaving the CPU profile exactly as your Performance mode set it."
         blink green "Failsafe: CPU calm — Performance mode is yours"
         return
     fi
@@ -473,7 +473,7 @@ log "ignoring memory, io and GPU: they are not the CPU being pegged"
 if [ "${FAILSAFE_ESCALATE:-0}" = "1" ]; then
     log "action: ESCALATE (opt-in) -- performance profile; auto-restore after ${RESTORE_QUIET}s calm"
 else
-    log "action: ALARM ONLY -- log, notify and blink; no profile, cap, turbo or GPU change (FAILSAFE_ESCALATE=1 opts in)"
+    log "action: ALARM ONLY -- log, notify and blink; no profile, cap or turbo change (FAILSAFE_ESCALATE=1 opts in)"
 fi
 
 while true; do

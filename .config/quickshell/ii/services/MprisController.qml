@@ -822,6 +822,10 @@ Singleton {
 					// `silenceEverything`); the MPRIS verb would go to the FOCUSED
 					// tab instead and stop the wrong video.
 					if (root.browserActionIssued) continue
+					// The bus says Paused but a stream is still audible: that is the
+					// tab the CDP action exists for, and pausing the bus here only
+					// reaches whatever tab that window has in front. Leave it alone.
+					if (p.isPlaying !== true) continue
 					// PAUSE only, and this is not negotiable: `stop` releases the
 					// browser's media session and a released session cannot be
 					// started again by any client (measured: canPlay false, "no
@@ -835,11 +839,17 @@ Singleton {
 					n += 1
 					continue
 				}
-				// canPause is not enough on its own: the toggle on a PLAYING
-				// player can only mean stop (same reasoning as claimOutput()).
-				if (p.canPause === true) p.pause()
-				else if (p.canTogglePlaying === true) p.togglePlaying()
-				else continue
+				// PAUSE, and never a toggle.
+				//
+				// This loop only ever runs to STOP things, and the players in it
+				// are here on an audio reading, not on their own state: a tab that
+				// was just paused keeps its stream open for a moment, so a paused
+				// player shows up in this list. Toggling that one STARTED it --
+				// which is exactly the report: the tap stopped the video being
+				// watched and a different video from earlier began playing. A
+				// source that cannot pause is left alone instead of being nudged.
+				if (p.canPause !== true) continue
+				p.pause()
 				n += 1
 			} catch (error) {
 				console.warn(`[Mpris] could not pause ${p?.identity ?? "a player"}: ${error}`)

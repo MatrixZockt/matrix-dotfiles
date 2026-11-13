@@ -74,3 +74,15 @@ extras/applications/freebuff.desktop
 # make-device-sounds.py still holds the synthesised fallback recipe.
 .config/quickshell/ii/assets/sounds/device-insert.wav
 .config/quickshell/ii/assets/sounds/device-remove.wav
+
+# Editor and backup leftovers: never part of the config, and a stray *.bak next to a
+# live file is how an old version of it ends up published by accident.
+*.bak
+*.bak[0-9]*
+*.bak-*
+*.orig
+*.rej
+*.swp
+*~
+__pycache__/
+.DS_Store

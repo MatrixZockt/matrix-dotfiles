@@ -350,6 +350,6 @@ The base layer, the illogical-impulse shell and much of the QML derive from
 **GPL-3.0**. This repository adds a large local layer on top of it (see
 `custom/`, the shell changes in the README, and `extras/`).
 
-If you redistribute this configuration or a modified version of it, follow the
-upstream licence for the derived parts and keep the attribution above. The repository's
-own `LICENSE` covers the original work added here.
+Because the derived parts carry that licence, the whole repository is distributed under
+**GPL-3.0** — see [`LICENSE`](../LICENSE). If you redistribute it or a modified version,
+keep the licence, keep the attribution above, and state what you changed.

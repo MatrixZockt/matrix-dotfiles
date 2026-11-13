@@ -8,6 +8,7 @@ My own Hyprland configuration — versioned, editable, and **live**.
 | Compositor | Hyprland 0.56.x — Lua config era (`hyprland.lua`, not `hyprland.conf`) |
 | Desktop shell | Quickshell (`qs -c ii`), illogical-impulse style |
 | Base | [end-4/dots-hyprland](https://github.com/end-4/dots-hyprland) |
+| Licence | GPL-3.0 (derived from end-4/dots-hyprland) |
 | Repo location | `~/hyprland` |
 | GitHub | [MatrixZockt/matrix-dotfiles](https://github.com/MatrixZockt/matrix-dotfiles) |
 | Live config | `~/.config/hypr` → symlink to `~/hyprland/.config/hypr` |
@@ -576,6 +577,17 @@ On a brand-new system you also need the desktop stack itself (Hyprland 0.56+,
 Quickshell, the illogical-impulse packages). The pragmatic order is: install
 [end-4/dots-hyprland](https://github.com/end-4/dots-hyprland) first (`./setup install`),
 then run `~/hyprland/install.sh` so your config wins.
+
+## Licence
+
+**GPL-3.0.** This configuration is a derivative of
+[end-4/dots-hyprland](https://github.com/end-4/dots-hyprland), which is licensed
+GPL-3.0, so the whole repository — base layer, shell and the local additions in
+`custom/` and `extras/` — is distributed under the same terms. The full text is in
+[LICENSE](LICENSE).
+
+If you redistribute it or a modified version, keep the licence, keep the attribution to
+end-4 for the base, and state what you changed.
 
 ## Gotchas
 

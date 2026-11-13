@@ -660,7 +660,12 @@ Singleton {
 			: !root.browserTabPlayingShown
 		root.tabIntentActive = true
 		root.tabIntentAt = Date.now()
-		tabAction.command = ["python3", root.browserTabScript, asked]
+		// The focused window's title goes with the verb: the browser reports its
+		// tabs in its own order, and that order is what made the next press start
+		// an older video. The window title is the tab the user is looking at.
+		tabAction.command = ["python3", root.browserTabScript, asked, "9222",
+			String(HyprlandData.activeWindow?.title ?? ""),
+			String(root.nowPlayingName ?? "")]
 		if (!tabAction.running) tabAction.running = true
 	}
 
@@ -978,50 +983,62 @@ Singleton {
 	// anything sounding" cannot be read reliably at the moment of the tap.
 	// Erring towards silence is also the safe direction -- the alternative
 	// started music on top of a video that was still playing.
-	function tapSwitch() {
-		// Playback that started on its own makes the previous gesture old news:
-		// music the user started by hand is not something this switch stopped,
-		// so the next tap must silence again rather than "resume" a stale
-		// memory (measured: tap 1 resumed one tab instead of stopping music and
-		// the tab that were both playing). The short grace period keeps a quick
-		// second tap after a silence working, while the sweeps settle.
-		// Is anything REALLY making sound? The audible streams answer that even
-		// when a browser's bus lags: measured, Brave reported Paused seconds
-		// after a tab had started playing, so a bus-only test made the first
-		// tap "resume" instead of stopping anything. Chromium closes a paused
-		// tab's stream within a second, so this list is trustworthy in both
-		// directions.
-		// The memory IS the state machine. Measuring instead was tried three ways
-		// and every one of them mis-read the browser: its bus says Playing while
-		// nothing sounds, says Paused while a tab plays, and keeps a released tab
-		// mute-able but unsaveable -- all of which left the second press doing
-		// nothing. "This switch stopped something and it is not back yet" is the
-		// one fact that cannot be wrong.
-		const remembered = root.tapSilenced ?? []
-		// A NON-browser source that this switch did not stop is playing right now
-		// (music, mpv, a game): the press stops that instead of digging an old
-		// memory back up. Browsers are excluded on purpose -- their bus reports
-		// Playing while paused and Paused while playing, and a just-paused tab
-		// keeps an open stream for seconds, so every browser reading tried here
-		// produced a wrong decision.
-		const localHers = MusicPlayer.hasTrack && MusicPlayer.paused === false
-			&& remembered.indexOf("local") < 0
-		const otherPlaying = root.players.some(p => !root.isProxyBus(p) && !root.isBrowser(p)
-			&& p.isPlaying === true && remembered.indexOf(p) < 0)
-		if (localHers || otherPlaying) {
-			console.log(`[tap] tapSwitch: stopping new playback (local=${localHers} player=${otherPlaying})`)
+	// ── ONE measured press ───────────────────────────────────────────────
+	//
+	// What the press does is decided by ASKING, every time, never by what the
+	// previous press remembered. The memory version went wrong in both
+	// directions: a stale "last silenced" entry made a press start a video that
+	// was not playing, and then the following press stopped everything.
+	property bool tapPending: false
+
+	function tapDecide(browserTitles) {
+		const remembered = (root.tapSilenced ?? []).filter(x => x !== null && x !== undefined)
+		const browserPlaying = (browserTitles ?? []).length > 0
+		// Non-browser sources are asked about their own state; a browser is left
+		// out because its bus is one player for every tab and can be wrong.
+		const otherPlaying = root.players.some(p => !root.isProxyBus(p)
+			&& !root.isBrowser(p) && p.isPlaying === true)
+		const localPlaying = MusicPlayer.hasTrack && MusicPlayer.paused === false
+		if (browserPlaying || otherPlaying || localPlaying) {
+			// Something is playing: stop that. A fresh stop starts a fresh memory.
 			root.tapSilenced = []
-			return root.silenceEverything()
+			root.silenceEverything()
+			return
 		}
 		if (remembered.length > 0) {
-			console.log(`[tap] tapSwitch: resuming ${root.tapSilencedNames(remembered)}`)
-			return root.resumeLastSilenced()
+			root.resumeLastSilenced()
+			return
 		}
-		console.log("[tap] tapSwitch: silencing")
-		return root.silenceEverything()
+		// Nothing is playing and nothing was stopped: doing nothing is the only
+		// answer that cannot start a video the user was not watching.
+		console.log("[tap] nothing playing and nothing remembered: leaving playback alone")
 	}
 
-	property bool canGoPrevious: this.activePlayer?.canGoPrevious ?? false;
+	function tapSwitch() {
+		if (root.tapPending)
+			return ""
+		root.tapPending = true
+		tapMeasure.command = ["python3", root.browserTabScript, "list", "9222"]
+		tapMeasure.running = true
+		return ""
+	}
+
+	Process {
+		id: tapMeasure
+		stdout: StdioCollector {
+			onStreamFinished: {
+				let titles = []
+				try {
+					titles = JSON.parse(String(this.text ?? "").trim() || "[]")
+				} catch (error) {
+					titles = []
+				}
+				root.tapDecide(Array.isArray(titles) ? titles : [])
+			}
+		}
+		onExited: (exitCode, exitStatus) => { root.tapPending = false }
+	}
+
 	function previous() {
 		if (this.canGoPrevious) {
 			this.__reverse = true;

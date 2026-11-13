@@ -670,7 +670,9 @@ ShellRoot {
                 // heard last, decided by the switch's own memory (see
                 // `tapSwitch`), never by a guess at what is playing.
                 const handled = MprisController.tapSwitch();
-                if (handled !== "") {
+                // A press that is still measuring has not answered yet; the
+                // fallbacks below must not start a player in the meantime.
+                if (handled !== "" || MprisController.tapPending) {
                     console.log(`[tap] 3-finger tap: ${handled}`);
                     return;
                 }

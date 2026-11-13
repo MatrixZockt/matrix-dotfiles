@@ -50,6 +50,7 @@ import base64
 import concurrent.futures
 import json
 import os
+import re
 import socket
 import struct
 import sys
@@ -319,12 +320,66 @@ def play_remembered(pages, end):
         return {"ok": False, "action": "play", "titles": []}
 
 
+def normalize_title(title):
+    """A title comparable across the two things that report it.
+
+    The window says "Video - YouTube - Brave"; the tab says "Video - YouTube".
+    Both lose the browser and site suffixes, so the same video is recognisable
+    from either side and punctuation or spacing cannot decide the match.
+    """
+    text = str(title or "").lower()
+    for suffix in (" - brave", " - chromium", " - chrome", " - youtube",
+                   " - vimeo", " - twitch", " - soundcloud"):
+        if text.endswith(suffix):
+            text = text[: -len(suffix)]
+    text = re.sub(r"[^a-z0-9 ]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def pick_primary(stopped, expected):
+    """Which stopped tab the user was WATCHING, not merely which came first.
+
+    `stopped[0]` is the first tab in the browser's own listing order, which has
+    nothing to do with what is on screen: with a video playing and an older one
+    open behind it, that order remembered the older one and the next press
+    started THAT -- the reported bug.
+
+    Two things can name the tab that is actually playing, and they are tried in
+    this order because each covers the other's blind spot:
+
+      1. the focused window's title -- exactly the tab the user is looking at,
+         and the only source that is right when two tabs LOOK alike;
+      2. the media session's title (the browser's own "now playing"), which
+         still names the audible tab while the user's focus is somewhere else
+         entirely (this chat window, an editor).
+
+    The first stopped tab is the last resort, for a browser that named nothing.
+    """
+    if not stopped:
+        return None
+    for candidate in (expected.get("window") if isinstance(expected, dict) else expected,
+                      expected.get("media") if isinstance(expected, dict) else ""):
+        want = normalize_title(candidate)
+        if not want:
+            continue
+        for page in stopped:
+            have = normalize_title(page.get("title", ""))
+            if have and (have in want or want in have):
+                return page
+    return stopped[0]
+
+
 def main():
     args = sys.argv[1:]
     action = "list"
     if args and args[0] in ("list", "pause", "play", "toggle"):
         action = args.pop(0)
     port = args[0] if args else "9222"
+    # What names the tab that is really playing, handed over by the shell: the
+    # focused window's title and the media session's own title. Optional -- a
+    # caller that does not know them loses only the precision, never the press.
+    expected = {"window": args[1] if len(args) > 1 else "",
+                "media": args[2] if len(args) > 2 else ""}
     started = time.time()
     end = started + DEADLINE
     try:
@@ -354,23 +409,38 @@ def main():
         print(json.dumps(play_remembered(pages, end)))
         return
 
-    # pause / toggle: ONE pass that asks and stops in the same call. Asking
-    # every tab first and stopping afterwards meant the sound kept playing
-    # until the whole scan had finished, which is what the gesture was
-    # reporting as "a few seconds late". The pass is concurrent, so the tab
-    # that is playing is silenced within a round trip instead of waiting its
-    # turn behind every tab opened before it.
-    stopped = [page for page, value in ask_all(pages, PAUSE)
+    # Which tabs are playing, read BEFORE anything is stopped.
+    #
+    # This is two passes instead of one on purpose. The press must land on the
+    # tab the user is WATCHING; pausing first and choosing afterwards meant the
+    # choice was between tabs that were already silenced, and the browser's
+    # listing order decided it -- which is how a press stopped the current
+    # video and the next one started a different video from earlier. Asking is
+    # read-only, so a wrong guess costs nothing.
+    playing = [page for page, value in ask_all(pages, PROBE)
                if isinstance(value, (int, float)) and value > 0]
-    if not stopped and time.time() + PAGE_TIMEOUT < end:
+    if not playing and time.time() + PAGE_TIMEOUT < end:
         # One more pass. A single empty answer is a busy browser -- a tab that
         # was reloading, an evaluate that timed out -- and reporting "nothing
         # was playing" for it is how a press could silence nothing at all.
         time.sleep(0.05)
-        stopped = [page for page, value in ask_all(pages, PAUSE)
+        playing = [page for page, value in ask_all(pages, PROBE)
                    if isinstance(value, (int, float)) and value > 0]
+
+    primary = pick_primary(playing, expected) if playing else None
+    if primary is not None:
+        # ONE tab: the current one. Anything else that happens to have a video
+        # element is not what the user is hearing, and stopping it as well is
+        # the "it stops both" complaint.
+        targets = [primary]
+    else:
+        # No title could name a tab (a window that says nothing): stop them
+        # all rather than leave sound running.
+        targets = playing
+    stopped = [page for page, value in ask_all(targets, PAUSE)
+               if isinstance(value, (int, float)) and value > 0] if targets else []
     if stopped:
-        remember(stopped[0])
+        remember(primary if primary in stopped else stopped[0])
         print(json.dumps({"ok": True, "action": "pause",
                           "titles": [p.get("title", "") for p in stopped]}))
         return

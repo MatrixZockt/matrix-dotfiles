@@ -97,6 +97,9 @@ detect_monitor() {
 MONITOR="${MONITOR:-$(detect_monitor || true)}"
 MONITOR="${MONITOR:-eDP-1}"
 PANEL_MODE="${PANEL_MODE:-}"
+# Where the pre-low-power rate is remembered, so "preferred" means "put it back"
+# rather than "go to the EDID maximum".
+REFRESH_STATE="${XDG_RUNTIME_DIR:-/tmp}/ii-panel-refresh.state"
 DISPLAY_SCALE_FILE="$HOME_DIR/.cache/display/scale"
 
 # Panel bit depth, restated in every rule this script applies.
@@ -460,64 +463,85 @@ panel_preferred_hz() {
 }
 
 panel_refresh() {
+    # The JSON view first: refreshRate is what the panel is RUNNING now, while the
+    # text block's mode line repeats the mode the config asked for. Reading the
+    # text line made a 120 Hz panel report 240, which then looked like "already
+    # preferred" and skipped the restore entirely.
+    if command -v jq >/dev/null 2>&1; then
+        local m
+        m="$(hyprctl -j monitors 2>/dev/null \
+            | jq -r --arg n "$MONITOR" '.[] | select(.name==$n) | "\(.width)x\(.height)@\(.refreshRate)"' 2>/dev/null)"
+        [ -n "$m" ] && { printf '%s' "$m"; return 0; }
+    fi
+    # Fallback without jq: the first "WxH@Hz at XxY" line after the monitor
+    # header is the active mode. `availableModes` never carries ", at " -- it is
+    # a bare list -- so it cannot win this match.
     hyprctl monitors 2>/dev/null \
-        | awk -v m="Monitor $MONITOR" '$0 ~ m {f=1} f && /@/ {print $1; exit}'
+        | awk -v m="Monitor $MONITOR" '
+            $0 ~ m { f = 1; next }
+            f && / at / && /[0-9]+x[0-9]+@[0-9.]+/ { print $1; exit }
+        '
 }
 
 apply_refresh() {
     # $1 = "60" or "preferred"
-    local want="$1" cur scale mode
+    local want="$1" cur cur_hz res scale mode expected prev out after
     hypr_signature || { log "no live Hyprland socket - refresh left alone"; return 1; }
     cur="$(panel_refresh)"
-    local cur_hz="${cur##*@}" res="${cur%%@*}"
+    cur_hz="${cur##*@}"
+    res="${cur%%@*}"
     [ -n "$res" ] || res="$PANEL_MODE"
     scale="$(readfile "$DISPLAY_SCALE_FILE")"
     [ -n "$scale" ] || scale="1.5"
 
     if [ "$want" = "preferred" ]; then
-        case "$cur_hz" in
-            preferred|"") log "refresh already at panel preferred ($cur)"; return 0 ;;
-        esac
-        local pref
-        pref="$(panel_preferred_hz || true)"
-        case "$cur_hz" in
-            "$pref"*) [ -n "$pref" ] && { log "refresh already at panel preferred ($cur)"; return 0; } ;;
-        esac
-        mode="preferred"
+        # Restore the rate the panel had BEFORE the low-power step, not
+        # "whatever the config calls preferred": the config's rule asks for the
+        # EDID maximum, and going back there would silently change a rate that
+        # was set by hand or by a previous reload.
+        prev="$(readfile "$REFRESH_STATE")"
+        if [ -n "$prev" ]; then
+            mode="$prev"
+            expected="${prev##*@}"
+        else
+            mode="preferred"
+            expected="$(panel_preferred_hz || true)"
+        fi
+        if [ -n "$expected" ] && [ -n "$cur_hz" ] \
+            && [ "${cur_hz%%.*}" = "${expected%%.*}" ]; then
+            log "refresh already at ${expected} Hz ($cur)"
+            rm -f "$REFRESH_STATE" 2>/dev/null || true
+            return 0
+        fi
     else
         case "$cur_hz" in
             "${want}.0"*|"${want}.00"*) log "refresh already ${want} Hz ($cur)"; return 0 ;;
         esac
         [ -n "$res" ] || { log "no panel mode known for $MONITOR - refresh left alone"; return 1; }
         mode="${res}@${want}"
+        expected="$want"
+        # Written before the change, so a crash mid-switch still leaves behind the
+        # rate to come back to.
+        printf '%s' "$cur" > "$REFRESH_STATE" 2>/dev/null || true
     fi
 
     if [ "$DRY_RUN" = 1 ]; then
         log "DRY-RUN would set refresh to $mode (currently: $cur)"
         return 0
     fi
-    local out
+
     out="$(hyprctl eval "hl.monitor({ output=\"$MONITOR\", mode=\"$mode\", position=\"0x0\", scale=$scale, bitdepth=$BITDEPTH })" 2>&1)"
     if [ "${out:-}" != "ok" ]; then
         log "refresh eval refused: ${out:-no output} (left at $cur)"
         return 1
     fi
     sleep 1
-    local after
     after="$(panel_refresh)"
     log "refresh $cur -> $after (asked for $mode)"
-    case "$after" in
-        *"${want}."*|*"${want}.0"*) return 0 ;;
-    esac
-    if [ "$want" = "preferred" ]; then
-        # Accept when the rate Hyprland reports is the panel's own maximum. With
-        # no number to compare against (no jq), Hyprland accepted the rule and
-        # there is nothing better to check.
-        local pref
-        pref="$(panel_preferred_hz || true)"
-        if [ -z "$pref" ] || [ "${after##*@}" = "${pref}.00000" ] || [ "${after##*@}" = "${pref}" ]; then
-            return 0
-        fi
+    if [ -n "$expected" ] && [ -n "$after" ] \
+        && [ "$(printf '%s' "${after##*@}" | cut -d. -f1)" = "$(printf '%s' "${expected}" | cut -d. -f1)" ]; then
+        [ "$want" = "preferred" ] && rm -f "$REFRESH_STATE" 2>/dev/null || true
+        return 0
     fi
     log "WARNING refresh did not take (asked $mode, reads $after)"
     return 1

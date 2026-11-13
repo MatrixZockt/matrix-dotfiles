@@ -50,7 +50,7 @@ BarAnchoredPanel {
     readonly property var connections: [
         {
             "id": "tailscale",
-            "label": "My-Tailnet",
+            "label": "Home-VPN",
             "detail": Translation.tr("Tailscale"),
             "statusText": Tailscale.statusText,
             "address": Tailscale.selfIp,

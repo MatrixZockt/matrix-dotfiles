@@ -19,6 +19,6 @@ QuickToggleModel {
     toggled: Tailscale.connected
     hasStatusText: true
     statusText: Tailscale.statusText
-    tooltipText: Translation.tr("Tailscale VPN — My-Tailnet")
+    tooltipText: Translation.tr("Tailscale VPN — Home-VPN")
     mainAction: () => Tailscale.toggle()
 }

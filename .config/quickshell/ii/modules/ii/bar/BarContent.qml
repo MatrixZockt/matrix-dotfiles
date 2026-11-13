@@ -5150,7 +5150,7 @@ Item { // Bar content region
                         // already legible from the glyph, which fills and
                         // takes the accent when the tunnel is up.
                         hovered: vpnHover.hovered
-                        tooltipText: `${Tailscale.connected ? Translation.tr("VPN on") : Translation.tr("VPN off")} · My-Tailnet\n${Translation.tr("Click: turn the VPN on or off")} · ${Translation.tr("Two-finger tap: connections")}`
+                        tooltipText: `${Tailscale.connected ? Translation.tr("VPN on") : Translation.tr("VPN off")} · Home-VPN\n${Translation.tr("Click: turn the VPN on or off")} · ${Translation.tr("Two-finger tap: connections")}`
                         symbol.text: Tailscale.connected ? "vpn_lock" : "vpn_key_off"
                         // The panel is driven by this flag, not by
                         // HoverIconButton's own lazy `panelComponent` loader:

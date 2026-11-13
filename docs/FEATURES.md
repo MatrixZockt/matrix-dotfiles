@@ -12,7 +12,7 @@ reference for *what exists*.
 |---|---|
 | Compositor | Hyprland 0.56.x, configured in **Lua** (`hyprland.lua`, not `hyprland.conf`) |
 | Shell | Quickshell, run as `qs -c ii` (illogical-impulse style) |
-| Keybinds | 205, all listed in [KEYBINDS.md](KEYBINDS.md) |
+| Keybinds | 328, all listed in [KEYBINDS.md](KEYBINDS.md) |
 | Shell surfaces | 27 modules under `.config/quickshell/ii/modules/ii/` |
 | Helper scripts | 142 shell/Python scripts under `.config/` |
 | Base | [end-4/dots-hyprland](https://github.com/end-4/dots-hyprland), GPL-3.0 — see [Licensing](#licensing-and-credits) |

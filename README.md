@@ -64,7 +64,7 @@ the same, with your pictures in it.
 | Document | What it covers |
 |---|---|
 | **[docs/FEATURES.md](docs/FEATURES.md)** | Every feature the desktop offers — each shell surface, the compositor layers, hardware and power handling, session integration and tooling, with the file that implements it |
-| [docs/KEYBINDS.md](docs/KEYBINDS.md) | All 205 binds, generated from the running session |
+| [docs/KEYBINDS.md](docs/KEYBINDS.md) | All 328 binds, generated from the running session |
 | [docs/music-and-background-apps.md](docs/music-and-background-apps.md) | Music playback and how background apps are handled |
 
 More figures: [how the config loads](docs/images/config-layers.png) ·

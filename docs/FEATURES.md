@@ -171,6 +171,13 @@ summary, up to three body lines); clicking opens the sidebar list.
 History via `cliphist`, with image entries rendered as pictures, click to expand and
 copy. (`services/Cliphist.qml`)
 
+A copied picture is confirmed by the top-right card carrying the picture itself
+instead of a glyph, a 4-second countdown that freezes while the pointer rests on the
+card, and a download button. The button writes the image to
+`~/Pictures/Screenshots/screenshot-<date>.png` and opens the file manager on the
+saved file, so a snip that was only copied can be kept without redoing it.
+(`SignalToast.qml`, `GlobalStates.qml`, `services/Cliphist.qml`)
+
 ### On-screen display, screenshots, recording
 
 Volume and brightness OSDs (`onScreenDisplay/`), region selection

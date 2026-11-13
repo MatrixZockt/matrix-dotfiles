@@ -52,6 +52,19 @@ Scope {
     // fall (see the notification card's own tuned numbers).
     readonly property real dropTravel: 12
 
+    // A picture instead of a bare glyph: a copied image arrives with its own
+    // thumbnail and a download button, because "Image copied" alone gives no
+    // way to keep the picture and no way to check that the right thing was
+    // copied. The card takes input only in this case — see the mask below.
+    readonly property bool hasImage: GlobalStates.signalToastImage.length > 0
+
+    // What is left of the hold when the pointer is resting on the card. Hovering
+    // freezes the countdown instead of letting it expire: the card is the only
+    // place the picture can be saved from, so it must not disappear while
+    // someone is aiming at the button. The clock resumes with the remainder it
+    // had, not from the top.
+    property real pausedRemaining: 300
+
     Connections {
         target: root
         function onFocusedScreenChanged() {
@@ -71,8 +84,23 @@ Scope {
             card.opacity = 0;
             root.progress = 1;
             showAnim.start();
+            // The hold is per-card, and a previous card may have been paused
+            // short by a hover: always start from the duration the caller asked
+            // for, or a second copy would inherit the first one's remaining
+            // milliseconds.
+            countdown.stop();
+            dismissTimer.stop();
+            dismissTimer.interval = GlobalStates.signalToastDurationMs;
             countdown.restart();
             dismissTimer.restart();
+            // A new signal while the pointer is already on the card: stay
+            // frozen, so replacing the card does not yank it out from under the
+            // cursor.
+            if (hoverCard.hovered) {
+                root.pausedRemaining = Math.max(300, GlobalStates.signalToastDurationMs);
+                countdown.pause();
+                dismissTimer.stop();
+            }
         }
         function onSignalToastVisibleChanged() {
             if (GlobalStates.signalToastVisible)
@@ -186,13 +214,37 @@ Scope {
         implicitWidth: content.width
         implicitHeight: content.height + dropTravel
 
-        // Not a target: the card is a picture, and the window is exactly its
-        // size, so nothing invisible can swallow a click.
-        mask: Region { item: null }
+        // The plain one-word card is not a target: it is a picture, and the
+        // window is exactly its size, so nothing invisible may swallow a click.
+        // With a picture on it the card becomes a control (save), so the mask
+        // covers the card and nothing beyond it.
+        //
+        // A REGION NEEDS A REAL, TALL-ENOUGH ITEM AT CREATION. Swapping `item`
+        // between `card` and `null` looks right and does not work: the window is
+        // first created for a plain one-word toast, its input region is empty,
+        // and it stays empty for the picture card that follows, so the pointer
+        // never enters and the countdown never freezes (measured 2026-11-13 by
+        // moving the cursor onto the card: no HoverHandler, card expired at 4 s).
+        // The region therefore always comes from an item that exists, and that
+        // item is sized to nothing unless there is a picture to save.
+        mask: Region { item: inputArea }
 
         // Keep the surface mapped while the fade-out runs; keying this on the
         // flag would tear the window down on the frame the fade began.
         visible: GlobalStates.signalToastVisible || card.opacity > 0.01
+
+        // The click target: the card while a picture is up, nothing at all
+        // otherwise. Zero-sized keeps its region empty, so a plain "Copied" chip
+        // still lets the desktop receive clicks underneath it.
+        Item {
+            id: inputArea
+            // Same place as the card: `content` is the card's parent and sits one
+            // drop travel below the surface's top edge.
+            x: content.x + card.x
+            y: content.y + card.y
+            width: root.hasImage ? card.width : 0
+            height: root.hasImage ? card.height : 0
+        }
 
         Item {
             id: content
@@ -232,8 +284,36 @@ Scope {
                 RowLayout {
                     id: signalRow
                     anchors { left: parent.left; verticalCenter: parent.verticalCenter }
-                    anchors { leftMargin: 16; rightMargin: 4 }
+                    anchors { leftMargin: 16; rightMargin: 12 }
                     spacing: 12
+
+                    // The thumbnail replaces the glyph when there is a picture:
+                    // it says "your image" better than any icon can, and it lets
+                    // the snip be checked before it is saved. Cropped, not
+                    // stretched, and clipped to the card's own rounding so it
+                    // reads as part of the card.
+                    Rectangle {
+                        Layout.alignment: Qt.AlignVCenter
+                        visible: root.hasImage
+                        width: 34
+                        height: 34
+                        radius: Appearance.rounding.small
+                        color: Appearance.colors.colLayer2
+                        clip: true
+
+                        Image {
+                            anchors.fill: parent
+                            // Empty, not "file://", when there is no picture: an
+                            // empty URL is a quiet no-image, while the bare
+                            // scheme resolves to the root directory and warns
+                            // once per binding evaluation.
+                            source: root.hasImage ? "file://" + GlobalStates.signalToastImage : ""
+                            sourceSize { width: 34; height: 34 }
+                            fillMode: Image.PreserveAspectCrop
+                            asynchronous: true
+                            cache: false
+                        }
+                    }
 
                     // The bare glyph, the same contract as the notification
                     // signal face: no disc behind it, because this is not an
@@ -242,6 +322,7 @@ Scope {
                     // the word.
                     MaterialSymbol {
                         Layout.alignment: Qt.AlignVCenter
+                        visible: !root.hasImage
                         text: GlobalStates.signalToastIcon
                         iconSize: 26
                         color: Appearance.colors.colOnSurface
@@ -252,6 +333,63 @@ Scope {
                         text: GlobalStates.signalToastText
                         font.pixelSize: Appearance.font.pixelSize.small
                         color: Appearance.colors.colOnSurface
+                    }
+
+                    // Save: the one action a copied picture can need. It appears
+                    // only for a picture and only while the card is up, so the
+                    // chip stays a chip for every other signal.
+                    Rectangle {
+                        Layout.alignment: Qt.AlignVCenter
+                        visible: root.hasImage
+                        width: 30
+                        height: 30
+                        radius: 15
+                        color: saveArea.containsMouse
+                            ? Appearance.colors.colPrimaryContainer
+                            : Appearance.colors.colLayer2
+
+                        Behavior on color {
+                            ColorAnimation { duration: 120 }
+                        }
+
+                        MaterialSymbol {
+                            anchors.centerIn: parent
+                            text: "download"
+                            iconSize: 18
+                            color: saveArea.containsMouse
+                                ? Appearance.colors.colOnPrimaryContainer
+                                : Appearance.colors.colOnSurface
+                        }
+
+                        MouseArea {
+                            id: saveArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            // Save to Pictures/Screenshots and open the file
+                            // manager on the result — never a silent copy to a
+                            // path nobody looked at.
+                            onClicked: GlobalStates.saveSignalToastImage()
+                        }
+                    }
+                }
+
+                // Freeze on hover: the picture can only be saved from here, so
+                // the card must not vanish mid-reach. Leaving resumes the clock
+                // with the time it had left.
+                HoverHandler {
+                    id: hoverCard
+                    onHoveredChanged: {
+                        if (hovered) {
+                            root.pausedRemaining = Math.max(300,
+                                GlobalStates.signalToastDurationMs * root.progress);
+                            countdown.pause();
+                            dismissTimer.stop();
+                        } else {
+                            dismissTimer.interval = root.pausedRemaining;
+                            countdown.resume();
+                            dismissTimer.restart();
+                        }
                     }
                 }
 

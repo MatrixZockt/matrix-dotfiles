@@ -2425,20 +2425,84 @@ property bool loadingFailFlash: false
     property int signalToastDurationMs: 1200
     property int signalToastSeq: 0
     property bool signalToastVisible: false
+    // A picture the card carries instead of a bare glyph — currently a copied
+    // image, decoded to a temp file by Cliphist. Empty for every other signal.
+    // It is a path, not the bytes: the card draws it, and the download button
+    // saves it, so the two can never disagree about what is on screen.
+    property string signalToastImage: ""
 
-    function showSignalToast(text, icon, ms) {
+    // Where a saved picture goes. `Directories.pictures` is a file:// URL (Qt's
+    // standard-locations form), and a process cannot be handed that: `cp` would
+    // treat the scheme as a path component. Trimmed once here, so the copy, the
+    // file manager and any log line all speak plain paths.
+    readonly property string screenshotsDir: String(Directories.pictures).replace(/^file:\/\//, "") + "/Screenshots"
+
+    function showSignalToast(text, icon, ms, imagePath) {
         const label = String(text ?? "").trim();
         if (label.length === 0)
             return;
         root.signalToastText = label;
         root.signalToastIcon = (icon && String(icon).length > 0) ? String(icon) : "info";
         root.signalToastDurationMs = (ms > 0) ? ms : 1200;
+        root.signalToastImage = String(imagePath ?? "");
         root.signalToastVisible = true;
         root.signalToastSeq++;
     }
 
     function hideSignalToast() {
         root.signalToastVisible = false;
+    }
+
+    // Keep the picture the card is showing.
+    //
+    // A screenshot copied to the clipboard exists in two volatile places: the
+    // selection itself and the temp decode the card displays. Neither survives
+    // a logout or a cache clean, and a snip taken this way was never written to
+    // disk at all (screenSnip.savePath ships empty). So the card's download is
+    // the only way to keep one without redoing the snip: copy the decoded file
+    // to Pictures/Screenshots under the same timestamped name the snip UI uses,
+    // then open the file manager on it so the result is visible rather than
+    // announced.
+    function saveSignalToastImage() {
+        const src = root.signalToastImage;
+        if (src.length === 0)
+            return;
+        saveImageProcess.source = src;
+        saveImageProcess.target = `${root.screenshotsDir}/screenshot-${Qt.formatDateTime(new Date(), "yyyy-MM-dd_HH.mm.ss")}.png`;
+        saveImageProcess.running = true;
+    }
+
+    // The copy behind "Saved".
+    //
+    // A Process rather than execDetached because the card makes a claim: it says
+    // the picture was kept, so it has to know whether the copy happened. A
+    // detached bash could fail (a cache directory wiped between the card and the
+    // click, a full disk) and the card would still say "Saved".
+    //
+    // Paths go in as positional arguments, never as a shell string: the decoded
+    // picture lives in a cache path, and a quote in a filename must not become a
+    // command.
+    Process {
+        id: saveImageProcess
+        property string source: ""
+        property string target: ""
+        command: ["bash", "-c", 'mkdir -p "$1" && cp -f -- "$2" "$3"',
+            "_", root.screenshotsDir, source, target]
+        // Kept so a failure says WHY in the shell log instead of only telling the
+        // user it did not work.
+        stderr: StdioCollector { id: saveErr }
+        onExited: (exitCode, exitStatus) => {
+            if (exitCode !== 0) {
+                console.warn("[signalToast] could not save the copied picture:", exitCode, exitStatus, saveErr.text);
+                root.showSignalToast(Translation.tr("Could not save"), "error", 2000);
+                return;
+            }
+            root.showSignalToast(Translation.tr("Saved"), "download_done", 1500);
+            // Show it instead of announcing it: the file manager opens on the
+            // saved file, so it can be renamed, moved or checked right away
+            // rather than hunted down later.
+            Quickshell.execDetached(["hypr-explorer", saveImageProcess.target]);
+        }
     }
 
     IpcHandler {
@@ -2456,11 +2520,24 @@ property bool loadingFailFlash: false
             root.showSignalToast(text, icon, 1500);
         }
 
+        // A card carrying a picture, for a script that already has one on disk:
+        //   qs -c ii ipc call signalToast sayImage "Image copied" /path/to/pic.png
+        function sayImage(text: string, path: string): void {
+            root.showSignalToast(text, "image", 4000, path);
+        }
+
+        // Save whatever picture the card is showing:
+        //   qs -c ii ipc call signalToast save
+        function save(): void {
+            root.saveSignalToastImage();
+        }
+
         function state(): string {
             return `visible=${root.signalToastVisible} seq=${root.signalToastSeq}`
                 + ` text=${JSON.stringify(root.signalToastText)}`
                 + ` icon=${JSON.stringify(root.signalToastIcon)}`
-                + ` ms=${root.signalToastDurationMs}`;
+                + ` ms=${root.signalToastDurationMs}`
+                + ` image=${JSON.stringify(root.signalToastImage)}`;
         }
     }
 

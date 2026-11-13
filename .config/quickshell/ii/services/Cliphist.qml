@@ -309,7 +309,7 @@ Singleton {
                             const isImage = root.entryIsImage(newest)
                             root.showCopyToast(isImage
                                 ? Translation.tr("Image copied")
-                                : Translation.tr("Copied"), isImage)
+                                : Translation.tr("Copied"), isImage, newest)
                         }
                     }
                 } else if (root.pendingChange && root.toastRetries < 8) {
@@ -509,11 +509,56 @@ Singleton {
     // The direct call also removes the round trip through gdbus that the
     // notification version needed -- the card is feedback, and it should not
     // arrive a fifth of a second after the thing it confirms.
-    function showCopyToast(text, isImage) {
+    // ── The picture on the copy card ─────────────────────────────────────
+    // A copied image gets more than a word: the card shows the picture itself,
+    // carries a download button, and holds long enough to be used. Decoding is a
+    // separate, asynchronous `cliphist decode` — the card must point at a file
+    // that exists, or the thumbnail would be a broken image and the save button
+    // would have nothing to copy — so the label waits here for the decode to
+    // land, then the card is raised once, complete.
+    property string toastImageLabel: ""
+    // Long enough to notice, aim at and click the download. Text copies keep
+    // their 1.2 s glance.
+    readonly property int copyToastImageMs: 4000
+
+    Process {
+        id: toastImageProc
+        property string entry: ""
+        property string dest: ""
+        command: ["bash", "-c",
+            `mkdir -p '${Directories.cliphistDecode}' && `
+            + `${root.cliphistBinary} decode ${String(toastImageProc.entry ?? "").split("\t")[0]} > '${StringUtils.shellSingleQuoteEscape(toastImageProc.dest)}'`]
+        onExited: (exitCode, exitStatus) => {
+            const label = root.toastImageLabel;
+            root.toastImageLabel = "";
+            if (exitCode !== 0) {
+                // Still confirm the copy: the picture is on the clipboard even if
+                // the card could not draw it, and a silent copy reads as a broken
+                // shortcut.
+                console.warn("[Cliphist] image decode for the copy card failed:", exitCode, exitStatus);
+                GlobalStates.showSignalToast(label, "image", 1200);
+                return;
+            }
+            GlobalStates.showSignalToast(label, "image", root.copyToastImageMs, toastImageProc.dest);
+        }
+    }
+
+    function showCopyToast(text, isImage, entry) {
         root.lastCopiedText = text;
         root.copyToastVisible = true;
         root.copyToastSeq++;
         const summary = (text ?? "").trim();
+        if (isImage) {
+            const id = String(entry ?? "").split("\t")[0];
+            if (id.length > 0) {
+                root.toastImageLabel = summary.length > 0 ? summary : Translation.tr("Image copied");
+                toastImageProc.dest = `${Directories.cliphistDecode}/toast-${id}.png`;
+                toastImageProc.entry = String(entry);
+                toastImageProc.running = true;
+                print(`[cliphist] copy toast: ${text} (seq ${root.copyToastSeq}, picture ${id})`);
+                return;
+            }
+        }
         // Told straight to the top-right card instead of through the
         // notification daemon. The notification route cost a DBus round trip
         // and a GVariant quoted by hand in QML (which broke on this parser

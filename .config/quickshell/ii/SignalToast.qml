@@ -335,21 +335,38 @@ Scope {
                         color: Appearance.colors.colOnSurface
                     }
 
-                    // Save: the one action a copied picture can need. It appears
-                    // only for a picture and only while the card is up, so the
-                    // chip stays a chip for every other signal.
-                    Rectangle {
+                    // Save, then confirm: the one action a copied picture can
+                    // need. It appears only for a picture and only while the card
+                    // is up, so the chip stays a chip for every other signal.
+                    //
+                    // NO disc behind it on hover, by request: the old 30px circle
+                    // was a filled box that appeared under a glyph that already
+                    // says what it is. The hover answer is the size instead -- the
+                    // button grows a little and eases back on leave, and the glyph
+                    // turns primary, which reads at a glance without a shape
+                    // blinking into existence under the cursor.
+                    Item {
+                        id: saveButton
                         Layout.alignment: Qt.AlignVCenter
                         visible: root.hasImage
                         width: 30
                         height: 30
-                        radius: 15
-                        color: saveArea.containsMouse
-                            ? Appearance.colors.colPrimaryContainer
-                            : Appearance.colors.colLayer2
+                        // The confirmation: the click crossfades the download
+                        // glyph into a check, one state at a time, so the button
+                        // answers the press even though the save dialog that
+                        // follows lives in another process.
+                        property bool confirmed: false
+                        scale: saveArea.containsMouse ? 1.16 : 1.0
 
-                        Behavior on color {
-                            ColorAnimation { duration: 120 }
+                        Behavior on scale {
+                            NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+                        }
+
+                        Connections {
+                            target: GlobalStates
+                            function onSignalToastSeqChanged() {
+                                saveButton.confirmed = false
+                            }
                         }
 
                         MaterialSymbol {
@@ -357,8 +374,26 @@ Scope {
                             text: "download"
                             iconSize: 18
                             color: saveArea.containsMouse
-                                ? Appearance.colors.colOnPrimaryContainer
+                                ? Appearance.colors.colPrimary
                                 : Appearance.colors.colOnSurface
+                            opacity: saveButton.confirmed ? 0 : 1
+                            scale: saveButton.confirmed ? 0.7 : 1.0
+
+                            Behavior on opacity { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                            Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                            Behavior on color { ColorAnimation { duration: 150 } }
+                        }
+
+                        MaterialSymbol {
+                            anchors.centerIn: parent
+                            text: "check"
+                            iconSize: 18
+                            color: Appearance.colors.colPrimary
+                            opacity: saveButton.confirmed ? 1 : 0
+                            scale: saveButton.confirmed ? 1.0 : 0.7
+
+                            Behavior on opacity { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+                            Behavior on scale { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
                         }
 
                         MouseArea {
@@ -366,10 +401,12 @@ Scope {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            // Save to Pictures/Screenshots and open the file
-                            // manager on the result — never a silent copy to a
-                            // path nobody looked at.
-                            onClicked: GlobalStates.saveSignalToastImage()
+                            // Opens the save dialog; the picture goes wherever that
+                            // dialog says rather than a fixed folder.
+                            onClicked: {
+                                saveButton.confirmed = true
+                                GlobalStates.saveSignalToastImage()
+                            }
                         }
                     }
                 }

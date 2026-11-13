@@ -2457,25 +2457,110 @@ property bool loadingFailFlash: false
     // to Pictures/Screenshots under the same timestamped name the snip UI uses,
     // then open the file manager on it so the result is visible rather than
     // announced.
+    // ── Saving asks WHERE ───────────────────────────────────────────────
+    //
+    // A save is a place, not a default folder: the card's download opens the
+    // desktop's own save dialog (the portal picker, filemanager-picker.qml)
+    // starting in Pictures/Screenshots with a timestamped name, and the picture
+    // goes wherever that dialog says. It used to copy straight into
+    // Pictures/Screenshots and then open a file manager on the result, which
+    // answered a question nobody asked -- where the file went -- and never let
+    // the folder be chosen.
+    //
+    // The job/result files are the portal's own protocol (ii-portal.py writes
+    // them for every other app; this is the shell asking its own backend's
+    // dialog directly). The job names the mode, folder and default name; the
+    // result is `{cancelled, uris}` and is what the picker writes when the
+    // dialog closes.
+    readonly property string savePortalDir: `${Quickshell.env("XDG_RUNTIME_DIR")}/ii-portal`
+    property string pendingSaveToken: ""
+
     function saveSignalToastImage() {
-        const src = root.signalToastImage;
-        if (src.length === 0)
+        if (root.signalToastImage.length === 0)
             return;
-        saveImageProcess.source = src;
-        saveImageProcess.target = `${root.screenshotsDir}/screenshot-${Qt.formatDateTime(new Date(), "yyyy-MM-dd_HH.mm.ss")}.png`;
+        const token = `signaltoast-${Date.now()}`;
+        root.pendingSaveToken = token;
+        const job = JSON.stringify({
+            token: token,
+            op: "save",
+            title: Translation.tr("Save picture"),
+            dir: root.screenshotsDir,
+            name: `screenshot-${Qt.formatDateTime(new Date(), "yyyy-MM-dd_HH.mm.ss")}.png`,
+            directory: false,
+            multiple: false,
+        });
+        // Job file and dialog start in ONE command: the picker reads the job as
+        // it loads, and starting it before the write lands is the race that
+        // makes a dialog answer "cancelled" the instant it appears.
+        saveDialogProcess.command = ["bash", "-c",
+            'mkdir -p "$1" && printf %s "$2" > "$1/$3.json" && exec "$4" picker "$3"',
+            "_", root.savePortalDir, job, token,
+            `${Directories.scriptPath}/launch/filemanager.sh`];
+        saveDialogProcess.running = true;
+        // Bounded: ten minutes of waiting, the same ceiling the portal backend
+        // gives its own dialogs. A picker that dies never writes a result, so
+        // without a bound this process would wait forever for an answer.
+        saveResultWatch.command = ["bash", "-c",
+            'for _ in $(seq 1 3000); do if [ -f "$1" ]; then cat "$1"; exit 0; fi; sleep 0.2; done; exit 1',
+            "_", `${root.savePortalDir}/${token}.result.json`];
+        saveResultWatch.running = true;
+    }
+
+    function saveImageTo(target) {
+        if (!target || target.length === 0)
+            return;
+        saveImageProcess.source = root.signalToastImage;
+        saveImageProcess.target = target;
         saveImageProcess.running = true;
+    }
+
+    Process {
+        id: saveDialogProcess
+    }
+
+    Process {
+        id: saveResultWatch
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const raw = String(this.text ?? "").trim();
+                const token = root.pendingSaveToken;
+                if (token.length === 0)
+                    return;
+                root.pendingSaveToken = "";
+                // The dialog's files belong to this one answer; the portal deletes
+                // its own, so this does the same for its own copies.
+                Quickshell.execDetached(["bash", "-c", 'rm -f "$1" "$2"', "_",
+                    `${root.savePortalDir}/${token}.json`,
+                    `${root.savePortalDir}/${token}.result.json`]);
+                let answer = {};
+                try {
+                    answer = JSON.parse(raw);
+                } catch (e) {
+                    return;   // no answer file, or one cut short: nothing to save
+                }
+                if (answer.cancelled === true)
+                    return;
+                const uris = Array.isArray(answer.uris) ? answer.uris : [];
+                if (uris.length === 0)
+                    return;
+                let path = String(uris[0]).replace(/^file:\/\//, "");
+                try {
+                    path = decodeURIComponent(path);
+                } catch (e) { }
+                root.saveImageTo(path);
+            }
+        }
     }
 
     // The copy behind "Saved".
     //
     // A Process rather than execDetached because the card makes a claim: it says
     // the picture was kept, so it has to know whether the copy happened. A
-    // detached bash could fail (a cache directory wiped between the card and the
-    // click, a full disk) and the card would still say "Saved".
+    // detached bash could fail (a full disk, a folder removed between the dialog
+    // and the write) and the card would still say "Saved".
     //
-    // Paths go in as positional arguments, never as a shell string: the decoded
-    // picture lives in a cache path, and a quote in a filename must not become a
-    // command.
+    // Paths go in as positional arguments, never as a shell string: the chosen
+    // path comes from a dialog and a quote in a filename must not become syntax.
     Process {
         id: saveImageProcess
         property string source: ""
@@ -2486,10 +2571,10 @@ property bool loadingFailFlash: false
         // actually copied right now and only falls back to the preview when the
         // clipboard no longer holds an image (the card outlives a copy).
         command: ["bash", "-c",
-            'mkdir -p "$1" || exit 1; '
+            'mkdir -p "$(dirname -- "$3")" || exit 1; '
             + 'if wl-paste --type image/png > "$3" 2>/dev/null && [ -s "$3" ]; then exit 0; fi; '
             + 'cp -f -- "$2" "$3"',
-            "_", root.screenshotsDir, source, target]
+            "_", "", source, target]
         // Kept so a failure says WHY in the shell log instead of only telling the
         // user it did not work.
         stderr: StdioCollector { id: saveErr }
@@ -2500,13 +2585,6 @@ property bool loadingFailFlash: false
                 return;
             }
             root.showSignalToast(Translation.tr("Saved"), "download_done", 1500);
-            // Show it instead of announcing it: the shell's own Files app opens
-            // on the saved file, revealed in its folder -- the same program
-            // SUPER + E opens. This used to start hypr-explorer, the GTK app the
-            // shell replaced, so a saved picture answered in a file manager that
-            // was not the one the desktop uses.
-            Quickshell.execDetached(["bash", "-c", 'exec "$1" "$2"', "_",
-                `${Directories.scriptPath}/launch/filemanager.sh`, saveImageProcess.target]);
         }
     }
 

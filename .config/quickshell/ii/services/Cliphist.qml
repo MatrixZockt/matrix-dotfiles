@@ -69,7 +69,27 @@ Singleton {
 
     readonly property int previousEntryCount: readProc.buffer.length
 
+    // One listing at a time.
+    //
+    // `cliphist list` streams, and this used to clear the line buffer and start
+    // a second process on top of the first. The head lines of the NEW listing
+    // were fine, but the tail of the OLD one kept appending to the same now-empty
+    // buffer -- so buffer[0] became a line from deep in the list, i.e. an old
+    // clipboard entry, and the toast announced it as the newest copy. That is how
+    // a card for a just-copied screenshot came to carry an unrelated picture
+    // (measured: announced id 4054, position 552 of 2000, while the store head
+    // was the entry that had just been copied).
+    //
+    // A refresh asked for while one is running is remembered and run once when
+    // the current one exits: the retry and delayed timers keep their timing,
+    // they just stop cutting a listing in half.
+    property bool refreshQueued: false
+
     function refresh() {
+        if (readProc.running) {
+            root.refreshQueued = true
+            return
+        }
         readProc.buffer = []
         readProc.running = true
     }
@@ -288,7 +308,20 @@ Singleton {
                 // lives in the config as `workSafety.enable.clipboard`, so the
                 // access threw and took the toast down with it before it could
                 // ever be shown.
-                const newest = readProc.buffer.length > 0 ? readProc.buffer[0] : ""
+                // The entry with the highest id, not simply the first line:
+                // cliphist prints newest-first, and trusting that order is what
+                // made an out-of-order buffer announce an old entry. Two lists
+                // cannot interleave any more (see refreshQueued), and this makes
+                // the answer independent of the order anyway.
+                let newest = ""
+                let newestId = -1
+                for (const line of readProc.buffer) {
+                    const id = parseInt(String(line).split("\t")[0], 10)
+                    if (!isNaN(id) && id > newestId) {
+                        newestId = id
+                        newest = line
+                    }
+                }
                 if (newest !== root.announcedTail) {
                     root.pendingChange = false
                     root.toastRetries = 0
@@ -318,6 +351,10 @@ Singleton {
                 }
             } else {
                 console.error("[Cliphist] Failed to refresh with code", exitCode, "and status", exitStatus)
+            }
+            if (root.refreshQueued) {
+                root.refreshQueued = false
+                root.refresh()
             }
         }
     }

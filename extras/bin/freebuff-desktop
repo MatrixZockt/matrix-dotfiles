@@ -117,8 +117,8 @@ if pgrep -x freebuff >/dev/null 2>&1; then
     # against it: this is the click-during-startup case that used to produce a
     # duplicate window on another workspace and a "Couldn't open Freebuff"
     # toast for an app that was seconds from drawing.
-    for _ in $(seq 1 90); do
-        sleep 1
+    for _ in $(seq 1 360); do
+        sleep 0.25
         if window_on_screen; then
             focus_existing || true
             exit 0
@@ -300,8 +300,8 @@ if [ "$RENDER" = "auto" ] && [ -n "${WAYLAND_DISPLAY:-}" ]; then
         >>/tmp/freebuff-desktop.log 2>&1 &
     app_pid=$!
     set +m
-    for _ in $(seq 1 45); do
-        sleep 1
+    for _ in $(seq 1 180); do
+        sleep 0.25
         if wayland_window_up; then
             bring_to_current || true
             exit 0
@@ -434,8 +434,8 @@ if [ "$RENDER" != "soft" ] && xdisp=$(find_x_display); then
         >>/tmp/freebuff-desktop.log 2>&1 &
     app_pid=$!
     set +m
-    for _ in $(seq 1 90); do
-        sleep 1
+    for _ in $(seq 1 360); do
+        sleep 0.25
         if main_window_up; then
             # Mapped -- put it where the user is, then hand back.
             bring_to_current || true

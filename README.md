@@ -18,6 +18,44 @@ desktop picks it up. Git is your undo button — any change can be reverted.
 
 ![The desktop at a glance](docs/images/desktop-anatomy.png)
 
+## What this is
+
+A whole desktop, not a colour scheme. A Hyprland session, a Quickshell shell and the
+scripts and units that keep the two alive through suspend, GPU switching, a wedged
+session or a dead shell — all versioned here while staying live: `~/.config/hypr` is
+a symlink into this repo, so an edit is one reload away and git is the undo button.
+
+**Highlights**
+
+- A bar with islands and panels, a notification centre, a lock screen and a login
+  theme that share one palette.
+- Clipboard history with picture previews: a copied screenshot appears in the
+  top-right card with a download button, freezes while you hover it, and saves to
+  `~/Pictures/Screenshots` on click.
+- A file manager, a wallpaper selector, an app launcher, a keybind cheat sheet and
+  screen snips, all in the shell rather than in a dozen separate apps.
+- Power handling that follows the machine: profiles, GPU switching, sleep/resume
+  hooks, a lid guard, a CPU watchdog and a shell watchdog.
+- Every surface documented in [docs/FEATURES.md](docs/FEATURES.md) with the file
+  that implements it.
+
+## Quick start
+
+```bash
+git clone https://github.com/MatrixZockt/matrix-dotfiles ~/hyprland
+cd ~/hyprland
+./install.sh     # link this repo into ~/.config and install the small helpers
+make reload      # restart Hyprland with it
+```
+
+Built for Hyprland 0.56+ with the Lua config and the illogical-impulse package set;
+`./install.sh --dry-run` prints what it would do before it does it.
+
+**Not in this repo, on purpose:** wallpapers and other third-party art, anything
+specific to one machine's hardware, and every secret, hostname or personal path.
+The wallpaper selector therefore opens empty and offers an **Add wallpaper** button
+that applies a picture you choose and keeps it in your own collection.
+
 ## Documentation
 
 | Document | What it covers |
@@ -59,13 +97,13 @@ More figures: [how the config loads](docs/images/config-layers.png) ·
 ├── extras/                    copied into ~ by install.sh (entries, icons, bin/)
 │   ├── applications/          .desktop files (freebuff, appimage-run handler)
 │   ├── bin/                   the ~/.local/bin helpers the config calls:
-│   │                          appimage-run, razer-command-center, the power
+│   │                          appimage-run, the power
 │   │                          stack (power-autoswitch, power-failsafe,
 │   │                          ppd-nvidia-boost), the GPU launch helpers,
 │   │                          the local llama server, session-env/session-doctor
 │   ├── etc/polkit-1/          rules for passwordless mount/lid changes
-│   ├── sbin/                  razer-cc-elevate (the one setuid-ish helper)
-│   ├── share/polkit-1/        the Command Center's polkit actions
+│   ├── sbin/                  ii-recover (session recovery helper)
+│   ├── share/polkit-1/        polkit actions for the helpers above
 │   ├── systemd/user/          the user units that back all of the above
 │   └── icons/                 hicolor icons for the entries above
 ├── install.sh                 link this repo into ~/.config on a new machine
@@ -370,9 +408,9 @@ versioned here. Changes made to the stock shell:
   evdev tracker; device access comes from a udev `uaccess` rule for
   touchpads, `/etc/udev/rules.d/70-touchpad-uaccess.rules` — no group
   membership or re-login needed.)
-- **Brightness keys on the Razer Blade 16 (RZ09-0510)**: the machine exposes
-  two backlights and plain `brightnessctl` picks the dGPU's `nvidia_0`, which
-  drives nothing visible — the panel is the iGPU's `intel_backlight`. The
+- **Brightness keys on a laptop that exposes two backlights**: such a machine
+  reports two backlight devices, and plain `brightnessctl` picks the discrete
+  GPU's, which drives nothing visible — the panel is the integrated GPU's. The
   shell's brightness service (read AND write) and the keybind fallbacks all
   go through `~/.config/quickshell/ii/scripts/system/brightness-device.sh`,
   which resolves the real panel backlight from the DRM state (connected
@@ -384,7 +422,7 @@ versioned here. Changes made to the stock shell:
 - **Volume keys**: registered and working (`wpctl` on the PipeWire sink, with
   a 150% limit); mute and mic-mute too. If a media/brightness key still does
   nothing after this, the likely culprit is the key never reaching the
-  kernel (openrazer/firmware) — check with `sudo evtest` on the Razer nodes
+  kernel (keyboard firmware) — check with `evtest` on the keyboard nodes
   under `/dev/input`.
 - **Now-bar tab order and tick reveal**: the popped-out card's tab chips lead
   with **System** (visual order only — swiping still cycles the ring in the
@@ -397,11 +435,10 @@ versioned here. Changes made to the stock shell:
   space — the island's content sits dead centre and the card's header row
   collapses to zero height until the ticks show.
 - **GPU naming**: `HardwareStats.rankGpus` cleans `lspci`'s raw lines (the
-  human model name is the LAST bracket group — `AD106M [GeForce RTX 4070
-  Max-Q / Mobile]` → `GeForce RTX 4070 Max-Q / Mobile`, never the `[AMD/ATI]`
-  vendor alias) and sorts any discrete GPU (NVIDIA/GeForce, Radeon RX, Arc)
-  ahead of the iGPU, since every consumer reads `[0]` as "the graphics
-card". On this Optimus Blade the iGPU used to be shown for the whole
+  human model name is the LAST bracket group — `[Vendor Device]` → the model,
+  never the vendor alias) and sorts any discrete GPU (NVIDIA/GeForce, Radeon
+  RX, Arc) ahead of the iGPU, since every consumer reads `[0]` as "the
+  graphics card". On an Optimus laptop the iGPU used to be shown for the whole
   machine. Not hardcoded — whatever dGPU the machine carries wins.
 - **Scrolling parity with Brave**: touchpad scrolling in the shell's own apps
   is now 1:1 pixel tracking — `StyledFlickable`/`StyledListView` apply the

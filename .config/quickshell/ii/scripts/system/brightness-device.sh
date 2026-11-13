@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ── Razer Blade 16 (RZ09-0510) patch: the RIGHT backlight ──────────────────
+# ── KEYBOARD this laptop (this laptop-0510) patch: the RIGHT backlight ──────────────────
 #
 # This machine exposes TWO backlight devices: `intel_backlight` (the iGPU,
 # which actually drives the built-in panel) and `nvidia_0` (the dGPU's

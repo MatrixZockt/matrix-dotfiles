@@ -107,7 +107,9 @@ windows rather than a grid of all workspaces.
   the same gesture keeps its old job (fullscreen toggle). Four fingers down closes it.
 - **Quote wallpapers**: a generated wall of typographic quotes with an optional clock
   overlay, previewed in `design/quote-wallpaper-preview.html`.
-- `Add wallpaper` accepts your own images; video wallpapers are supported with a
+- **No wallpapers ship with this repo.** The grid opens on an **Add wallpaper**
+  button instead of a blank list: it opens your file picker, applies the picture you
+  choose and keeps it in your own collection. Video wallpapers are supported with a
   restore helper (`custom/scripts/__restore_video_wallpaper.sh`).
 
 ### Sidebars
@@ -290,9 +292,8 @@ tray behaviour for Thunderbird.
   (`before-sleep.sh`, `after-resume.sh`).
 - **Recovery**: `shell-watchdog.service` restarts a dead shell, `ii-recover` restores a
   usable session, and `session-doctor` / `session-env` explain the current session.
-- **Filesystem access**: polkit rules allow the session user to mount removable media
-  and adjust the Razer speakers without a password
-  (`extras/etc/polkit-1/rules.d/`, `extras/sbin/razer-cc-elevate`).
+- **Filesystem access**: a polkit rule lets the session user mount removable media
+  without a password (`extras/etc/polkit-1/rules.d/10-ii-removable-mount.rules`).
 
 ---
 

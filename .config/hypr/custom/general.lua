@@ -11,7 +11,7 @@
 -- (2560/1.5 = 1706.67), and that is fine -- see the note on the reader below.
 --
 -- The scale is VALUE-DRIVEN, read from ~/.cache/display/scale (one number, a
--- clean divisor of the panel). That file is what the Razer Command Center app
+-- clean divisor of the panel). That file is what a vendor control app
 -- and the shell's own Settings > Display page write, so a change there
 -- survives every reboot and every reload WITHOUT this file being rewritten --
 -- the same generation pattern as custom/keyboard.lua and
@@ -3163,7 +3163,7 @@ end
 --   * picture-in-picture and the screen-sharing indicator (by title)
 --   * the wallpaper theatre              (by title)
 --   * Bitwarden's small utility panel   (by class)
---   * the Razer charge-limit prompt      (by title)
+--   * the KEYBOARD charge-limit prompt      (by title)
 --
 -- A dialog that attached would be the worst possible outcome: a system
 -- password prompt dropped into the tiling layout with no way back. So the

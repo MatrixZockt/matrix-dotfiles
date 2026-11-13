@@ -90,7 +90,7 @@ StyledFlickable {
         if (SystemFacts.gpus.length > 0) {
             // The live clock (gt_cur_freq_mhz) is an Intel/AMD sysfs file and
             // belongs to the iGPU; showing it on the idle NVIDIA row read as
-            // "the 4070 is running at 1517 MHz" while it was at 0%. The row
+            // "the dGPU is running at 1517 MHz" while it was at 0%. The row
             // whose driver has no clock file reports itself as idle.
             const clockPci = (() => {
                 const nonNvidia = SystemFacts.gpus.find(g => String(g.driver ?? "") !== "nvidia");

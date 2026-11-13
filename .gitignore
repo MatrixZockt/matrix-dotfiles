@@ -86,3 +86,6 @@ extras/applications/freebuff.desktop
 *~
 __pycache__/
 .DS_Store
+
+# Wallpapers are not shipped: the selector starts empty and imports your own.
+assets/wallpapers/

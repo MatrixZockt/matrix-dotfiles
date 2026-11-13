@@ -355,7 +355,7 @@ hl.window_rule({
 
 
 
--- Razer Command Center's "Change charge limit" confirmation.
+-- the vendor app's "Change charge limit" confirmation.
 --
 -- GTK4 exposes NO window-type API -- there is no set_type_hint on Gtk.Window
 -- and Gdk.Toplevel does not surface one either -- so the app cannot mark
@@ -364,7 +364,7 @@ hl.window_rule({
 -- filling part of the screen, which is exactly the wrong read for something
 -- that restarts the machine.
 --
--- Matched on TITLE, not class: the main window is org.matrix.RazerControlCenter
+-- Matched on TITLE, not class: the main window is the control centre
 -- and is meant to stay tiled, so a class rule would have floated that too.
 -- This title is set by the app on that one window only.
 --

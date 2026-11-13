@@ -2,7 +2,7 @@
 # gpu-mode -- one switch for "should newly launched apps use the NVIDIA dGPU?".
 #
 #   gpu-mode            show the current mode
-#   gpu-mode on         new apps go to the RTX 4070
+#   gpu-mode on         new apps go to the the discrete GPU
 #   gpu-mode off        new apps stay on the Intel iGPU (default)
 #   gpu-mode toggle     flip it
 #
@@ -18,12 +18,12 @@
 # 2026-09-29, with eglinfo/glxinfo/vulkaninfo, not inferred:
 #
 #   OpenGL via GLX (X11, XWayland, Wine, most games)
-#       iGPU when off, RTX 4070 when on.            <- works
+#       iGPU when off, the discrete GPU when on.            <- works
 #   Vulkan (games, engines, Blender-class tools)
-#       iGPU listed first when off; the 4070 becomes
+#       iGPU listed first when off; the dGPU becomes
 #       GPU0 -- the preferred device -- when on.     <- works
 #   CUDA / NVML (Ollama, PyTorch, anything cuInit)
-#       ALWAYS the 4070, in both modes. libcuda never goes through glvnd, so
+#       ALWAYS the dGPU, in both modes. libcuda never goes through glvnd, so
 #       no variable in this script can affect it.   <- always on the dGPU
 #   Native Wayland EGL (GTK/Qt apps)
 #       ALWAYS the iGPU, in both modes. glvnd resolves EGL_DEFAULT_DISPLAY
@@ -35,7 +35,7 @@
 #       Intel, always, which is the point of having an iGPU.        <- correct
 #
 # So "on" means: anything that draws through GLX or Vulkan, and all compute,
-# runs on the 4070. It does not move native Wayland EGL apps, and on this
+# runs on the dGPU. It does not move native Wayland EGL apps, and on this
 # hardware it cannot.
 #
 # What it deliberately does NOT touch
@@ -93,13 +93,13 @@ set_mode() {
     printf '%s\n' "$1" >"$state_file"
     if [ "$1" = on ]; then
         notify "GPU mode: dGPU" critical-graphics
-        echo "GPU mode: ON  -- newly launched apps use the RTX 4070"
+        echo "GPU mode: ON  -- newly launched apps use the the discrete GPU"
         echo "  (GLX and Vulkan apps, and all CUDA. Native Wayland EGL apps"
         echo "   still use the iGPU; there is no lever for those.)"
     else
         notify "GPU mode: iGPU" computer
         echo "GPU mode: OFF -- newly launched apps use the Intel iGPU, and the"
-        echo "  4070 is free to sleep. CUDA apps still use the 4070."
+        echo "  dGPU is free to sleep. CUDA apps still use the dGPU."
     fi
 }
 
@@ -112,7 +112,7 @@ case "${1:-status}" in
         if [ "$(current)" = on ]; then
             echo "GPU mode: ON  (dGPU for newly launched apps)"
         else
-            echo "GPU mode: OFF (iGPU for newly launched apps, 4070 may sleep)"
+            echo "GPU mode: OFF (iGPU for newly launched apps, dGPU may sleep)"
         fi ;;
     *)
         echo "usage: gpu-mode [on|off|toggle|status]" >&2

@@ -246,30 +246,8 @@ hl.bind("XF86MonBrightnessDown",
     hl.dsp.exec_cmd("bash $HOME/.config/quickshell/ii/scripts/system/brightness-device.sh step -5"),
     { locked = true, repeating = true, description = "Utilities: Brightness down (panel)" })
 
--- Razer Command Center: SUPER + SHIFT + C.
---
--- (Moved from SUPER + C on 2026-10-24: the shell's colour picker took that
--- key. SUPER + SHIFT + C is free -- its old bind ran hyprpicker, which is
--- not installed.)
---
--- The app now starts resident and in the BACKGROUND (the unit passes
--- --background), so at login it is running and enforcing the saved lighting,
--- brightness, fan mode and daylight cap -- but with no window, by design. That
--- left it with no visible presence at all, and the report was "the app is
--- gone, can't find it": it was running the whole time, just nothing to click.
---
--- So it needs a first-class way in. This runs the launcher entry rather than
--- starting the app: the resident process is a Gio.Application with
--- HANDLES_COMMAND_LINE, so the invocation is handed to it and the existing
--- window is presented. No second process, and no risk of two copies fighting
--- over the hardware -- which is what would happen if this pointed at the
--- service instead.
-hl.unbind("SUPER + SHIFT + C")
-hl.bind("SUPER + SHIFT + C",
-    hl.dsp.exec_cmd("razer-command-center"),
-    { description = "Utilities: Razer Control Center" })
 
--- Colour picker: SUPER + C, the slot the Razer Command Center just left.
+-- Colour picker: SUPER + C.
 -- The shell's own GlobalShortcut does the work (modules/ii/colorPicker):
 -- a frozen grab of the screen, a crosshair and a live hex/rgba pill;
 -- Alt+X or a click copies the hex, Esc closes. The unbind is needed because
@@ -1100,32 +1078,18 @@ hl.unbind("SUPER + ALT + Page_up")
 hl.unbind("CTRL + SUPER + SHIFT + Right")
 hl.unbind("CTRL + SUPER + SHIFT + Left")
 
--- ── Keyboard backlight (the "lighting buttons") ─────────────────────────────
---
--- The base config binds every other media/illumination key except these two,
--- so the keyboard's light up/down keys did nothing on this desktop. The base
--- volume/screen-brightness keys call the shell's own OSD first and fall back
--- to a CLI tool; there is no shell lighting widget to mirror, so these fire a
--- dedicated script that steps the openrazer backlight directly (25% per
--- press; up wraps 100 -> 0, down clamps at 0) and raises a notification as
--- the OSD. It talks to the driver's sysfs file, so it works even if
--- openrazer-daemon is down. See custom/scripts/kbd-backlight-step.sh.
-hl.bind("XF86KbdBrightnessUp", hl.dsp.exec_cmd("$HOME/.config/hypr/custom/scripts/kbd-backlight-step.sh up"),
-    { description = "Utilities: Keyboard backlight up" })
-hl.bind("XF86KbdBrightnessDown", hl.dsp.exec_cmd("$HOME/.config/hypr/custom/scripts/kbd-backlight-step.sh down"),
-    { description = "Utilities: Keyboard backlight down" })
 
 -- GPU mode: SUPER + SHIFT + G. One switch for "should newly launched apps use
--- the NVIDIA 4070?", instead of a setting per application.
+-- the NVIDIA dGPU?", instead of a setting per application.
 --
 -- Not SUPER+G: that is the quickshell overlay toggle (hyprland/keybinds.lua),
 -- and stealing it would break the widget overlay. SHIFT+G is free and keeps
 -- the mnemonic.
 --
--- Off (the default) is what lets the 4070 sleep: the desktop is drawn by the
+-- Off (the default) is what lets the dGPU sleep: the desktop is drawn by the
 -- Intel iGPU, so an idle laptop stays idle. On is what you want for an hour of
 -- something that actually needs the dGPU -- games and anything drawing through
--- GLX or Vulkan, plus every CUDA workload, which uses the 4070 either way.
+-- GLX or Vulkan, plus every CUDA workload, which uses the dGPU either way.
 --
 -- The switch is applied at LAUNCH time to the two places apps actually come
 -- from: the launcher (quickshell's open.sh, one chokepoint for every menu
@@ -1139,7 +1103,7 @@ hl.bind("XF86KbdBrightnessDown", hl.dsp.exec_cmd("$HOME/.config/hypr/custom/scri
 hl.unbind("SUPER + SHIFT + G")
 hl.bind("SUPER + SHIFT + G",
     hl.dsp.exec_cmd("gpu-mode toggle"),
-    { description = "System: GPU mode (iGPU <-> RTX 4070 for new apps)" })
+    { description = "System: GPU mode (iGPU <-> the discrete GPU for new apps)" })
 
 -- ── Every SUPER chord must silence the bare-SUPER action ──────────────
 --

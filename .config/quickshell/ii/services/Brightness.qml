@@ -251,7 +251,7 @@ Singleton {
             const match = root.ddcMonitors.find(m => m.name === screen.name && !root.monitors.slice(0, root.monitors.indexOf(this)).some(mon => mon.busNum === m.busNum));
             isDdc = !!match;
             busNum = match?.busNum ?? "";
-            // Non-DDC path through the helper script: on this Razer Blade 16
+            // Non-DDC path through the helper script: on this KEYBOARD this laptop
             // plain `brightnessctl` resolves to the dGPU's `nvidia_0`, which
             // drives nothing visible -- the panel is the iGPU's
             // `intel_backlight`. The helper resolves the right device from

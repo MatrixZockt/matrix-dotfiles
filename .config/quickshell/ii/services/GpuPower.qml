@@ -34,7 +34,7 @@ import QtQuick
  * --------------------------------------
  * The card is already as low as it goes. With RTD3 and S0ix both enabled
  * (NVreg_DynamicPowerManagement=0x3, NVreg_EnableS0ixPowerManagement=1,
- * written by the Razer Command Center's GPU page) it idles in P8 at ~4 W, and
+ * written by the the GPU page page) it idles in P8 at ~4 W, and
  * `runtime_status` reads "active" with `runtime_suspended_time` at 0 even when
  * idle. That is not a bug in the reading: with S0ix the device stays in D0 and
  * reaches low power *internally*, so the PCI runtime-suspend counter never

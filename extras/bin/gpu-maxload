@@ -5,7 +5,7 @@
 # ---------------
 # Every other GPU readout on this machine is a passive sample, and a passive
 # sample cannot tell "correctly idle" from "stuck and lying about it". This
-# creates real demand on the 4070 and measures both halves of the claim:
+# creates real demand on the dGPU and measures both halves of the claim:
 #
 #   1. WAKE  -- does the card leave its idle P-state and climb?
 #   2. IDLE  -- does it fall back to P8 on its own once the work stops,
@@ -15,7 +15,7 @@
 # the NVIDIA ICD with VK_ICD_FILENAMES. That variable is the whole trick:
 # without it the demo runs on the Intel iGPU through Mesa and this script
 # measures the wrong card entirely. Verified: vulkaninfo --summary shows two
-# devices, and only with the NVIDIA ICD forced does the 4070 move.
+# devices, and only with the NVIDIA ICD forced does the dGPU move.
 #
 # PRESENT MODE IS NOT OPTIONAL. vkcubepp defaults to FIFO (vsync), which
 # paces it to the display refresh and holds the card at ~16 W / P3 no matter

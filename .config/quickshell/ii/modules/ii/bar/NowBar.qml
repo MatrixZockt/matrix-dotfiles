@@ -65,8 +65,8 @@ Item {
     // resting view being System now agrees with the tick order too. The
     // panel's chip row leads with System for the same reason (NowBarPanel).
     // Four views: the old Lighting view retired -- profile switching lives in
-    // the card's System tab (a dropdown over RazerService's mirror) and in
-    // Razer Command Center itself.
+    // the card's System tab (a dropdown over the profiles service's mirror) and in
+    // the vendor control app itself.
     readonly property int modePerf: 0
     readonly property int modeMedia: 1
     readonly property int modePomodoro: 2
@@ -508,7 +508,7 @@ Item {
         if (key === "cpu") return SystemNow.cpuPct;
         if (key === "ram") return SystemNow.ramPct;
         // The BUSIEST chip's load, not a named one: on this laptop the renderer
-        // is the iGPU and the 4070 only scans the panel out, so a gauge named
+        // is the iGPU and the dGPU only scans the panel out, so a gauge named
         // after the discrete card read 0% while the machine drew. See
         // SystemNow.gpuMetricPct.
         if (key === "gpu") return SystemNow.gpuMetricPct;

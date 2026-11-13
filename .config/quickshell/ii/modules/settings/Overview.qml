@@ -130,7 +130,7 @@ ContentPage {
                 Layout.alignment: Qt.AlignVCenter
                 // The value takes whatever the label column leaves, rather than
                 // a fixed width: a fixed 260 left the CPU string ("Intel(R)
-                // Core(TM) i9-14900HX · 32 threads @ 5.6 GHz") elided even with
+                // Core(TM) this CPU · 32 threads @ 5.6 GHz") elided even with
                 // the whole pane to spare. The middle is gone -- the label has
                 // its own reserved width, so the value can simply fill the rest
                 // and still end on one right-hand edge.

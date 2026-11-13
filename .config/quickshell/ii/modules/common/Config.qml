@@ -493,21 +493,6 @@ Singleton {
                 //                 window animations off -- so the interface gets
                 //                 out of the way while you work.
                 property string powerMode: "default"
-                // ── Razer Command Center's persistent keys ──
-                // Written by the app (razer-command-center), only declared
-                // here so the JsonAdapter ROUND-TRIPS them: an undeclared
-                // key inside a JsonObject is silently DROPPED on the
-                // shell's next config write, which is exactly how the
-                // app's long-idle switch "snapped back off" and how the
-                // day-cap settings once reset. Declaring them makes the
-                // shell a safe co-tenant of this file.
-                property bool longIdleEnabled: false
-                property int longIdleMinutes: 10
-                property bool longIdleSuspend: false
-                property bool kbdAutoDim: false
-                property int kbdDayBrightness: 35
-                property int kbdDayStart: 8
-                property int kbdDayEnd: 18
                 // Fan mode chosen in the app: "quiet" holds the fans a step
                 // below the firmware curve, "default" leaves it alone,
                 // "noisy" pins them high for a cooler machine, "manual"
@@ -707,7 +692,7 @@ Singleton {
                 // ── Apps the user has muted ──
                 // A list of names, not a JsonObject: the config adapter DROPS
                 // any key inside a JsonObject that is not declared here (see the
-                // Razer note above), and apps are discovered at runtime, so
+                // note on declared keys above), and apps are discovered at runtime, so
                 // there is nothing to declare. Stored as the app's own display
                 // name; matching is by normalized identity
                 // (NotificationUtils.normalizeAppIdentity), because one app

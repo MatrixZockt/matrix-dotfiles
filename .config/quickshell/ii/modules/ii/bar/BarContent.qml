@@ -4084,7 +4084,7 @@ Item { // Bar content region
         // time -- a steady crawl toward full, not a loop, so it reads as
         // progress being made rather than motion for its own sake.
         // A real download overrides the crawl: the fill then shows the
-        // actual fraction from Razer Command Center's downloader.
+        // actual fraction from the downloader.
         Timer {
             id: chargeCrawl
             interval: 100
@@ -4249,7 +4249,7 @@ Item { // Bar content region
 
     // ── The download caption ─────────────────────────────────────────────
     // A download rides the indication line above as its fill -- but the line
-    // carries no words. So while Razer Command Center's downloader reports a
+    // carries no words. So while the downloader reports a
     // file, this small caption names it: "(downloading Discord)" in a mini
     // island parked in the free strip just left of the right island, level
     // with the row and directly above the line's right end. Same lifecycle

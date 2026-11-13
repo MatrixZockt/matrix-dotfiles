@@ -1,9 +1,9 @@
 #!/bin/sh
-# gpu-run -- run ONE program on the NVIDIA dGPU (RTX 4070 Laptop).
+# gpu-run -- run ONE program on the NVIDIA dGPU (the discrete GPU).
 #
 # Usually you do not need this. `gpu-mode on` (or SUPER+SHIFT+G) turns the
 # dGPU on for every app you launch from then on; `gpu-mode off` puts it back
-# and lets the 4070 sleep again. This script is the per-launch version, for
+# and lets the dGPU sleep again. This script is the per-launch version, for
 # the times you want the dGPU for one command only.
 #
 #     gpu-run ./game
@@ -12,10 +12,10 @@
 # What it actually changes, measured on this machine with eglinfo/glxinfo/
 # vulkaninfo (2026-09-29) rather than assumed:
 #
-#   OpenGL via GLX (X11, XWayland, Wine, most games)  -> RTX 4070
-#   Vulkan (engines, Blender-class tools)             -> 4070 becomes GPU0,
+#   OpenGL via GLX (X11, XWayland, Wine, most games)  -> the discrete GPU
+#   Vulkan (engines, Blender-class tools)             -> dGPU becomes GPU0,
 #                                                        the preferred device
-#   CUDA / NVML (Ollama, PyTorch)                     -> 4070, but it already
+#   CUDA / NVML (Ollama, PyTorch)                     -> dGPU, but it already
 #                                                        was, with or without
 #                                                        this script
 #   Native Wayland EGL (GTK/Qt apps)                  -> STILL the iGPU.
@@ -25,7 +25,7 @@
 #     outright. There is no lever for this case.
 #   VAAPI / video decode                              -> Intel, correctly
 #
-# So an app that draws through GLX or Vulkan gets the 4070. One that draws
+# So an app that draws through GLX or Vulkan gets the dGPU. One that draws
 # through native Wayland EGL does not, and on this hardware cannot.
 #
 # This is the same three variables /usr/bin/prime-run sets, kept as a script so

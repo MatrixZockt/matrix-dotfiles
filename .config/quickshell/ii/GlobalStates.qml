@@ -260,12 +260,6 @@ Singleton {
     // The middle island's current view, so the bar's pocket content can follow
     // it: 0 = pomodoro, 1 = media, 2 = AI usage, 3 = performance.
     property int nowBarMode: 0          // System (ring index 0, see NowBar)
-    // Razer Command Center: the island/panel have a 5th "Lighting" view
-    // (mode 4) whose profile chips + brightness slider are fed by a Process
-    // that reads the JSON store (see NowBarPanel LightingView).
-    property int razerProfileCount: 0
-    property int razerProfileActive: 0
-    property string razerProfileNames: ""
     // One-shot reveal flag for the view tick rows (the island's bottom edge
     // and the card's header): any mode change shows "where did it land" for
     // the hint window, then the rows fade away again. One flag serves every
@@ -738,7 +732,7 @@ Singleton {
     // Download progress on the bar's status line: when >= 0, the line's
     // fill shows the REAL fraction instead of the launch-charge crawl, and
     // the tell label reads "Downloading <name>". Set by the `loading`
-    // IPC's progress() from Razer Command Center's downloader.
+    // IPC's progress() from the downloader.
     property real downloadProgress: -1   // 0..1, or -1 = no download
     property string downloadName: ""
     // A program is starting and waiting to appear. Set by showLoading().

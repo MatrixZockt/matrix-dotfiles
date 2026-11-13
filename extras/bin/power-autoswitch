@@ -7,7 +7,7 @@
 #   on AC and on battery alike. Measured 2026-10-10: switching the Power Mode
 #   between power-saver / balanced / performance changed EPP only -- turbo
 #   stayed off and the RAPL limits stayed 20/30 W in all three, because the
-#   Razer Command Center's fan mode was holding them. So "just pick
+#   the vendor app's fan mode was holding them. So "just pick
 #   Performance" could not work, and the machine idled at ~0.8-2.2 GHz on a
 #   chip whose vendor limits are 120/160 W.
 #
@@ -20,7 +20,7 @@
 #   things a profile ought to mean but did not:
 #
 #     1. THE CPU PACKAGE CAP + TURBO, by choosing the matching FAN MODE in the
-#        Razer Command Center's own config. This is deliberate and it is the
+#        the vendor app's own config. This is deliberate and it is the
 #        whole trick: the app re-asserts the cap for its saved fan mode on
 #        every tick (pwr_enforce()), so writing RAPL directly would be undone
 #        within seconds. Writing the fan mode means the app AGREES with us
@@ -54,7 +54,7 @@
 #        was picked to be cool); otherwise profile == performance OR the
 #        shell's boost toggle (performanceMode) -> performance; else the
 #        profile's own PPD value. It drives energy_performance_preference
-#        through razer-cc-elevate's narrow `epp` op -- never the governor:
+#        through the power helper's narrow `epp` op -- never the governor:
 #        pinning scaling_governor to performance locks EPP and makes every
 #        power-profiles-daemon profile switch fail with EBUSY (measured
 #        2026-10-18, see apply_epp).
@@ -84,7 +84,7 @@ BAT_PATH="${BAT_PATH:-/sys/class/power_supply/BAT0}"
 RAPL="/sys/class/powercap/intel-rapl:0"
 NO_TURBO="/sys/devices/system/cpu/intel_pstate/no_turbo"
 
-ELEVATE="/usr/local/sbin/razer-cc-elevate"
+ELEVATE="/usr/local/sbin/power-helper"
 II_CONFIG="$HOME_DIR/.config/illogical-impulse/config.json"
 MONITOR="${MONITOR:-eDP-1}"
 PANEL_MODE="${PANEL_MODE:-2560x1600}"
@@ -130,7 +130,7 @@ case "${AC_PATH:-}" in ''|*[!A-Za-z0-9_./-]*) AC_PATH="/sys/class/power_supply/A
 case "${BAT_PATH:-}" in ''|*[!A-Za-z0-9_./-]*) BAT_PATH="/sys/class/power_supply/BAT0" ;; esac
 
 # profile -> fan mode. The fan modes are the app's own; see FAN_POWER_POLICY
-# in razer-command-center. "noisy" and "default" both mean "vendor limits".
+# in the vendor app. "noisy" and "default" both mean "vendor limits".
 declare -A FANMODE_FOR=(
     ["power-saver"]="battery"
     ["balanced"]="quiet"
@@ -168,7 +168,7 @@ declare -A EPP_FOR=(
 # machine on the previous mode's 20/30 W with turbo off: the mode moved the
 # CPU in no way at all. Measured 2026-10-12.
 #
-# 120/160 W is the pair razer-command-center documents for this machine's
+# 120/160 W is the pair the vendor app documents for this machine's
 # vendor limits (the same table records 92.3 C at them with the fan ramped,
 # against 65.4 C at 35/45 W), and the app now persists the same numbers, so a
 # correction only ever has to be made in one place: battery.powerDefaults.
@@ -321,7 +321,7 @@ PY
 # tick is skipped -- the INTERVAL loop comes back seconds later and applies the
 # cap for real once logind has the session active again.
 #
-# The action probed is org.matrix.razercc.nvidia rather than fan or decode,
+# The action probed is org.hyprland.powerhelper rather than fan or decode,
 # because all three carry the same exec.path annotation and polkit resolves
 # that to ONE of them: the dialog raised for a `pwrlimit` call at 11:09:26 was
 # titled "Writing the NVIDIA power-management settings". Probing the action
@@ -332,13 +332,13 @@ PY
 # a broken install (rule or policy missing). A background daemon must not paper
 # over that with a password box, so it says so in the journal once a minute and
 # keeps probing: a repaired install recovers on its own. The fix is
-# extras/etc/polkit-1/rules.d/60-razercc.rules, deployed by `make install`.
+# extras/etc/polkit-1/rules.d/60-powerhelper.rules, deployed by `make install`.
 GRANT_WAIT_MAX=12          # ~60 s at the default 5 s tick
 grant_misses=0
 
 grant_ready() {
     command -v pkcheck >/dev/null 2>&1 || return 0   # cannot ask: old behaviour
-    pkcheck --action-id org.matrix.razercc.nvidia --process $$ >/dev/null 2>&1
+    pkcheck --action-id org.hyprland.powerhelper --process $$ >/dev/null 2>&1
 }
 
 elevation_ready() {
@@ -353,7 +353,7 @@ elevation_ready() {
         log "polkit grant not in force yet (session settling after wake/login) - waiting, no prompt"
     elif [ "$grant_misses" -gt "$GRANT_WAIT_MAX" ] \
         && [ $(( (grant_misses - GRANT_WAIT_MAX) % GRANT_WAIT_MAX )) -eq 0 ]; then
-        log "polkit grant still not in force after ${GRANT_WAIT_MAX} ticks - check extras/etc/polkit-1/rules.d/60-razercc.rules is installed; not prompting"
+        log "polkit grant still not in force after ${GRANT_WAIT_MAX} ticks - check extras/etc/polkit-1/rules.d/60-powerhelper.rules is installed; not prompting"
     fi
     return 1
 }

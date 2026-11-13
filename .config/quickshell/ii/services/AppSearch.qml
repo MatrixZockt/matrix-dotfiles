@@ -86,7 +86,7 @@ Singleton {
         // can be started by Hyprland (full login PATH) or by the systemd user
         // watchdog (compiled-in default: /usr/local/bin:/usr/bin, NO
         // ~/.local/bin) -- with the stripped PATH, every user-installed entry
-        // (razer-command-center and friends) probed "missing" and was hidden
+        // (the vendor app and friends) probed "missing" and was hidden
         // from the SUPER menu, then reappeared depending on which launcher
         // had started the shell. So the probe always searches the user's own
         // bin dirs FIRST, regardless of how this process was launched.

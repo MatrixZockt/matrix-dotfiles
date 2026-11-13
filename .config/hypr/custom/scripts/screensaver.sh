@@ -373,7 +373,7 @@ video_playing() { watching_video "$@"; }
 # live in /tmp, so a reboot always starts with the tier disarmed.
 
 # The tier's settings live in the shell config (battery.longIdle*), so they
-# survive reboots and are edited live by Razer Control Center. No /tmp
+# survive reboots and are edited live by KEYBOARD Control Center. No /tmp
 # markers: a reboot can never "disarm" what the user chose to keep on.
 long_idle_cfg() {
     python3 - "$1" "$2" <<'PY' 2>/dev/null

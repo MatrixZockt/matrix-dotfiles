@@ -255,7 +255,7 @@ Singleton {
     //   common_fit_params: failed to fit params to free device memory
     //   ggml_backend_cuda_buffer_type_alloc_buffer: cudaMalloc failed: OOM
     //
-    // Measured on this machine (RTX 4070 Laptop, 8188 MiB, Qwen3-8B Q4_K_M
+    // Measured on this machine (the discrete GPU, 8188 MiB, Qwen3-8B Q4_K_M
     // 4.7 GB, KV cache q4_0):
     //
     //     -ngl 99 -c 65536  ->  cudaMalloc failed allocating 2592 MiB (dies)

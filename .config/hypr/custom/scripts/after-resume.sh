@@ -24,11 +24,11 @@
 #  3. Re-apply the keyboard lighting. The firmware forgets the per-key matrix
 #     over suspend -- the last step at the end of this file is why.
 #
-# WHY THIS EXISTS. The internal speakers on this Blade are not enabled by any
+# WHY THIS EXISTS. The internal speakers on this laptop are not enabled by any
 # mixer setting: the codec's autoconfig reports `speaker_outs=0`, so the generic
 # driver never powers the speaker amplifier, and the only thing that turns it on
 # is programming a long list of vendor/coefficient registers directly --
-# /usr/local/sbin/razer-blade-speakers, run as root by razer-speakers.service.
+# /usr/local/sbin/speaker-amp helper, run as root by speaker amp unit.
 #
 # Those register writes are RUNTIME ONLY. A suspend/resume resets the codec, so
 # after every wake the amp is off again -- and because the service only ran at
@@ -90,8 +90,8 @@ set -u
 #
 # The holdoff expires, logind re-runs the lid action against the state it
 # cached before the sleep, and `HandleLidSwitch=suspend` performs it. That
-# state is stale because of the FIRMWARE, not logind: this Blade's lid switch
-# never reports `Lid opened` after a resume (Razer, kernel bz 191211), so
+# state is stale because of the FIRMWARE, not logind: this laptop's lid switch
+# never reports `Lid opened` after a resume (KEYBOARD, kernel bz 191211), so
 # logind still believes the lid is shut however wide open it is. A stale
 # "closed", re-read thirty seconds after every wake: that is the whole loop, on
 # all three mornings.
@@ -345,36 +345,8 @@ if [ -n "$sink" ]; then
     mute="$(pactl get-sink-mute "$sink" 2>/dev/null | grep -oE '(yes|no)' | head -1)"
 fi
 
-# 3. Then the speaker amp. A brief pause so the codec has settled after resume;
-#    the service's own ExecStartPre covers the rest.
-sleep 2
-if command -v systemctl >/dev/null 2>&1; then
-    # --no-ask-password, and a refusal is logged rather than swallowed.
-    #
-    # This restart is what turns the speakers back on, and it is authorized by
-    # extras/etc/polkit-1/rules.d/20-razer-speakers.rules. It used to be a plain
-    # `systemctl restart ... || true`, which on a machine without that rule did
-    # not fail quietly: polkit asked for the admin password, the shell's agent
-    # put that dialog on top of the freshly woken lock screen, and the password
-    # typed to unlock went into it instead (polkitd named this exact command as
-    # the caller, 2026-10-13). With the flag the same situation fails in the
-    # journal, and nothing can ever raise a prompt on the wake screen.
-    systemctl --no-ask-password restart razer-speakers.service >/dev/null 2>&1 \
-        || logger -t after-resume "could not restart razer-speakers.service -- install extras/etc/polkit-1/rules.d/20-razer-speakers.rules" 2>/dev/null || true
-    # WAIT for the unit to finish, and this is load-bearing rather than
-    # defensive: it is a oneshot with RemainAfterExit AND an ExecStartPost that
-    # re-runs the register writes ~5s later, and its ExecStart resets the
-    # hardware "Speaker" control. Restoring the volume before that lands just
-    # lets the reset win -- measured: the sink snapped back to 24% when the
-    # restore ran early. "active" here means the whole chain (Pre, Start, Post)
-    # is done. Bounded so a wedged unit cannot hold the resume path open.
-    for _ in $(seq 1 40); do
-        [ "$(systemctl is-active razer-speakers.service 2>/dev/null)" = active ] && break
-        sleep 1
-    done
-fi
 
-# 4. Put the volume/mute back now that the codec is fully programmed.
+# 3. Put the volume/mute back now that the codec is fully programmed.
 if [ -n "${sink:-}" ] && [ -n "${vol:-}" ]; then
     pactl set-sink-volume "$sink" "$vol" >/dev/null 2>&1 || true
     case "${mute:-no}" in
@@ -383,32 +355,3 @@ if [ -n "${sink:-}" ] && [ -n "${vol:-}" ]; then
     esac
 fi
 
-# 5. Keyboard lighting, LAST.
-#
-# The keyboard MCU drops the per-key matrix across a suspend and comes back on
-# its own firmware effect, so a wake with a custom profile left the lighting
-# gone until the next login. Nothing re-applied it: razer-command-center pushes
-# the profile at login (razer-command-center-restore.service), on a profile
-# change, and when its window opens -- and it has no resume hook, so a wake is
-# the one path that never re-pushed it.
-#
-# --apply-lighting is the headless half of that restore: read lighting.json,
-# push the active profile's matrix through the openrazer daemon, retrying while
-# the daemon is not answering yet. It touches nothing else (no panel
-# brightness, no fan), so it cannot fight screensaver.sh above, and --autodim
-# right after it re-asserts the configured daylight brightness cap if one is
-# armed (a no-op otherwise).
-#
-# Deliberately after the speaker block: none of this depends on the codec, and
-# the retries inside --apply-lighting must not delay a panel that is already
-# back from being usable.
-if [ -x "$HOME/.local/bin/razer-command-center" ]; then
-    if "$HOME/.local/bin/razer-command-center" --apply-lighting >/dev/null 2>&1; then
-        record "       keyboard lighting re-applied"
-    else
-        record "       keyboard lighting NOT re-applied (razer-command-center --apply-lighting failed)"
-        logger -t after-resume "could not re-apply the keyboard lighting (razer-command-center --apply-lighting)" 2>/dev/null || true
-    fi
-    "$HOME/.local/bin/razer-command-center" --autodim >/dev/null 2>&1 \
-        || logger -t after-resume "could not re-assert the keyboard brightness cap (razer-command-center --autodim)" 2>/dev/null || true
-fi

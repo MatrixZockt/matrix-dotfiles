@@ -4,8 +4,8 @@
 # Built for the moment right after logging back in, when the questions are
 # always the same and always need four terminals to answer:
 #   * did the shell come up, and with a real display?
-#   * is the Razer app alive, or did it die silently again?
-#   * did the GPU pin work -- is the 4070 finally asleep?
+#   * is the vendor app alive, or did it die silently again?
+#   * did the GPU pin work -- is the dGPU finally asleep?
 #   * did the login screen stop complaining?
 #
 # Read-only: it inspects and prints, and changes nothing. Safe to run at any
@@ -45,8 +45,8 @@ else
     note "check: /tmp/shell-watchdog.log and /tmp/ii_shell.log"
 fi
 
-# ── The Razer app ────────────────────────────────────────────────────────
-for unit in razer-command-center.service openrazer-daemon.service shell-watchdog.service; do
+# ── The vendor app ────────────────────────────────────────────────────────
+for unit in shell-watchdog.service; do
     state=$(systemctl --user is-active "$unit" 2>/dev/null)
     case "$state" in
         active) ok "$unit active" ;;
@@ -62,7 +62,7 @@ if [ -z "$WD" ]; then
     note "skipped (no desktop session)"
 else
     # Count nvidia fds held by the compositor. This is THE number: the whole
-    # point of AQ_DRM_DEVICES is that Hyprland never opens the 4070, so zero
+    # point of AQ_DRM_DEVICES is that Hyprland never opens the dGPU, so zero
     # here means the pin took and the dGPU can power down.
     hp=$(pgrep -x Hyprland | head -1)
     if [ -n "$hp" ]; then
@@ -74,11 +74,11 @@ else
         fi
         fds=$(ls -l "/proc/$hp/fd" 2>/dev/null | grep -c nvidia)
         if [ "$fds" -eq 0 ]; then
-            ok "Hyprland holds 0 nvidia fds -- the 4070 can idle"
+            ok "Hyprland holds 0 nvidia fds -- the dGPU can idle"
         else
             warn "Hyprland still holds $fds nvidia fds"
             if tr '\0' '\n' < "/proc/$hp/environ" 2>/dev/null | grep -q AQ_DRM_DEVICES; then
-                note "the pin WAS set but Hyprland opened the 4070 anyway"
+                note "the pin WAS set but Hyprland opened the dGPU anyway"
                 note "-> the value is being read too late, or is being ignored"
             else
                 note "the pin never reached the compositor; ~4 W is being spent"

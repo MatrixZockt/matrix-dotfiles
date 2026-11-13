@@ -5,7 +5,7 @@
 # wf-recorder, which is not installed on this machine -- its start path fails
 # before the first frame -- and wf-recorder has no pause at all: the only way
 # to "pause" is to stop the file and start another one. This machine has an
-# RTX 4070, so gpu-screen-recorder is both the hardware encoder and the only
+# the discrete GPU, so gpu-screen-recorder is both the hardware encoder and the only
 # backend here that can pause a running capture (SIGUSR2 toggles pause,
 # SIGINT finalises the file).
 #

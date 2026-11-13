@@ -77,7 +77,7 @@ fi
 # logout/login; without this block the units in the repo are never deployed and
 # the features they back silently do nothing on a fresh machine. Only user
 # units are handled here -- anything needing root lives in extras/etc and is
-# installed by the elevated Razer step below.
+# installed by the elevated KEYBOARD step below.
 if [[ -d "$REPO/extras/systemd/user" ]]; then
     mkdir -p "$HOME/.config/systemd/user"
     for f in "$REPO/extras/systemd/user"/*.service; do
@@ -97,42 +97,6 @@ if [[ -d "$REPO/extras/systemd/user" ]]; then
     done
 fi
 
-# Razer Command Center's passwordless elevation: the polkit action file and
-# rule go to SYSTEM locations, so this step needs one elevated shell. The
-# helper binary goes to /usr/local/sbin. Run manually with sudo once; the
-# installed files persist across reinstalls (versioned with the repo).
-RAZER_CC_SYSTEM=0
-if [[ -d "$REPO/extras/share/polkit-1/actions" && $DRY_RUN -eq 0 ]]; then
-    if [ "$(id -u)" -eq 0 ]; then
-        RAZER_CC_SYSTEM=1
-    elif command -v sudo >/dev/null 2>&1; then
-        echo "polkit: one elevated step for the Command Center's actions (or run install.sh as root)"
-        if sudo -n true 2>/dev/null; then
-            RAZER_CC_SYSTEM=1
-        else
-            echo "  (skipped: run 'sudo bash install.sh' or deploy manually — see extras/share/polkit-1/)"
-        fi
-    fi
-fi
-if [[ $RAZER_CC_SYSTEM -eq 1 ]]; then
-    sudo_or=""
-    [ "$(id -u)" -ne 0 ] && sudo_or="sudo"
-    $sudo_or install -Dm 0755 "$REPO/extras/sbin/razer-cc-elevate" /usr/local/sbin/razer-cc-elevate
-    $sudo_or install -Dm 0644 "$REPO/extras/share/polkit-1/actions/org.matrix.razercc.policy" \
-        /usr/share/polkit-1/actions/org.matrix.razercc.policy
-    $sudo_or install -Dm 0644 "$REPO/extras/etc/polkit-1/rules.d/60-razercc.rules" \
-        /etc/polkit-1/rules.d/60-razercc.rules
-    # The wake path's one root step: the speaker amp is re-programmed by
-    # restarting its system unit after every suspend/resume, and restarting a
-    # system unit from a session is what asked for the admin password on every
-    # wake. See the rule's own header -- polkitd named that command as the
-    # caller on 2026-10-13.
-    $sudo_or install -Dm 0644 "$REPO/extras/etc/polkit-1/rules.d/20-razer-speakers.rules" \
-        /etc/polkit-1/rules.d/20-razer-speakers.rules
-    $sudo_or systemctl restart polkit 2>/dev/null || true
-    echo "  polkit  org.matrix.razercc actions + rule installed (passwordless for matrix)"
-    echo "  polkit  razer-speakers restart allowed (waking from sleep asks nothing)"
-fi
 
 # Removable media: the rule that lets the session user mount a stick, a card or
 # a phone without the admin password. Same shape of elevated step as the
@@ -189,38 +153,15 @@ if [[ $RECOVER_SYSTEM -eq 1 ]]; then
     echo "          generate a code from Settings > Account, or: sudo ii-recover --setup"
 fi
 
-# Lid state at resume: this Blade's firmware never reports the lid as open
+# Lid state at resume: this laptop's firmware never reports the lid as open
 # after a resume and _LID keeps answering "closed", so the driver, the input
 # switch, the proc file and logind all agree on a wrong value -- and on
 # 2026-10-16 the post-resume lid watcher slept a machine whose lid was open.
-# The kernel's own quirk table answers exactly this firmware for sibling Razer
+# The kernel's own quirk table answers exactly this firmware for sibling KEYBOARD
 # models, but not for this one, and `button` is built into the kernel (no
 # button.ko) so the parameter has to be set at boot from userspace. The unit's
 # header carries the measurement and the revert recipe; a failure here is
 # visible in `systemctl --failed` and named by lid-guard.sh in the journal.
-LID_UNIT=0
-if [[ -f "$REPO/extras/etc/systemd/system/lid-init-state.service" && $DRY_RUN -eq 0 ]]; then
-    if [ "$(id -u)" -eq 0 ]; then
-        LID_UNIT=1
-    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-        LID_UNIT=1
-    else
-        echo "  (skipped: run 'sudo bash install.sh' or copy extras/etc/systemd/system/lid-init-state.service to /etc/systemd/system/)"
-    fi
-fi
-if [[ $LID_UNIT -eq 1 ]]; then
-    sudo_or=""
-    [ "$(id -u)" -ne 0 ] && sudo_or="sudo"
-    $sudo_or install -Dm 0644 "$REPO/extras/etc/systemd/system/lid-init-state.service" \
-        /etc/systemd/system/lid-init-state.service
-    $sudo_or systemctl daemon-reload
-    # --now, because the parameter is not a boot-time-only convenience: it is
-    # read on the resume path, and the first resume after this install should
-    # already be the fixed one.
-    $sudo_or systemctl enable --now lid-init-state.service >/dev/null 2>&1 || \
-        echo "  (could not enable lid-init-state.service -- enable it by hand)"
-    echo "  unit    lid-init-state.service installed (lid reported open at resume)"
-fi
 
 # Make AppImages and loose executables launch on double-click, permanently:
 # register appimage-run as the default handler for their mime types. This

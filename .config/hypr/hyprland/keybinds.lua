@@ -40,7 +40,7 @@ hl.bind("CTRL + ALT + Delete", hl.dsp.exec_cmd(qsIsAlive .. " || pkill wlogout |
 hl.bind("SHIFT + SUPER + ALT + Slash", hl.dsp.exec_cmd("qs -p $HOME/.config/quickshell/$qsConfig/welcome.qml"))
 
 -- Brightness goes through the shell's helper script, which resolves the
--- backlight device that actually drives the panel: on this Razer Blade 16
+-- backlight device that actually drives the panel: on this KEYBOARD this laptop
 -- plain `brightnessctl` picks the dGPU's `nvidia_0`, which changes nothing
 -- you can see (the panel is the iGPU's `intel_backlight`). The shell's own
 -- IPC handler is tried first; this script is the fallback when the shell is
@@ -92,7 +92,7 @@ hl.bind("SUPER + SHIFT + X", hl.dsp.exec_cmd(
 ))
 --# Color picker
 -- The picker is the shell's own now, on SUPER + C (bound in
--- custom/keybinds.lua, once the Razer Command Center moved off that key to
+-- custom/keybinds.lua, once the the vendor control app moved off that key to
 -- SUPER + SHIFT + C). hyprpicker is not installed on this machine, so the
 -- bind that used to sit here launched nothing at all. SUPER + C is bound in
 -- custom/ rather than here because this file later binds it to the code

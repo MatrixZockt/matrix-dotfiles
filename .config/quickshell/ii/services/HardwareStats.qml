@@ -100,7 +100,7 @@ Singleton {
     // the clock file is ONE card's (`card2/gt_cur_freq_mhz` is the Intel iGPU
     // here) while the set of GPU names is both, so a view that prints the
     // clock beside "the GPU" has to know whether it is describing the card it
-    // named -- the mismatch this exists to end (a 4070 reading "1517 MHz"
+    // named -- the mismatch this exists to end (a dGPU reading "1517 MHz"
     // while it sat at 0% with no processes).
     property string gpuClockCard: ""     // /sys/class/drm/cardN/
     property string gpuClockPci: ""      // 0000:00:02.0
@@ -272,7 +272,7 @@ done
 
     // lspci lists the host's VGA devices in bus order, which on an Optimus
     // laptop puts the Intel iGPU FIRST -- and every consumer of gpuNames
-    // reads [0] as "the graphics card". On this Razer Blade that meant the
+    // reads [0] as "the graphics card". On this laptop that meant the
     // island's GPU tile described the iGPU while the machine's real GPU (the
     // one that renders, the one people mean) sat second in the list.
     //
@@ -281,8 +281,8 @@ done
     //     Radeon RX / Arc lines) sorts ahead of everything else -- no model
     //     is hardcoded; whatever dGPU the machine carries wins.
     //   * the name is the human one. lspci prints a chip code plus the
-    //     marketing name in brackets ("AD106M [GeForce RTX 4070 Max-Q /
-    //     Mobile]"); the bracket content is what a spec sheet and a human
+    //     marketing name in brackets ("<chip code> [<marketing name>]"); the
+    //     bracket content is what a spec sheet and a human
     //     both call the card, so when brackets exist they replace the raw
     //     line. Intel entries carry no brackets and pass through verbatim.
     function rankGpus(list) {

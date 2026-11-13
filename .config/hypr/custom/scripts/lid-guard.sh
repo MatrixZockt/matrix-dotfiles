@@ -4,7 +4,7 @@
 # WHY THIS EXISTS.
 #
 # after-resume.sh arms a grace period after every wake: for 90 seconds the
-# machine refuses to sleep, because on this Blade the wake path is what re-arms
+# machine refuses to sleep, because on this laptop the wake path is what re-arms
 # a sleep loop. That script's header is where the incidents are documented.
 # This file is the half of the guard that was missing until 2026-10-14.
 #
@@ -34,7 +34,7 @@
 #   events. ... Defaults to 30s."
 #
 # The lid switch on this machine never reports `Lid opened` after a resume
-# (Razer firmware, kernel bz 191211), so logind's cached lid state is still
+# (KEYBOARD firmware, kernel bz 191211), so logind's cached lid state is still
 # "closed" from the night before. The holdoff expires, logind re-runs the lid
 # action against that stale state, and `HandleLidSwitch=suspend` sleeps the
 # machine the user is looking at.
@@ -71,7 +71,7 @@
 # copy: acpi_button_state_seq_show() calls the _LID method on every read
 # (drivers/acpi/button.c), so those were nineteen live firmware answers of
 # "closed" -- for a lid that was open. The firmware lies about _LID, and on
-# this Blade it never sends an `open` notification after a resume to correct it
+# this laptop it never sends an `open` notification after a resume to correct it
 # (kernel bz 191211; the driver's own DMI quirk table carries the same
 # complaint for sibling models: "notification of the LID device only happens on
 # close, not on open and _LID always returns closed"). An unquirked machine

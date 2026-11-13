@@ -14,7 +14,7 @@ logins it is permanently wrong:
     the live session is:  WAYLAND_DISPLAY=wayland-1  (works)
 
 Anything that inherits that stale value and then tries to open a display
-fails at once. This is why the Razer app's unit died in 251 ms with
+fails at once. This is why an app's unit died in 251 ms with
 `RuntimeError: Gtk couldn't be initialized` and why the shell watchdog
 relaunched `qs` hundreds of times into a compositor that was not there.
 

@@ -41,7 +41,7 @@ end
 if is_file_exists(HOME .. "/.config/hypr/custom/performance.lua") then
     require("custom.performance")
 end
--- Generated from the Razer Command Center app / Settings > Display (render
+-- Generated from a vendor control app / Settings > Display (render
 -- quality). Required after performance.lua so the user's chosen look wins
 -- unless a performance mode actively overrides it this session.
 if is_file_exists(HOME .. "/.config/hypr/custom/quality.lua") then

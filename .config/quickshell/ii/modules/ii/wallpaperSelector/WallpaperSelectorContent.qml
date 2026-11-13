@@ -395,6 +395,61 @@ MouseArea {
                         }
                     }
 
+                    // Empty folder: this repo ships no wallpapers, so the grid
+                    // would be a blank rectangle with no way forward. Ask for one
+                    // instead — the button opens the picker, the chosen picture is
+                    // applied and kept in the collection.
+                    Column {
+                        visible: Wallpapers.folderModel.count === 0
+                        anchors.centerIn: parent
+                        spacing: 10
+
+                        MaterialSymbol {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            text: "add_photo_alternate"
+                            iconSize: 44
+                            color: Appearance.colors.colSubtext
+                        }
+                        StyledText {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            horizontalAlignment: Text.AlignHCenter
+                            text: Translation.tr("No wallpapers here yet")
+                            color: Appearance.colors.colOnLayer1
+                        }
+                        RippleButton {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            implicitHeight: 38
+                            implicitWidth: addWallpaperRow.implicitWidth + 32
+                            buttonRadius: height / 2
+                            colBackground: Appearance.colors.colPrimary
+                            colBackgroundHover: Appearance.colors.colPrimaryHover
+                            onClicked: {
+                                Wallpapers.openFallbackPicker(root.useDarkMode);
+                                GlobalStates.wallpaperSelectorOpen = false;
+                            }
+                            contentItem: RowLayout {
+                                id: addWallpaperRow
+                                spacing: 6
+                                MaterialSymbol {
+                                    text: "add"
+                                    iconSize: 18
+                                    color: Appearance.colors.colOnPrimary
+                                }
+                                StyledText {
+                                    text: Translation.tr("Add wallpaper")
+                                    color: Appearance.colors.colOnPrimary
+                                }
+                            }
+                        }
+                        StyledText {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            horizontalAlignment: Text.AlignHCenter
+                            font.pixelSize: Appearance.font.pixelSize.smaller
+                            color: Appearance.colors.colSubtext
+                            text: Translation.tr("Opens your file picker")
+                        }
+                    }
+
                     Row {
                         id: extraOptions
                         anchors {

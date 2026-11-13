@@ -10,7 +10,7 @@
 #
 # THE ONE FACT THAT SEPARATES A PORT FROM A SOLDER JOINT is `removable`, and it
 # is read from sysfs per DEVICE, not guessed from the name. Measured on this
-# machine (Razer Blade, 2026-10-14), the discrimination is exact:
+# machine (laptop, 2026-10-14), the discrimination is exact:
 #
 #   /sys/bus/usb/devices/1-8/removable   -> fixed      Integrated Camera
 #   /sys/bus/usb/devices/1-10/removable  -> fixed      the laptop's own keyboard

@@ -265,7 +265,7 @@ fi
 # (/usr/local/bin:/usr/bin -- no ~/.local/bin). The visible symptom of the
 # bad case: the shell's app-search probes each desktop entry's executable
 # against ITS OWN PATH and hides entries whose binary it cannot find, so
-# anything installed in ~/.local/bin (razer-command-center) vanished from
+# anything installed in ~/.local/bin (the vendor app) vanished from
 # the SUPER menu whenever the watchdog had (re)started the shell, and came
 # back when Hyprland had. Setting it here makes both paths identical.
 # PIN THE CURSOR THEME.
@@ -342,7 +342,7 @@ exec 9>&-
 # ── THE SHELL RENDERS ON THE CHIP THE SCREEN IS PLUGGED INTO (2026-11-01) ──
 #
 # This machine has two graphics chips: the Intel one drives the laptop panel,
-# the NVIDIA 4070 is a discrete card used only when asked. The session used to
+# the NVIDIA dGPU is a discrete card used only when asked. The session used to
 # export __NV_PRIME_RENDER_OFFLOAD/__GLX_VENDOR_LIBRARY_NAME/__VK_LAYER_NV_optimus
 # globally, which told EVERY program -- this shell included -- to render on the
 # discrete card. Every frame was then rendered on one chip and copied to the

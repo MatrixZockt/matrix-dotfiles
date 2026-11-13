@@ -130,7 +130,7 @@ Item {
     // WHICH listed card the live clock and load belong to. The counters are
     // ONE card's (`card2/gt_*` is the Intel iGPU on this laptop) while the rail
     // lists every chip, so printing them under the other card's name made the
-    // idle 4070 read the iGPU's 1650 MHz clock and the iGPU's graph. Matched by
+    // idle dGPU read the iGPU's 1650 MHz clock and the iGPU's graph. Matched by
     // PCI address, the same way the resource overlay rows do it.
     function gpuOwnsLiveNumbers(name) {
         const gpu = (root.sys.gpus ?? []).find(entry => entry.name === name) ?? {};

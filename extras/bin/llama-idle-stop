@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # llama-idle-stop -- stop the local llama-server when it is provably doing
-# nothing, so the RTX 4070 can go back to sleep.
+# nothing, so the the discrete GPU can go back to sleep.
 #
 # WHY AN IDLE TIME, AND WHY IT IS MEASURED THIS WAY
 #   Measured 2026-10-10: llama-server had been up 61 minutes holding 7.5 GB of

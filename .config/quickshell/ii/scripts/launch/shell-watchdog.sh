@@ -1,24 +1,16 @@
 #!/usr/bin/env bash
 # shell-watchdog.sh -- keep the desktop's soft parts alive.
 #
-# Runs as shell-watchdog.service (systemd --user). Two guards:
+# Runs as shell-watchdog.service (systemd --user). One guard:
 #
 #  1. SHELL GUARD  -- relaunches the Quickshell shell (`qs -c ii`) when it
 #     dies. The bar, panels, OSDs and every shell-integrated keybind depend
 #     on it. Uses the same single-instance launch script as login, so a
 #     reload/reboot/watchdog race can never stack two bars.
 #
-#  2. RAZER KEY GUARD -- the openrazer daemon grabs the keyboard's event
-#     device to handle the Fn-row keys. When the input nodes are re-created
-#     underneath it (udev reload, device rescans), the grab goes stale and
-#     its key manager starts DROPPING the brightness/volume keys with
-#     "KeyError: 224/225" in ~/.local/share/openrazer/logs/razer.log -- the
-#     "media keys suddenly dead" bug of 2026-09-26. When those KeyErrors
-#     appear, restart the daemon (throttled to once per 5 minutes).
 set -u
 
 LAUNCH="$HOME/.config/quickshell/ii/scripts/launch/shell.sh"
-RAZER_LOG="$HOME/.local/share/openrazer/logs/razer.log"
 
 # Exact shell detection. `pgrep -f "qs -c ii"` matches the full command line,
 # so it is also true when some unrelated process merely MENTIONS that string --
@@ -30,7 +22,6 @@ RAZER_LOG="$HOME/.local/share/openrazer/logs/razer.log"
 . "$HOME/.config/quickshell/ii/scripts/launch/shell-pids.sh"
 : "${qsConfig:=ii}"
 shell_up() { [ -n "$(shell_pids "$qsConfig")" ]; }
-RAZER_STAMP="/tmp/razer-guard.last"
 RESET_FLAG="${XDG_RUNTIME_DIR:-/tmp}/ii-shell-reset.active"
 
 log() { echo "[shell-watchdog] $(date '+%H:%M:%S') $*" >>/tmp/shell-watchdog.log; }
@@ -140,7 +131,7 @@ sweepStrayNetworkMonitors() {
 # place for it -- the top of the main loop below -- is NOT a timer: that loop
 # BLOCKS. `env ... bash "$LAUNCH"` leaves the shell as this script's child, so
 # the shell's lifetime IS one iteration of the loop, and everything at the top
-# of it runs once per shell exit (which is also why guard 2, the Razer check,
+# of it runs once per shell exit (which is also why guard 2, the KEYBOARD check,
 # only gets a look in then). Measured while the shell was up: zero CPU ticks in
 # twelve seconds, and a `/proc` wchan of `do_wait`.
 #
@@ -234,7 +225,7 @@ while true; do
     # dies without cleaning up cannot wedge the watchdog off permanently --
     # the stale flag is older than a couple of minutes below, and ignored.
     #
-    # RAZER GUARD STILL RUNS. It is unrelated to the shell and a reset must not
+    # KEYBOARD GUARD STILL RUNS. It is unrelated to the shell and a reset must not
     # stop brightness/volume keys from being rescued, so this skips guard 1
     # only and falls through to guard 2.
     reset_active() {
@@ -341,18 +332,6 @@ while true; do
         :
     fi
 
-    # ── Guard 2: Razer media keys ─────────────────────────────────────────
-    if pgrep -f openrazer-daemon >/dev/null 2>&1; then
-        if [ -f "$RAZER_LOG" ] && tail -n 60 "$RAZER_LOG" | grep -qE "KeyError: 22[4-7]"; then
-            now=$(date +%s)
-            last=$(cat "$RAZER_STAMP" 2>/dev/null || echo 0)
-            if [ $((now - last)) -gt 300 ]; then
-                echo "$now" >"$RAZER_STAMP"
-                log "razer keymanager swallowing media keys (KeyError 22x) -> restarting daemon"
-                systemctl --user restart openrazer-daemon.service
-            fi
-        fi
-    fi
 
     sleep "$SLEEP"
 done

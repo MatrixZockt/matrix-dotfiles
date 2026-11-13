@@ -3,7 +3,7 @@
 
 WHY THIS EXISTS
     The island's GPU tile read nvidia-smi's utilization.gpu. On this laptop the
-    desktop is rendered by the Intel iGPU and the 4070 only scans the panel out,
+    desktop is rendered by the Intel iGPU and the dGPU only scans the panel out,
     so that number is a hard 0% while the machine is plainly drawing -- the
     complaint this answers ("GPU shows 0% while the graphics card is working",
     2026-11-07). The iGPU has no busy counter of its own: i915 exposes no

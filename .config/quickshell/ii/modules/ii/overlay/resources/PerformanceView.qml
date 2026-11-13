@@ -85,8 +85,8 @@ ColumnLayout {
         for (const gpu of root.gpuNames()) {
             // The clock belongs to ONE card. gt_cur_freq_mhz is an Intel iGPU
             // file, and attaching its number to every GPU row made the idle
-            // dGPU show the iGPU's live clock as its own -- on this Blade the
-            // 4070 (which drives nothing) read "1517 MHz" while actually
+            // dGPU show the iGPU's live clock as its own -- on this laptop the
+            // dGPU (which drives nothing) read "1517 MHz" while actually
             // sitting at 0% with no processes. Only the row whose PCI address
             // matches the clock file's card gets the live number; the rest
             // say they are idle, which is the truth.

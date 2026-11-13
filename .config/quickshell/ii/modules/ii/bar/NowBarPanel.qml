@@ -10,7 +10,7 @@ import Quickshell.Io
 import Quickshell.Services.Pipewire
 // For PowerProfiles + the PowerProfile enum: the three-button power-mode row
 // in the System tab writes PPD profiles directly (same live handle the quick
-// toggles use), so the Razer app is not needed for a profile switch.
+// toggles use), so the vendor app is not needed for a profile switch.
 import Quickshell.Services.UPower
 import qs
 import qs.services
@@ -663,7 +663,7 @@ Scope {
         // that key was put back on its own within the minute: press
         // Performance, get power-saver a minute later, with nothing on screen
         // to explain it. The key is the single source of truth -- the settings
-        // page, the Razer chips and PowerMode.load() all go through it -- and
+        // page, the vendor chips and PowerMode.load() all go through it -- and
         // this card now writes it on the way in.
         const mode = PowerMode.modeFor(p);
         if (Config.options?.battery && Config.options.battery.powerMode !== mode)
@@ -729,7 +729,7 @@ Scope {
     function gpuDisplayName() {
         const g = (SystemFacts.gpus ?? []).find(g => g.driver === "nvidia");
         if (!g) return Translation.tr("Graphics");
-        return /10DE/i.test(g.vendorId ?? "") ? "RTX 4070" : (g.name || Translation.tr("Graphics"));
+        return g.name || Translation.tr("Graphics");
     }
     // CPU model, trimmed of the vendor prefix and any "@ speed" tail.
     function cpuDisplayName() {
@@ -5413,8 +5413,8 @@ Scope {
                     // gets cut off by the card's height.
                     //
                     // The old layout was eight gauge tiles — power and
-                    // hardware numbers with no context. The Razer controls
-                    // that used to share this tab are one click away in Razer
+                    // hardware numbers with no context. The vendor controls
+                    // that used to share this tab are one click away in KEYBOARD
                     // Command Center itself.
                     PanelFadeView {
                         on: root.mode === root.modePerf
@@ -5514,14 +5514,14 @@ ColumnLayout {
                                             if (k === "gpu") {
                                                 // The percentage above is the busiest
                                                 // chip's (see SystemNow.gpuMetricPct),
-                                                // and the cap below describes the 4070 --
-                                                // so it is only true while the 4070 is
+                                                // and the cap below describes the dGPU --
+                                                // so it is only true while the dGPU is
                                                 // the chip that won. Under the iGPU's
                                                 // number it said "cap 115 W · boost",
                                                 // the same mismatch the 0% was.
                                                 if (!SystemNow.gpuMetricDiscrete)
                                                     return Translation.tr("iGPU · renderer");
-                                                // Same three words the Razer app's GPU
+                                                // Same three words the the vendor app's GPU
                                                 // page uses (see gpu_state_pill there), so
                                                 // the two panels can no longer read as
                                                 // contradicting each other.
@@ -5545,7 +5545,7 @@ ColumnLayout {
                                                 // under Dynamic Boost). Measured while the
                                                 // card is awake; mechanism-derived while it
                                                 // sleeps; the pstate verdict lives on in the
-                                                // Razer app's own GPU page.
+                                                // the vendor app's own GPU page.
                                                 //
                                                 // What comes AFTER the cap is
                                                 // gpuCaption()'s call: the
@@ -7253,7 +7253,7 @@ ColumnLayout {
     // nothing became unknowable -- it just stopped being a row that never
     // changes sitting among rows that do.
 
-    // The card, named, then the ceiling it COULD be given: "RTX 4070 · 140 W
+    // The card, named, then the ceiling it COULD be given: "the discrete GPU · 140 W
     // max". Three different wattages now live on this tab and they are not
     // interchangeable:
     //
@@ -7336,7 +7336,7 @@ ColumnLayout {
     // TEMPERATURE that rode on the end of it -- which leaves the card's
     // temperature with no home on this tab at all (the band's Temp cell is the
     // processor package sensor, and gt_cur_freq_mhz on this machine belongs to
-    // the Intel chip, which is why the row's clock was the 4070's but its bed
+    // the Intel chip, which is why the row's clock was the dGPU's but its bed
     // was not). If it is missed, the GPU power row has the room: "6.7 of 50 W ·
     // 46 °C", and SystemNow.gpuTempC is still sampled either way.
     //

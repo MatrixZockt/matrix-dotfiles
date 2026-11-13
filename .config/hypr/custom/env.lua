@@ -54,7 +54,7 @@ hl.config({
 -- BEFORE Hyprland is exec'd -- i.e. in the login environment
 -- (~/.config/environment.d/ or "systemctl --user import-environment"), not
 -- in this file. That needs a logout/login to take effect. Until then the
--- RTX 4070 sits in P8 drawing a few watts because the compositor holds an
+-- the discrete GPU sits in P8 drawing a few watts because the compositor holds an
 -- FD on it; the internal panel is already driven by the Intel iGPU, so this
 -- costs idle power, not correctness.
 

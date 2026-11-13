@@ -121,7 +121,7 @@ CPU_LAG_FLOOR=${CPU_LAG_FLOOR:-8}   # PSI cpu "some avg10" the throttle branch a
 # It was 1200 MHz, calibrated on the 20 W eco cap where the fastest core sat
 # at 727-900. Measured again the same evening at 98.1% busy on the balanced
 # cap: fastest core 1400 MHz, PSI 3.5% -- so BOTH lag signals read "fine" and
-# the rescue could not fire at any load. 1400 MHz on an i9-14900HX (base
+# the rescue could not fire at any load. 1400 MHz on an this CPU (base
 # 2200, turbo 5800) is the machine being held back, but it is not below a
 # number that was picked for a different cap.
 #

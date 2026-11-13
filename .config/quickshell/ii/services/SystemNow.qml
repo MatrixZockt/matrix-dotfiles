@@ -66,7 +66,7 @@ Singleton {
     // chosen because utilization is a "percent of TIME" measure that can sit at
     // 30% while the card does smoothly increasing work. That observation is
     // real, and it is also exactly why the gauge read ~8% on a laptop whose card
-    // was plainly busy: an idle 4070 draws ~4 W of its 55 W limit, so the bar
+    // was plainly busy: an idle dGPU draws ~4 W of its 55 W limit, so the bar
     // barely left the floor and the number disagreed with every other tool on
     // the machine that calls this quantity "GPU %". The complaint it produced
     // is the one this file's author would have made too: the GPU tile does not
@@ -83,7 +83,7 @@ Singleton {
     property real gpuClockPct: -1
     // ── The card that is actually DRAWING ────────────────────────────────
     //
-    // The number above is the 4070's. On this laptop the 4070 is not the
+    // The number above is the dGPU's. On this laptop the dGPU is not the
     // renderer: Hyprland draws on the Intel iGPU and the discrete card only
     // scans the panel out (card1-eDP-1 drives the panel, every client renders
     // on renderD128), so nvidia-smi's utilization.gpu sits at an honest 0%
@@ -202,7 +202,7 @@ Singleton {
     // What was right about the attempt is kept: every chip gets its OWN row in
     // the Resources view and the task manager, matched by PCI address
     // (`gpuOwnsLiveNumbers`), so the integrated GPU's clock and history are no
-    // longer printed under the 4070's name.
+    // longer printed under the dGPU's name.
     //
     // One policy in one place, because four surfaces draw it: the island's
     // tile and graphs, the bar pocket, the task manager card and the bar's
@@ -211,7 +211,7 @@ Singleton {
     readonly property var gpuMetricHistory: root.gpuHistory
     readonly property string gpuMetricName: root.gpuName
     // Which of the two chips the number above belongs to, so that a caption
-    // about the 4070's enforced watt cap is not printed underneath the iGPU's
+    // about the dGPU's enforced watt cap is not printed underneath the iGPU's
     // percentage -- the same class of mistake as the 0% was. Ties go to the
     // discrete card, which is the one the owner calls "my GPU".
     readonly property bool gpuMetricDiscrete: root.gpuClockPct >= root.intelGpuPct
@@ -277,7 +277,7 @@ for want in coretemp k10temp zenpower acpitz cpu_thermal.0 cpu_thermal; do
   done
 done
 # Graphics: nvidia-smi when there is one. This machine's real GPU is the NVIDIA
-# RTX 4070 Laptop, but the sysfs clock file this read unconditionally is an
+# the discrete GPU, but the sysfs clock file this read unconditionally is an
 # Intel interface -- on this box /sys/class/drm/card2/gt_cur_freq_mhz belongs
 # to the i915 iGPU. So the gauge reported the iGPU's clock ratio (700 of 1650
 # MHz) under a caption naming the NVIDIA card: the number and the name were two

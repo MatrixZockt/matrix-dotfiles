@@ -552,7 +552,7 @@ Singleton {
             const id = String(entry ?? "").split("\t")[0];
             if (id.length > 0) {
                 root.toastImageLabel = summary.length > 0 ? summary : Translation.tr("Image copied");
-                toastImageProc.dest = `${Directories.cliphistDecode}/toast-${id}.png`;
+                toastImageProc.dest = `${Directories.cliphistDecode}/toast-${id}-${root.copyToastSeq}.png`;
                 toastImageProc.entry = String(entry);
                 toastImageProc.running = true;
                 print(`[cliphist] copy toast: ${text} (seq ${root.copyToastSeq}, picture ${id})`);

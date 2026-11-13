@@ -2480,7 +2480,15 @@ property bool loadingFailFlash: false
         id: saveImageProcess
         property string source: ""
         property string target: ""
-        command: ["bash", "-c", 'mkdir -p "$1" && cp -f -- "$2" "$3"',
+        // The clipboard is the truth, not the decoded preview. The preview is a
+        // temp file that a later copy can replace, so `cp` from it could keep an
+        // image nobody was looking at; wl-paste asks for the picture that is
+        // actually copied right now and only falls back to the preview when the
+        // clipboard no longer holds an image (the card outlives a copy).
+        command: ["bash", "-c",
+            'mkdir -p "$1" || exit 1; '
+            + 'if wl-paste --type image/png > "$3" 2>/dev/null && [ -s "$3" ]; then exit 0; fi; '
+            + 'cp -f -- "$2" "$3"',
             "_", root.screenshotsDir, source, target]
         // Kept so a failure says WHY in the shell log instead of only telling the
         // user it did not work.
@@ -2492,10 +2500,13 @@ property bool loadingFailFlash: false
                 return;
             }
             root.showSignalToast(Translation.tr("Saved"), "download_done", 1500);
-            // Show it instead of announcing it: the file manager opens on the
-            // saved file, so it can be renamed, moved or checked right away
-            // rather than hunted down later.
-            Quickshell.execDetached(["hypr-explorer", saveImageProcess.target]);
+            // Show it instead of announcing it: the shell's own Files app opens
+            // on the saved file, revealed in its folder -- the same program
+            // SUPER + E opens. This used to start hypr-explorer, the GTK app the
+            // shell replaced, so a saved picture answered in a file manager that
+            // was not the one the desktop uses.
+            Quickshell.execDetached(["bash", "-c", 'exec "$1" "$2"', "_",
+                `${Directories.scriptPath}/launch/filemanager.sh`, saveImageProcess.target]);
         }
     }
 

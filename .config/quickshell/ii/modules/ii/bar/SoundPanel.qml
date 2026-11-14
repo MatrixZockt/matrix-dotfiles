@@ -5,6 +5,7 @@ import qs.modules.common.widgets
 import QtQuick
 import QtQuick.Layouts
 import Quickshell
+import Quickshell.Io
 import Quickshell.Services.Pipewire
 
 /**
@@ -61,6 +62,83 @@ BarAnchoredPanel {
 
     readonly property bool muted: root.sink?.audio?.muted ?? false
     readonly property bool micMuted: root.source?.audio?.muted ?? false
+
+    // ── The microphone's own answer ────────────────────────────────────────
+    // A device name says which mic was PICKED; it says nothing about whether
+    // that mic hears anything. The bar below the heading is that second
+    // question, answered while the user talks, and the small button beside it
+    // plays the mic back through the speakers so the answer can be heard too.
+    //
+    // Pipewire gives Quickshell no peak value, so the level comes from a
+    // helper that records the default source and prints its loudness 10x a
+    // second. `micPeak` is not the same thing: it is the recent loudest value,
+    // held briefly and then released, so a short word leaves a mark that the
+    // eye can still catch after the sound is gone.
+    property real micLevel: 0
+    property real micPeak: 0
+    property bool monitoring: false
+    readonly property string micLevelScript: Quickshell.shellPath("scripts/audio/mic-level.py")
+    readonly property string micMonitorScript: Quickshell.shellPath("scripts/audio/mic-monitor.sh")
+    property string micMonitorAction: "status"
+
+    Process {
+        id: micLevelProcess
+        // Only while the panel is on screen: recording the microphone for a
+        // panel nobody is looking at is a privacy problem, not a feature.
+        running: root.open && root.source !== null
+        command: root.source ? ["python3", root.micLevelScript, String(root.source.name ?? "")] : []
+        stdout: SplitParser {
+            onRead: line => {
+                const level = parseFloat(line);
+                if (!isFinite(level))
+                    return;
+                root.micLevel = Math.max(0, Math.min(1, level));
+                root.micPeak = Math.max(root.micPeak, root.micLevel);
+            }
+        }
+    }
+
+    Process {
+        id: micMonitorProcess
+        command: ["bash", root.micMonitorScript, root.micMonitorAction,
+            String(root.source?.name ?? ""), String(root.sink?.name ?? "")]
+        stdout: SplitParser {
+            onRead: line => root.monitoring = String(line).startsWith("on")
+        }
+    }
+
+    // Releasing the peak on a timer rather than on the next quiet sample:
+    // levels arrive ten times a second whether or not anything is speaking,
+    // and tying the fall to a sample would leave the mark stuck during silence.
+    Timer {
+        interval: 90
+        repeat: true
+        running: root.open
+        onTriggered: root.micPeak = Math.max(root.micLevel, root.micPeak - 0.035)
+    }
+
+    // The loopback is real system state, so it is read back when the panel
+    // opens rather than assumed to be off; and it is stopped when the panel
+    // closes, because a user who walked away from a mic-to-speakers loop has
+    // no visible control left to stop the feedback.
+    onOpenChanged: {
+        if (root.open) {
+            root.micMonitorAction = "status";
+            micMonitorProcess.running = true;
+            return;
+        }
+        root.micLevel = 0;
+        root.micPeak = 0;
+        if (root.monitoring) {
+            root.micMonitorAction = "off";
+            micMonitorProcess.running = true;
+        }
+    }
+
+    function toggleMonitoring() {
+        root.micMonitorAction = "toggle";
+        micMonitorProcess.running = true;
+    }
 
     // Tile grids are two wide. The height is stated rather than measured: a
     // Grid of cards has no implicit height of its own, and a ColumnLayout that
@@ -243,6 +321,78 @@ BarAnchoredPanel {
                     label: Translation.tr("Microphone")
                     showMute: root.source !== null
                     muted: root.micMuted
+                }
+
+                // Above the cards on purpose: the question is asked by
+                // talking, and the answer has to be where the eye already is.
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 6
+
+                    Item {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 12
+
+                        Rectangle {
+                            id: micMeterTrack
+                            anchors.fill: parent
+                            radius: height / 2
+                            color: Appearance.colors.colLayer1
+                        }
+
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            height: parent.height
+                            radius: height / 2
+                            width: micMeterTrack.width * root.micLevel
+                            color: Appearance.colors.colPrimary
+                            Behavior on width {
+                                NumberAnimation {
+                                    duration: 70
+                                    easing.type: Easing.OutQuad
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            // The held peak, drawn as a thin tick so it reads
+                            // as "this is how loud it got" beside the live fill.
+                            visible: root.micPeak > 0.02
+                            anchors.verticalCenter: parent.verticalCenter
+                            x: Math.min(micMeterTrack.width - width, micMeterTrack.width * root.micPeak)
+                            width: 2
+                            height: parent.height + 2
+                            radius: 1
+                            color: Appearance.colors.colPrimary
+                            opacity: 0.55
+                        }
+                    }
+
+                    RippleButton {
+                        Layout.preferredWidth: 30
+                        Layout.preferredHeight: 30
+                        buttonRadius: Appearance.rounding.small
+                        colBackground: root.monitoring
+                            ? Appearance.colors.colPrimaryContainer : "transparent"
+                        colBackgroundHover: root.monitoring
+                            ? Appearance.colors.colPrimaryContainer
+                            : Appearance.colors.colLayer1Hover
+                        onClicked: root.toggleMonitoring()
+                        contentItem: MaterialSymbol {
+                            anchors.centerIn: parent
+                            text: root.monitoring ? "hearing" : "hearing"
+                            iconSize: Appearance.font.pixelSize.normal
+                            color: root.monitoring
+                                ? Appearance.colors.colOnPrimaryContainer
+                                : Appearance.colors.colOnLayer0
+                        }
+                        StyledToolTip {
+                            text: root.monitoring
+                                ? Translation.tr("Stop hearing yourself")
+                                : Translation.tr("Hear yourself through the speakers")
+                        }
+                    }
                 }
 
                 Grid {

@@ -2200,12 +2200,6 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         compact: true
                         icon: modelData.icon
-                        // "GPU" when the discrete card is the one working, "iGPU" when
-                        // the Intel part is drawing the desktop: a number is only useful
-                        // with the chip it belongs to attached to it.
-                        label: key === "gpu"
-                            ? (SystemNow.gpuMetricDiscrete ? Translation.tr("GPU") : Translation.tr("iGPU"))
-                            : ""
                         value: root.perfValue(key)
                         load: root.perfLoad(key)
                         history: root.perfHistory(key)

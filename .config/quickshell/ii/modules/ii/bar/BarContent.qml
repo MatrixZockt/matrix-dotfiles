@@ -2083,12 +2083,6 @@ Item { // Bar content region
                             required property var modelData
                             readonly property string key: modelData.key
                             icon: modelData.icon
-                            // "GPU" when the discrete card is the one working, "iGPU" when
-                            // the Intel part is drawing the desktop: a number is only useful
-                            // with the chip it belongs to attached to it.
-                            label: key === "gpu"
-                                ? (SystemNow.gpuMetricDiscrete ? Translation.tr("GPU") : Translation.tr("iGPU"))
-                                : modelData.name
                             value: nowbarPocket.perfValue(key)
                             caption: {
                                 const l = nowbarPocket.perfLoad(key);

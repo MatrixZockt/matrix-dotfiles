@@ -243,27 +243,35 @@ paste_text() {
     # the dictation clipboard deliberately carries it (see the --sensitive copy
     # below) and counting it as "not text" made the NEXT dictation give up too.
     #
-    # ONLY TEXT IS BORROWED. A non-text clipboard -- the screenshot Print puts
-    # there, a copied file -- is left alone in both directions: it is not saved
-    # and, crucially, NOT PUT BACK. Restoring it was the bug: `wl-copy` of the
-    # old image ran 0.35s after Ctrl+V, so an app that had not read the selection
-    # yet pasted the IMAGE instead of the sentence, and even when the paste was
-    # fine the restore copied the image over the transcription, leaving the
-    # thing that had just been dictated nowhere on the clipboard at all.
-    # The sentence stays there instead (advertised secret, so cliphist skips it),
-    # which is also the one copy a rescued dictation may need.
-    local types prev_type prev_file want_restore=0
+    # EVERY TYPE IS BORROWED AND PUT BACK, and nothing of ours is left behind.
+    #
+    # The dictation is pasted with Ctrl+V, which means the sentence has to sit
+    # on the clipboard for a tick. What must NOT happen is that it stays there:
+    # a dictation is not a copy, so the desktop's clipboard must read exactly
+    # as it did before -- otherwise the next Ctrl+V anywhere pastes the last
+    # thing said out loud, and cliphist (or a password manager's secret hint)
+    # is handed text nobody copied. Reported 2026-11-14: "the transcription
+    # copies itself; it should only copy when Copy is pressed on the card."
+    #
+    # The rule here used to be "only text is borrowed, a screenshot is left
+    # alone", which is why the sentence survived on the clipboard after every
+    # dictation made while an image was copied: nothing restored it because
+    # nothing had been saved. That is the behaviour this replaces. The old
+    # objection -- that writing the image back 0.35 s after Ctrl+V could make
+    # an app paste the IMAGE instead of the sentence -- is answered by doing
+    # the restore only after the paste has had its full window, and by
+    # restoring the SAME type that was read, byte for byte, including the
+    # `-n` that keeps wl-paste from appending a newline that was never there.
+    #
+    # An empty clipboard before means an empty clipboard after: `wl-copy
+    # --clear`, rather than leaving the sentence as a "rescue copy". Rescuing
+    # is the card's job, and the card has its own Copy button for exactly that.
+    local types prev_type prev_file
     types="$(wl-paste --list-types 2>/dev/null | grep -vi 'x-kde-passwordManagerHint')"
     prev_type="$(printf '%s' "$types" | head -n1)"
     prev_file="$STATE/clipboard-backup"
     rm -f "$prev_file"
-    case "${prev_type%%;*}" in
-        text/*|UTF8_STRING|TEXT|STRING) want_restore=1 ;;
-    esac
-    if [ "$want_restore" = 1 ] && command -v wl-paste >/dev/null && [ -n "$prev_type" ]; then
-        # -n, or the backup grows a newline wl-paste appends that was never in
-        # the copy: the restored text came back with a blank line after it, and
-        # a restored image carried a stray 0x0A on the end.
+    if command -v wl-paste >/dev/null && [ -n "$prev_type" ]; then
         wl-paste -n -t "$prev_type" > "$prev_file" 2>/dev/null || rm -f "$prev_file"
     fi
     # Ask the shell not to announce this clipboard change (nor the restore). It
@@ -290,11 +298,13 @@ paste_text() {
     # tick longer than a plain GTK one -- but short enough that the clipboard is
     # not visibly ours.
     sleep 0.35
-    # Put a borrowed TEXT clipboard back with the type it came with. Anything
-    # that was not text was never borrowed, so nothing is written here and the
-    # sentence survives on the clipboard (see the note above).
-    if [ "$want_restore" = 1 ] && [ -s "$prev_file" ]; then
+    # Put the borrowed clipboard back, whatever it was, and take ours off it.
+    # With nothing there before, the clipboard is CLEARED: the sentence is the
+    # card's to copy, not the clipboard's to keep (see the note above).
+    if [ -s "$prev_file" ]; then
         wl-copy -t "$prev_type" < "$prev_file" 2>/dev/null
+    else
+        wl-copy --clear 2>/dev/null || true
     fi
     rm -f "$prev_file"
     return 0

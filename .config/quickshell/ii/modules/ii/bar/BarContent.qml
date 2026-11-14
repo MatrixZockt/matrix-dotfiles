@@ -2083,6 +2083,7 @@ Item { // Bar content region
                             required property var modelData
                             readonly property string key: modelData.key
                             icon: modelData.icon
+                            label: modelData.name
                             value: nowbarPocket.perfValue(key)
                             caption: {
                                 const l = nowbarPocket.perfLoad(key);

@@ -498,6 +498,31 @@ Singleton {
 	// app name -> when it was first heard in the current stretch of sound.
 	property var streamFirstHeard: ({})
 
+	// ── A BROWSER CHIME IS NOT A BROWSER PLAYING ──────────────────────────
+	//
+	// The duration gate below is enough for a toast chime from most apps, but a
+	// Chromium-based browser keeps its audio stream open after the sound stops:
+	// the chime is over, the stream is still uncorked, and the app looks like it
+	// has been heard for as long as the stream lives. Measured cause of "the bar
+	// jumps to the browser when a notification arrives and stays there": a web
+	// push notification's sound is played by the BROWSER PROCESS, not by a tab,
+	// so nothing is playing and nothing is audible, yet a stream named after the
+	// browser exists.
+	//
+	// Browsers always publish MPRIS while they are really playing (that bus is
+	// what the play/pause buttons already follow), so for a browser stream the
+	// answer "is this an output?" is the player's PlaybackStatus -- plus the
+	// audible-tab probe, in case a page is sounding with no player behind it.
+	// Only browsers get this test: games, Discord, mpv and the rest publish no
+	// player, and are still judged by the duration gate alone.
+	function isBrowserChimeOnly(name) {
+		if (!/brave|chromium|chrome/i.test(String(name ?? ""))) return false
+		const player = root.playerForStreamApp(name)
+		if (player?.isPlaying === true) return false
+		if (root.browserTabPlaying) return false
+		return true
+	}
+
 	function noteHeardApps() {
 		const now = Date.now()
 		const first = {}
@@ -507,6 +532,7 @@ Singleton {
 			// The shell's own notification sounds are a beep, not an output:
 			// letting one take the bar would flash the island on every toast.
 			if (name === "" || name === Audio.systemSoundAppName) continue
+			if (root.isBrowserChimeOnly(name)) continue
 			if (first[name] === undefined)
 				first[name] = root.streamFirstHeard?.[name] ?? now
 			if (now - first[name] < root.minAudibleMs) continue

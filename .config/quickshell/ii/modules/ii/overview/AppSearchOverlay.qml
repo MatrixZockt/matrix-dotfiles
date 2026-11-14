@@ -73,6 +73,29 @@ Scope {
     // rather than leaving one surface still animating at full length.
     property real fade: 0
 
+    // ── Typing feedback ───────────────────────────────────────────────────
+    //
+    // One number that decays to zero is the whole "the menu heard that key"
+    // language: the card's hairline and the field's border brighten, and the
+    // result rows lift a few pixels, all driven by this value -- a keystroke
+    // costs two property writes per frame instead of one animation per element.
+    //
+    // Set to 1 on EVERY query change, falling to 0 over 260 ms (shortened by
+    // motionScale on the performance profile, like the rest of the shell). At 0
+    // both borders are exactly their idle colours, so a menu nobody has typed in
+    // looks identical to one that was never typed in.
+    property real typingGlow: 0
+
+    NumberAnimation {
+        id: typingGlowAnim
+        target: root
+        property: "typingGlow"
+        from: 1
+        to: 0
+        duration: Math.round(260 * (Appearance.animation.motionScale || 1))
+        easing.type: Easing.OutCubic
+    }
+
     // Whether the card has been shown at least once this session. Read by the
     // window's `visible` below, and the reason the second and every later SUPER
     // tap is instant while the first one is not: see the note there. Not
@@ -260,7 +283,11 @@ Scope {
     }
 
     readonly property bool typing: query.trim().length > 0
-    onQueryChanged: root.selectedIndex = 0
+    onQueryChanged: {
+        root.selectedIndex = 0
+        root.typingGlow = 1
+        typingGlowAnim.restart()
+    }
 
     // ── Open -> focus timing (diagnostic) ───────────────────────────────
     // Keystrokes typed between these two instants are the ones that go
@@ -914,11 +941,24 @@ Scope {
             // menu's opacity and there is nothing else to keep in step.
             opacity: root.fade
             radius: Appearance.rounding.large
+            // The rounded hairline, back by request (2026-11-14): one pixel, in
+            // the line colour, following the card's own radius -- the #3A3A3A line
+            // the Super-menu preview drew. `typingGlow` mixes it toward the
+            // on-surface tone while the user types, which is the pulse that says a
+            // key landed; idle it is exactly the line colour, so the menu is not
+            // permanently outlined in something brighter than the preview.
+            border.width: 1
+            border.color: ColorUtils.mix(
+                Appearance.colors.colOutlineVariant,
+                Appearance.colors.colOnSurface,
+                0.55 * root.typingGlow)
             // Frosted glass: translucent, so the compositor blur shows the
             // windows behind the card (xray off = never the wallpaper).
             color: ColorUtils.transparentize(Appearance.colors.colLayer0, 0.3)
 
-            // NO border and NO drop shadow -- both removed 2026-09-30.
+            // NO drop shadow -- removed 2026-09-30 and still gone (it read as a
+            // halo under the compositor blur). The BORDER is back above, by
+            // request, drawn on the card's own radius.
             //
             // The border read as a "weird blurred border" because it was
             // being drawn INSIDE the compositor's blur region: the card is a
@@ -964,7 +1004,12 @@ Scope {
                         radius: Appearance.rounding.normal
                         color: Appearance.colors.colSurfaceContainerLow
                         border.width: 1
-                        border.color: Appearance.colors.colOutlineVariant
+                        // Same pulse as the card, a step stronger: the field is where the
+                        // key actually arrived, so it is the part that answers visibly.
+                        border.color: ColorUtils.mix(
+                            Appearance.colors.colOutlineVariant,
+                            Appearance.colors.colPrimary,
+                            0.75 * root.typingGlow)
                     }
 
                     RowLayout {
@@ -1114,6 +1159,9 @@ Scope {
                     // the emoji list below instead of app matches.
                     ColumnLayout {
                         visible: root.typing && !root.emojiMode
+                        // The rows settle upward as the pulse fades: three pixels reads as
+                        // "these are the new matches" without the list looking like it moved.
+                        transform: Translate { y: -3 * root.typingGlow }
                         Layout.fillWidth: true
                         Layout.leftMargin: root.pad
                         Layout.rightMargin: root.pad

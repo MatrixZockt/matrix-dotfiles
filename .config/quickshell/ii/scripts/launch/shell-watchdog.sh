@@ -197,6 +197,63 @@ sweepStrayUdevMonitors() {
     done
 ) &
 
+# ── Guard 0b: a shell that is ALIVE but not ANSWERING ──────────────────────
+#
+# WHY THIS EXISTS. On 2026-11-14 a dictation stalled and the shell it was talking
+# to stopped answering IPC entirely: `qs -c ii ipc call` simply never returned.
+# Every SUPER action on this desktop is an IPC call into the shell, so from the
+# user's side the Super key was dead, the dictation pill sat on "transcribing",
+# and nothing ever recovered -- the shell process was still ALIVE, so guard 1
+# below (whose only test is `shell_up`) saw a healthy desktop and did nothing.
+#
+# WHAT IT LOOKED LIKE while it happened: the shell at ~20 % CPU, `timeout 6 qs -c
+# ii ipc call theme mode` timing out, two `qs ipc call cliphistService quietFor`
+# clients hung for minutes, and `qs kill` hanging too, so a hand-run reload left
+# the old shell running and the new one unable to claim its surfaces.
+#
+# THE TEST asks the cheapest real IPC function and requires an ANSWER, not just
+# an exit status: `qs ipc call` against a wedged shell still exits 0, and with a
+# wrong function name it prints "Function not found." and exits 0 as well, so
+# status alone is not evidence of life. Two misses 15 s apart mean wedged rather
+# than busy, and a shell that started less than 20 s ago is skipped so login is
+# never mistaken for a hang. Recovery is the ordinary reload script, which now
+# force-kills anything `qs kill` cannot reach.
+#
+# Its own loop, like the sweeps: the main loop below is blocked inside the shell's
+# lifetime and cannot look at a shell that has not exited.
+(
+    misses=0
+    last_restart=0
+    while true; do
+        sleep 15
+        if ! shell_up; then
+            misses=0
+            continue
+        fi
+        first_pid="$(shell_pids "$qsConfig" | head -1)"
+        up=$(ps -o etimes= -p "${first_pid:-0}" 2>/dev/null | tr -d ' ')
+        if [ -z "$up" ] || [ "$up" -lt 20 ]; then
+            misses=0
+            continue
+        fi
+        answer=$(timeout 6 qs -c "$qsConfig" ipc call theme state 2>/dev/null)
+        case "$answer" in
+            mode=*) misses=0; continue ;;
+        esac
+        misses=$(( misses + 1 ))
+        log "shell did not answer IPC (${misses}/2; got '${answer:-nothing}')"
+        if [ "$misses" -ge 2 ]; then
+            misses=0
+            if [ $(( $(date +%s) - last_restart )) -lt 60 ]; then
+                continue
+            fi
+            last_restart=$(date +%s)
+            log "shell is WEDGED -- every SUPER action is dead while it answers nothing; restarting it"
+            bash "$HOME/.config/hypr/custom/scripts/reload-shell.sh" >>/tmp/shell-watchdog.log 2>&1 || true
+        fi
+    done
+) &
+
 while true; do
     # Reset to the ordinary cadence each pass; the relaunch branch below
     # lengthens it only when the shell is failing to come up.

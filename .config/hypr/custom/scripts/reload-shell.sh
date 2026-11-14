@@ -152,7 +152,10 @@ else
     log "WARNING: $tree_helper not readable -- helpers will be left to the watchdog sweep"
 fi
 
-qs -c "$qs_config" kill >>"$log_file" 2>&1 || true
+# Bounded: against a wedged shell this call waits for a socket that never
+# answers (measured at 36 s on 2026-11-14), and the escalation below is what
+# actually ends it.
+timeout 5 qs -c "$qs_config" kill >>"$log_file" 2>&1 || true
 
 # ── 4. Start it again, immediately ───────────────────────────────────────────
 #
@@ -190,6 +193,39 @@ fi
 # shell.sh declines to launch if a start-stamp from the last 10 s exists. After
 # we have just killed the shell that stamp is stale by definition, and leaving
 # it would make shell.sh report "already running" while the desktop sat bare.
+# ── 3c. A shell that answers nothing must still die ──────────────────────────
+#
+# WHY THIS EXISTS. `qs kill` is itself an IPC call. Against a shell whose main
+# thread is wedged it waits for a socket that never answers, kills nothing, and
+# this script then reports a launch that cannot take: the old shell keeps the
+# layer surfaces and the global shortcuts, the new one cannot paint, and the
+# desktop stays exactly as frozen as before the reload. Measured 2026-11-14: a
+# wedged shell survived a full reload and had to be killed by hand.
+#
+# So the pids come from the process table rather than from IPC, and the
+# escalation is TERM first (a shell that is merely busy gets to close its
+# sockets), KILL after four seconds, then a moment for the kernel to release the
+# surfaces before the launch below claims them.
+. "$HOME/.config/quickshell/ii/scripts/launch/shell-pids.sh"
+leftover="$(shell_pids "$qs_config")"
+if [ -n "${leftover// /}" ]; then
+    log "shell did not exit on its own (pids: $(echo $leftover)) -- escalating"
+    kill -TERM $leftover 2>/dev/null || true
+    for _ in $(seq 1 40); do
+        still=0
+        for p in $leftover; do kill -0 "$p" 2>/dev/null && still=1; done
+        [ "$still" -eq 0 ] && break
+        sleep 0.1
+    done
+    for p in $leftover; do
+        if kill -0 "$p" 2>/dev/null; then
+            log "pid $p ignored TERM -- sending KILL"
+            kill -KILL "$p" 2>/dev/null || true
+        fi
+    done
+    sleep 0.3
+fi
+
 rm -f "$runtime/ii-shell.started" 2>/dev/null || true
 
 if [ -n "$PROBED" ]; then

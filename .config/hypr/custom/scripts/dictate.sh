@@ -269,7 +269,12 @@ paste_text() {
     # Ask the shell not to announce this clipboard change (nor the restore). It
     # watches the selection to show its little "Copied" card, and two of those
     # for a sentence nobody copied is noise. Best effort: no shell, no matter.
-    qs -c ii ipc call cliphistService quietFor 2500 >/dev/null 2>&1 || true
+    # Bounded on purpose. `qs ipc call` waits for a socket that a wedged
+    # shell never answers; unbounded, this one call held the whole finish
+    # (and the pill) open for 120 s until the daemon killed it, on
+    # 2026-11-14. Three seconds is the same order as the call's own work,
+    # and losing the quiet window only costs a "Copied" card.
+    timeout 3 qs -c ii ipc call cliphistService quietFor 2500 >/dev/null 2>&1 || true
     # --sensitive makes the copy advertise x-kde-passwordManagerHint=secret, which
     # cliphist honours by NOT storing it. Without this a dictation is typed into
     # the cursor and then quietly kept forever in the clipboard history database.

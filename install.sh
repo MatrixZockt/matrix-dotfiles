@@ -153,6 +153,30 @@ if [[ $RECOVER_SYSTEM -eq 1 ]]; then
     echo "          generate a code from Settings > Account, or: sudo ii-recover --setup"
 fi
 
+# Speaker amplifier at resume: the ALC298's speaker amp is powered only by
+# vendor/coefficient registers written as root, and a suspend resets them. The
+# registers are runtime state, so they have to be re-applied on every wake; with
+# nothing doing it, sound works after a boot and is gone after the first sleep,
+# while every mixer still reads "unmuted at 100%". This laptop's helper and its
+# oneshot unit are installed outside this repo (it is machine-specific), so the
+# hook proves the helper is there before installing itself.
+if [[ -x /usr/local/sbin/razer-blade-speakers && $DRY_RUN -eq 0 ]]; then
+    if [ "$(id -u)" -eq 0 ]; then
+        SPEAKER_HOOK=1
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        SPEAKER_HOOK=1
+    else
+        echo "  (skipped: run install.sh as root, or copy extras/lib/systemd/system-sleep/50-razer-speakers to /usr/lib/systemd/system-sleep/)"
+    fi
+    if [[ "${SPEAKER_HOOK:-0}" -eq 1 ]]; then
+        sudo_or=""
+        [ "$(id -u)" -ne 0 ] && sudo_or="sudo"
+        $sudo_or install -Dm 0755 "$REPO/extras/lib/systemd/system-sleep/50-razer-speakers" \
+            /usr/lib/systemd/system-sleep/50-razer-speakers
+        echo "  speaker amp resume hook installed"
+    fi
+fi
+
 # Lid state at resume: this laptop's firmware never reports the lid as open
 # after a resume and _LID keeps answering "closed", so the driver, the input
 # switch, the proc file and logind all agree on a wrong value -- and on

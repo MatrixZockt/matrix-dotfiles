@@ -346,6 +346,28 @@ if [ -n "$sink" ]; then
 fi
 
 
+# 2b. RE-PROGRAM THE AMPLIFIER. This is the step the comments at the top of
+# this file have described since the day it was written, and the one that was
+# missing from the code: without it the registers stayed lost after every wake.
+#
+# ON 2026-11-13 this is what the report "my PC speakers are broken" turned out
+# to be. The machine booted on 2026-11-09 and the amplifier unit ran then; the
+# first sleep after that reset the codec, and nothing ever wrote the vendor
+# registers again. Every reading a person can check said the speakers were
+# fine -- sink unmuted at the right volume, route `[Out] Speaker`, EAPD on,
+# the DMA pointer advancing at exactly 48 kHz -- and the speakers were silent.
+# Restarting the unit brought the sound straight back.
+#
+# It is a restart rather than a direct call because /dev/snd/hwC1D0 is not
+# reachable from the session; the unit's own ExecStart runs the helper as root
+# and waits for the node. Bound to keep a wake from waiting forever: a missing
+# codec or a refused restart must not stop the steps below.
+if ! timeout 40 systemctl restart razer-speakers.service >/dev/null 2>&1; then
+    record "       speaker amp: restart FAILED -- speakers may be silent"
+else
+    record "       speaker amp: registers re-applied"
+fi
+
 # 3. Put the volume/mute back now that the codec is fully programmed.
 if [ -n "${sink:-}" ] && [ -n "${vol:-}" ]; then
     pactl set-sink-volume "$sink" "$vol" >/dev/null 2>&1 || true

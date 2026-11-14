@@ -1,0 +1,37 @@
+#!/bin/sh
+# Re-program the Razer Blade's ALC298 vendor registers on every resume.
+#
+# WHY THIS EXISTS. This laptop's internal speakers are not wired to any mixer
+# control: their amplifier is powered only by a long list of codec vendor and
+# coefficient registers, written by /usr/local/sbin/razer-blade-speakers as root.
+# Those writes are RUNTIME state. A suspend/resume resets the codec, so the
+# amplifier comes back OFF while every mixer, sink, route and jack still reads
+# perfectly healthy -- the failure is inaudible-but-total silence, and it looks
+# like a hardware fault. It happened on 2026-11-13: sound after boot, gone after
+# the first sleep, `Speaker` at 100 % [on], EAPD on, DMA running at 48 kHz, and
+# no sound.
+#
+# WHY A SLEEP HOOK rather than the session's after-resume script. /dev/snd/hwC1D0
+# cannot be opened by the logged-in user, so the registers can only be written as
+# root; and a sleep hook runs as root on every resume whether or not a graphical
+# session is up, needs no polkit rule and asks for no password in the middle of a
+# wake. systemd passes "pre" before sleeping and "post" after waking.
+#
+# The codec is re-probed asynchronously after resume, so the post phase waits for
+# the hwdep node -- the same wait the boot-time unit does -- and only then writes.
+case "$1" in
+    post)
+        i=0
+        while [ "$i" -lt 30 ]; do
+            [ -e /dev/snd/hwC1D0 ] && break
+            i=$((i + 1))
+            sleep 1
+        done
+        # Two passes: the first lands while PipeWire is still restoring the
+        # device, the second after it, which is what the boot unit also does.
+        /usr/local/sbin/razer-blade-speakers >/dev/null 2>&1 || true
+        sleep 3
+        /usr/local/sbin/razer-blade-speakers >/dev/null 2>&1 || true
+        ;;
+esac
+exit 0

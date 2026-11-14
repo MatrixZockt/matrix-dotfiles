@@ -362,10 +362,15 @@ fi
 # reachable from the session; the unit's own ExecStart runs the helper as root
 # and waits for the node. Bound to keep a wake from waiting forever: a missing
 # codec or a refused restart must not stop the steps below.
-if ! timeout 40 systemctl restart razer-speakers.service >/dev/null 2>&1; then
-    record "       speaker amp: restart FAILED -- speakers may be silent"
-else
-    record "       speaker amp: registers re-applied"
+# The unit and its helper are installed outside this repo and exist only on the
+# machine that needs them, so the step is skipped where the unit is absent: a
+# repo shared with other machines must not turn a normal wake into a failure.
+if systemctl cat razer-speakers.service >/dev/null 2>&1; then
+    if ! timeout 40 systemctl restart razer-speakers.service >/dev/null 2>&1; then
+        record "       speaker amp: restart FAILED -- speakers may be silent"
+    else
+        record "       speaker amp: registers re-applied"
+    fi
 fi
 
 # 3. Put the volume/mute back now that the codec is fully programmed.

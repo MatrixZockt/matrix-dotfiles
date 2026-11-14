@@ -52,6 +52,20 @@
 -- than a late correction, which is the whole point.
 hl.exec_cmd("$HOME/.config/quickshell/ii/scripts/colors/sync-desktop-theme.sh")
 
+-- Make sure "animations are on" reaches every toolkit, before any app starts.
+--
+-- Electron apps do not have a motion setting of their own: Chromium derives
+-- `prefers-reduced-motion` from GTK's `gtk-enable-animations`, which follows
+-- `org.gnome.desktop.interface enable-animations`. An animated theme backdrop
+-- told "reduce motion" renders one composed still frame -- which reads as "my
+-- theme is not animated" (2026-11-14). Nothing here turns motion off on
+-- purpose, so the script pins both switches on and writes only when one is
+-- wrong: idempotent, and safe on every config load.
+--
+-- It must stay above shell.sh and above anything that launches an app, for the
+-- same reason the theme sync above does: a toolkit decides once, at startup.
+hl.exec_cmd("$HOME/.config/hypr/custom/scripts/desktop-motion.sh")
+
 hl.exec_cmd("$HOME/.config/quickshell/ii/scripts/launch/shell.sh")
 
 -- Keep the keyboard layout file in sync with what the settings app stores.

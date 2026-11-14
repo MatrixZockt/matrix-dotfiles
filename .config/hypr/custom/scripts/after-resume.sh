@@ -28,7 +28,9 @@
 # mixer setting: the codec's autoconfig reports `speaker_outs=0`, so the generic
 # driver never powers the speaker amplifier, and the only thing that turns it on
 # is programming a long list of vendor/coefficient registers directly --
-# /usr/local/sbin/speaker-amp helper, run as root by speaker amp unit.
+# /usr/local/sbin/razer-blade-speakers, run as root by razer-speakers.service
+# (and again on every resume by /usr/lib/systemd/system-sleep/50-razer-speakers,
+# which this repo ships in extras/lib/systemd/system-sleep/).
 #
 # Those register writes are RUNTIME ONLY. A suspend/resume resets the codec, so
 # after every wake the amp is off again -- and because the service only ran at

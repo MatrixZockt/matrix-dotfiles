@@ -18,10 +18,8 @@ import qs.services
  *
  * The same instrument has two sizes, and they are the same numbers:
  *   * `compact` -- the island in the bar: icon and value on one line, the
- *     sparkline under it. No label by default (there is no room, and the icon
- *     is the label); a caller that passes `label` gets it as a small tag
- *     between the icon and the value, which the GPU instrument uses to name the
- *     chip.
+ *     sparkline under it. No label: there is no room for one, and the icon is
+ *     the label.
  *   * the full tile -- the popped-out card: a soft icon square, the label
  *     spelled out, the value large, a caption saying what the number is a
  *     fraction *of*, a level bar, and a chart with room to read.
@@ -73,7 +71,7 @@ Item {
     // four of them sit in a row in the island, and a row that re-measures every
     // time a digit changes would shuffle the whole cluster sideways. 4 × 74 plus
     // the gaps fills the island's stage almost exactly.
-    implicitWidth: root.compact ? Math.max(74, compactRow.implicitWidth) : 168
+    implicitWidth: root.compact ? 74 : 168
     implicitHeight: root.compact ? 22 : (root.dense ? 84 : 132)
 
     // ── Compact: the island's instrument ─────────────────────────────────
@@ -94,19 +92,6 @@ Item {
             text: root.icon
             iconSize: Appearance.font.pixelSize.smallie
             color: root.known ? root.accent : Appearance.colors.colOnLayer1Inactive
-        }
-        // A short tag, only when the caller sets one: the GPU instrument uses
-        // it to say WHICH chip its percentage belongs to ("iGPU" while the
-        // Intel part draws the desktop, "GPU" when the discrete card is the
-        // busy one). Everyone else passes no label and gets the bare icon and
-        // number this widget has always drawn.
-        StyledText {
-            Layout.alignment: Qt.AlignVCenter
-            visible: root.compact && root.label.length > 0
-            text: root.label
-            color: Appearance.colors.colOnLayer1Inactive
-            font.pixelSize: Appearance.font.pixelSize.smallest
-            font.weight: Font.Medium
         }
         StyledText {
             Layout.alignment: Qt.AlignVCenter

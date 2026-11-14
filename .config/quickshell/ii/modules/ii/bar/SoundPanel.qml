@@ -114,7 +114,7 @@ BarAnchoredPanel {
         interval: 90
         repeat: true
         running: root.open
-        onTriggered: root.micPeak = Math.max(root.micLevel, root.micPeak - 0.035)
+        onTriggered: root.micPeak = Math.max(root.micLevel, root.micPeak - 0.018)
     }
 
     // The loopback is real system state, so it is read back when the panel
@@ -348,9 +348,12 @@ BarAnchoredPanel {
                             width: micMeterTrack.width * root.micLevel
                             color: Appearance.colors.colPrimary
                             Behavior on width {
+                                // Slightly slower than the 100ms sample rate:
+                                // adjacent samples then blend into one motion
+                                // instead of the bar snapping 10 times a second.
                                 NumberAnimation {
-                                    duration: 70
-                                    easing.type: Easing.OutQuad
+                                    duration: 150
+                                    easing.type: Easing.OutCubic
                                 }
                             }
                         }

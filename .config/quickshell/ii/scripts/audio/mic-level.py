@@ -20,6 +20,23 @@ import sys
 RATE = 16000
 CHUNK_SAMPLES = RATE // 10  # 100ms
 
+# What "loud" means for the bar. Speech RMS sits around 0.02-0.08; room noise
+# (a fan, a laptop mic's self-noise) around 0.002-0.01. The floor drops that
+# noise to nothing instead of letting it paint a permanent bar, and the span is
+# wide enough that normal talking lands mid-bar rather than slamming into the
+# end -- the previous 0.12 span made every syllable hit 100%, which read as
+# glitching rather than as loudness.
+NOISE_FLOOR = 0.022
+LOUD_RMS = 0.30
+CURVE = 0.85
+
+# One value per 100ms still jumps: a chunk that ends mid-syllable reads far
+# louder than the one before it. The displayed value follows the loudness with
+# a fast attack and a slow release, which is how a physical meter behaves --
+# it catches the start of a word and then eases down instead of flickering.
+ATTACK = 0.55
+RELEASE = 0.18
+
 def main() -> int:
     # --latency-msec is not optional here. Without it parec's own default
     # buffering swallowed the first seconds, so the bar stayed dead while the
@@ -29,18 +46,26 @@ def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1]:
         command.append(f"--device={sys.argv[1]}")
     record = subprocess.Popen(command, stdout=subprocess.PIPE, bufsize=0)
+    smoothed = 0.0
     try:
         while True:
-            data = record.stdout.read(CHUNK_SAMPLES * 2)
-            if not data:
-                return 0
-            if len(data) % 2:
-                data = data[:-1]
-            samples = struct.unpack(f"<{len(data) // 2}h", data)
-            if not samples:
-                continue
-            rms = (sum(sample * sample for sample in samples) / len(samples)) ** 0.5 / 32768.0
-            level = min(1.0, (rms / 0.12) ** 0.6)
+            # Read a WHOLE chunk before measuring. A pipe read can return half a
+            # chunk, and computing the level from those few milliseconds made it
+            # jump around for reasons that had nothing to do with the voice --
+            # that was the glitch.
+            buffer = b""
+            while len(buffer) < CHUNK_SAMPLES * 2:
+                piece = record.stdout.read(CHUNK_SAMPLES * 2 - len(buffer))
+                if not piece:
+                    return 0
+                buffer += piece
+            samples = struct.unpack(f"<{CHUNK_SAMPLES}h", buffer)
+            rms = (sum(sample * sample for sample in samples) / CHUNK_SAMPLES) ** 0.5 / 32768.0
+            loudness = max(0.0, rms - NOISE_FLOOR) / LOUD_RMS
+            target = min(1.0, loudness ** CURVE)
+            factor = ATTACK if target > smoothed else RELEASE
+            smoothed += (target - smoothed) * factor
+            level = smoothed
             try:
                 sys.stdout.write(f"{level:.3f}\n")
                 sys.stdout.flush()

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # after-resume.sh -- what runs on every wake (hypridle after_sleep_cmd).
 #
-# Four jobs, in this order.
+# Five jobs, in this order.
 #
 #  0. BLOCK SLEEP -- and the lid -- for a grace period. Comes FIRST because it
 #     is the whole point of the ordering: everything else here can take up to a
@@ -21,8 +21,10 @@
 #
 #  2. Re-apply the ALC298 internal-speaker registers.
 #
-#  3. Re-apply the keyboard lighting. The firmware forgets the per-key matrix
-#     over suspend -- the last step at the end of this file is why.
+#  4. Re-apply the keyboard lighting. The firmware forgets the per-key matrix
+#     over suspend, so the keys come back in the firmware's own static green
+#     until something pushes the painted profile at it again -- the last step
+#     at the end of this file is why.
 #
 # WHY THIS EXISTS. The internal speakers on this laptop are not enabled by any
 # mixer setting: the codec's autoconfig reports `speaker_outs=0`, so the generic
@@ -384,3 +386,42 @@ if [ -n "${sink:-}" ] && [ -n "${vol:-}" ]; then
     esac
 fi
 
+# 4. RE-APPLY THE KEYBOARD LIGHTING.
+#
+# WHY THIS EXISTS. The per-key matrix lives in the keyboard controller's RAM,
+# not in flash: a suspend/resume (and a full power-off) hands the keys back in
+# the firmware's own default -- one static green for the whole board -- no
+# matter what was painted before. Everything above brings back sound and the
+# panel; without this the board stayed green for the rest of the session, while
+# `lighting.json` still held the profile and the control centre still believed
+# it had applied it. Reported on 2026-11-14 as "every key is static green, my
+# configuration was not applied", with the profile intact on disk.
+#
+# The push itself is the control centre's own `--apply-lighting`: the same code
+# path the login restore uses, which writes the frame over the openrazer DBus
+# interface and then switches the device to its custom effect. It is retried
+# because the daemon is a separate user service and a resume resets the device
+# underneath it; a first attempt against a daemon still re-enumerating the
+# board fails silently.
+#
+# Guarded on the binary being installed, like the speaker step: this repo is
+# shared, and a machine without the Razer app must not turn a wake into a
+# failure. Bounded so a wedged daemon cannot hold the wake open.
+kbd_app="$(command -v razer-command-center 2>/dev/null || true)"
+[ -n "$kbd_app" ] || [ -x "$HOME/.local/bin/razer-command-center" ] \
+    && [ -z "$kbd_app" ] && kbd_app="$HOME/.local/bin/razer-command-center"
+if [ -n "${kbd_app:-}" ] && [ -x "$kbd_app" ]; then
+    kbd_ok=0
+    for _attempt in 1 2 3; do
+        if timeout 20 "$kbd_app" --apply-lighting >/dev/null 2>&1; then
+            kbd_ok=1
+            break
+        fi
+        sleep 2
+    done
+    if [ "$kbd_ok" -eq 1 ]; then
+        record "       keyboard: per-key profile re-applied"
+    else
+        record "       keyboard: profile NOT applied -- keys may be static green"
+    fi
+fi

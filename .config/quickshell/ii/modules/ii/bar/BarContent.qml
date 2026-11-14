@@ -1685,14 +1685,14 @@ Item { // Bar content region
             function perfValue(key) {
                 if (key === "cpu") return SystemNow.pct(SystemNow.cpuPct);
                 if (key === "ram") return SystemNow.pct(SystemNow.ramPct);
-                if (key === "gpu") return SystemNow.pct(SystemNow.gpuClockPct);
+                if (key === "gpu") return SystemNow.pct(SystemNow.gpuMetricPct);
                 if (key === "temp") return SystemNow.tempText(SystemNow.tempC);
                 return "--";
             }
             function perfLoad(key) {
                 if (key === "cpu") return SystemNow.cpuPct;
                 if (key === "ram") return SystemNow.ramPct;
-                if (key === "gpu") return SystemNow.gpuClockPct;
+                if (key === "gpu") return SystemNow.gpuMetricPct;
                 if (key === "temp") return SystemNow.tempLoad(SystemNow.tempC);
                 return -1;
             }
@@ -2083,7 +2083,12 @@ Item { // Bar content region
                             required property var modelData
                             readonly property string key: modelData.key
                             icon: modelData.icon
-                            label: modelData.name
+                            // "GPU" when the discrete card is the one working, "iGPU" when
+                            // the Intel part is drawing the desktop: a number is only useful
+                            // with the chip it belongs to attached to it.
+                            label: key === "gpu"
+                                ? (SystemNow.gpuMetricDiscrete ? Translation.tr("GPU") : Translation.tr("iGPU"))
+                                : modelData.name
                             value: nowbarPocket.perfValue(key)
                             caption: {
                                 const l = nowbarPocket.perfLoad(key);

@@ -187,40 +187,59 @@ Singleton {
 
     // ── What the generic "GPU" number means ────────────────────────────────
     //
-    // The DISCRETE card's utilization -- and ONLY it. The tile answers "what is
-    // my graphics card doing", which is the question every other tool on the
-    // machine (nvidia-smi, a task manager, Task Manager on Windows) answers
-    // with the discrete part's utilization.gpu.
+    // WHICH CHIP "GPU" MEANS: the busiest of the two, and the surface says
+    // which one that is.
     //
-    // THIS WAS `max(discrete, integrated)` FOR A WHILE, and that is the number
-    // the owner reported on 2026-11-14 as "80% constant in the top, but the
-    // task manager says 0% and it does not feel like 80%". Measured before
-    // changing it, from `systemNow values`: gpu=74% gpuDiscrete=0%
-    // gpuIntegrated=74%, with nvidia-smi agreeing on 0% and the iGPU number
-    // confirmed by hand from DRM fdinfo (Hyprland alone ~70% of the render
-    // engine). So the reading was not wrong -- the CHOICE was. On this laptop
-    // the Intel iGPU composites the 120 Hz desktop and is therefore busy every
-    // frame the panel is lit, whether or not anything the owner started is
-    // running. A max() over the two chips turns that permanent compositor cost
-    // into a permanent "my GPU is at 80%", which reads as a stuck gauge and
-    // hides the dGPU's real work underneath it.
+    // This laptop has two graphics chips and they do different jobs: the Intel
+    // iGPU renders the desktop (every Wayland client draws on renderD128) and
+    // the RTX 4070 is off until something asks for it -- games, an encoder, a
+    // CUDA job. A single percentage is only honest if it names the chip it came
+    // from, because the two answers mean completely different things:
     //
-    // The iGPU still has a home, and it keeps it: its own row in the Resources
-    // view and the task manager, matched by PCI address
-    // (`gpuOwnsLiveNumbers`), plus `intelGpuPct` here for anything that wants
-    // to draw it. What it no longer does is answer the word "GPU" on the bar.
+    //   iGPU 74%  -> the compositor is drawing; nothing the owner started is
+    //                necessarily running. It is NEVER near 0 while the panel is
+    //                lit at 120 Hz, and that is normal, not a stuck gauge.
+    //   GPU  12%  -> the discrete card is doing work right now.
+    //
+    // The history here is worth keeping, because both halves of it are real.
+    // It first read the DISCRETE card only, and the owner reported the truth
+    // ("GPU shows 0% while the graphics card is working", 2026-11-07). It then
+    // read the busiest chip with no label, and the owner reported that too
+    // ("80% constant, but the task manager says 0% and it does not feel like
+    // 80%", 2026-11-14) -- measured at the time: gpu=74% gpuDiscrete=0%
+    // gpuIntegrated=74%, the iGPU figure confirmed by hand from DRM fdinfo.
+    // Brief attempt at a fix: show the discrete card only. Wrong in the other
+    // direction, and the owner said so at once -- every app and every video on
+    // this machine runs on the iGPU, so "0%" claimed all of that was free.
+    //
+    // So: busiest chip, and a label. `gpuMetricDiscrete` drives the gauge tag
+    // ("GPU" vs "iGPU") and the caption naming the chip, and the iGPU also
+    // keeps its own row in the Resources view and the task manager, matched by
+    // PCI address (`gpuOwnsLiveNumbers`).
     //
     // One policy in one place, because four surfaces draw it: the island's
     // tile and graphs, the bar pocket, the task manager card and the bar's
     // popup all read these three properties.
-    readonly property real gpuMetricPct: root.gpuClockPct >= 0 ? root.gpuClockPct : root.intelGpuPct
+    readonly property real gpuMetricPct: Math.max(root.gpuClockPct, root.intelGpuPct)
     readonly property var gpuMetricHistory: root.gpuHistory
-    readonly property string gpuMetricName: root.gpuName
-    // Which chip the number above belongs to, so a caption about the dGPU's
-    // enforced watt cap is never printed under an iGPU percentage. With a
-    // discrete card present this is always true; the fallback above only fires
-    // on a machine that has no dGPU at all.
-    readonly property bool gpuMetricDiscrete: root.gpuClockPct >= 0
+    // Which chip the number belongs to -- and therefore what the caption says.
+    // Ties go to the discrete card; when the iGPU is higher the number is the
+    // iGPU's and is labelled as such, so "74%" always comes with the chip that
+    // produced it instead of quietly meaning whichever one happened to win.
+    readonly property bool gpuMetricDiscrete: root.gpuClockPct >= root.intelGpuPct
+    readonly property string gpuMetricName: root.gpuMetricDiscrete ? root.gpuName : root.integratedGpuName
+    // The other chip's inventory name, for the caption when the iGPU wins. The
+    // inventory ranks the discrete card first on this laptop (`rankGpus`), so
+    // everything after it is integrated silicon; a machine with no second entry
+    // still gets an honest "iGPU" rather than the dGPU's name.
+    readonly property string integratedGpuName: {
+        const names = HardwareStats.gpuNames ?? [];
+        for (let i = 0; i < names.length; i++) {
+            if (names[i] !== root.gpuName)
+                return names[i];
+        }
+        return Translation.tr("iGPU");
+    }
 
     // ── Temperature, normalised for the graphs ───────────────────────────
     // A temperature is a real quantity, not a fraction of anything, so a chart

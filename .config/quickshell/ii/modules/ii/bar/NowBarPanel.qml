@@ -7179,9 +7179,12 @@ ColumnLayout {
         // The card the percentage belongs to: the discrete GPU, named as the
         // inventory spells it (minus the maker suffix -- see shortGpuName).
         if (key === "gpu") {
-            return root.shortGpuName() !== ""
-                ? root.shortGpuName()
-                : (SystemNow.gpuClockMhz >= 0 ? Translation.tr("%1 MHz").arg(Math.round(SystemNow.gpuClockMhz)) : "");
+            // The chip the number came from, not always the discrete card:
+            // see SystemNow.gpuMetricName. shortGpuName() shortens whichever
+            // name it is given.
+            const chip = root.shortGpuName(SystemNow.gpuMetricName);
+            if (chip !== "")
+                return chip;
         }
         if (key === "temp") return root.tempState(SystemNow.tempC);
         return "";
@@ -7198,8 +7201,8 @@ ColumnLayout {
     // 07)" spends half its width on a company suffix and a hardware revision
     // nobody reads at a glance. Those two go; the rest stays verbatim (so an
     // unfamiliar chip still prints its full name rather than a guess).
-    function shortGpuName() {
-        return SystemNow.gpuName
+    function shortGpuName(name) {
+        return (name ?? SystemNow.gpuName)
             .replace(/\s*\((?:rev|revision)[^)]*\)\s*$/i, "")
             .replace(/\s+(Corporation|Inc\.?|Corp\.?|Ltd\.?)\b/g, "")
             .trim();

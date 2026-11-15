@@ -59,10 +59,47 @@ log="$DATA/launch.log"
 # which is what matters for a build whose whole job is testing a connector
 # dialog. FREEBUFF_0184_RENDER=gpu opts back in if this ever starts working.
 #
+# --no-sandbox is part of the same fix and was measured by addition, not by
+# theory: with --disable-gpu alone the new instance still logged the same nine
+# GPU-process launch failures and died the same way; adding --no-sandbox it came
+# up, kept its window and its orchestrator stayed ready. This is a local desktop
+# app reading local files, not a browser of untrusted pages, which is the trade
+# this flag makes.
+#
 # No --enable-features either: on this machine carrying any feature switch on
 # the command line halves the frame rate (measured 2026-11-15, see
 # ~/.local/bin/claude-desktop), and none of them are needed here.
+# The orchestrator, not Electron, is what refuses the second copy: with the
+# current build up it logs
+#
+#     Another Freebuff orchestrator is already using this Desktop state profile.
+#     Stop it, or launch this test with a fresh FREEBUFF_DESKTOP_STATE_PATH.
+#
+# and exits with code 75 -- a window came up and then vanished, which is worse
+# than a launch that never maps because it looks like it worked. A separate
+# --user-data-dir covers Electron's own lock but not this profile, so the state
+# path is moved under the same directory and the two builds stop competing for
+# it. Nothing here touches $HOME/.freebuff, which the running build keeps.
+# ...and the value has to be OVERWRITTEN, not defaulted. The running desktop
+# hands its own FREEBUFF_DESKTOP_STATE_PATH to every shell it starts (that is
+# how an agent shell knows which profile launched it), so by the time this file
+# runs the variable is already set -- to the CURRENT build's profile. A
+# `${VAR:-default}` therefore kept the real path, the second orchestrator hit the
+# same lock, and the window came up and vanished with
+#
+#     process ... ended (code 75, signal none)
+#
+# in the log. Measured 2026-11-15: `echo $FREEBUFF_DESKTOP_STATE_PATH` in a
+# desktop-started shell answers /home/matrix/.config/freebuff-desktop/state.json.
+# FREEBUFF_0184_STATE moves it somewhere else on purpose.
 unset ELECTRON_OZONE_PLATFORM_HINT
+export FREEBUFF_DESKTOP_STATE_PATH="${FREEBUFF_0184_STATE:-$DATA/state/state.json}"
+# No updater. This build offered itself 0.0.202 within a minute of starting and
+# tried to download it (net::ERR_FAILED in the log); an update would replace the
+# very file being tested, which is the whole thing being pinned here. The app's
+# own dev launcher uses this same variable to switch the check off.
+export FREEBUFF_DISABLE_UPDATE_CHECK=1
+mkdir -p "$(dirname "$FREEBUFF_DESKTOP_STATE_PATH")" 2>/dev/null
 render="${FREEBUFF_0184_RENDER:-soft}"
 if [ "$render" = "gpu" ]; then
     exec "$APP" \
@@ -76,5 +113,5 @@ exec "$APP" \
     --user-data-dir="$DATA" \
     --ozone-platform=wayland \
     --force-device-scale-factor="$SCALE" \
-    --disable-gpu \
+    --disable-gpu --no-sandbox \
     "$@" >>"$log" 2>&1

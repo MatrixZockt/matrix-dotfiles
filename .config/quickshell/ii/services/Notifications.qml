@@ -31,7 +31,11 @@ Singleton {
             "identifier": action.identifier,
             "text": action.text,
         })) ?? []
-        property bool popup: false
+                  property bool popup: false
+          // Has this one been in front of the user's eyes in the panel? Only
+          // read for the shell's own "copied" notices -- see
+          // sweepSaveableNotices.
+          property bool seen: false
         property bool isTransient: notification?.hints.transient ?? false
         // ── A signal, not a notification ────────────────────────────────
         //
@@ -505,6 +509,75 @@ Singleton {
 
     // Quickshell's notification IDs starts at 1 on each run, while saved notifications
     // can already contain higher IDs. This is for avoiding id collisions
+    // ── A copied picture is not news, and does not keep ─────────────────────
+    //
+    // The shell's own notices ("Image copied", "Video copied · 0:12") carry a
+    // file path and two buttons, and they exist for the one case where the
+    // corner card was missed: going back for something seen a moment ago. Past
+    // that they are clutter (asked for 2026-11-15: drop them five minutes after
+    // they arrive, unless the panel was opened in the meantime).
+    //
+    // "Opened" is the whole condition. The moment the notification sidebar is up,
+    // whatever is in it has been read, so the countdown stops mattering and the
+    // entry stays until it is deleted by hand -- and that is also why the sweep
+    // marks as well as deletes: with the panel on screen, the time limit is not
+    // being run against anything.
+    readonly property int saveableNoticeLifeMs: 5 * 60 * 1000
+
+    function isSaveableNotice(entry) {
+        return String(entry?.appName ?? "") === GlobalStates.saveableAppName;
+    }
+
+    function markSaveableNoticesSeen() {
+        let changed = false;
+        for (let i = 0; i < root.list.length; i++) {
+            const entry = root.list[i];
+            if (!root.isSaveableNotice(entry) || entry.seen)
+                continue;
+            entry.seen = true;
+            changed = true;
+        }
+        // Not a rewrite of the archive: `seen` is about this session's panel
+        // visit, and the file is rewritten on the next real change anyway.
+        return changed;
+    }
+
+    function sweepSaveableNotices() {
+        if (GlobalStates.sidebarRightOpen) {
+            root.markSaveableNoticesSeen();
+            return;
+        }
+        const cutoff = Date.now() - root.saveableNoticeLifeMs;
+        for (let i = root.list.length - 1; i >= 0; i--) {
+            const entry = root.list[i];
+            if (!root.isSaveableNotice(entry) || entry.seen)
+                continue;
+            // `time` is milliseconds (set on arrival); an entry that somehow
+            // has none is kept rather than swept on a guess.
+            const at = Number(entry.time ?? 0);
+            if (at <= 0 || at > cutoff)
+                continue;
+            root.discardNotification(entry.notificationId);
+        }
+    }
+
+    Connections {
+        target: GlobalStates
+        function onSidebarRightOpenChanged() {
+            if (GlobalStates.sidebarRightOpen)
+                root.markSaveableNoticesSeen();
+        }
+    }
+
+    // Once a minute, not once per notice: one sweep for the whole list, and it
+    // costs nothing while there is nothing to sweep.
+    Timer {
+        interval: 60000
+        repeat: true
+        running: true
+        onTriggered: root.sweepSaveableNotices()
+    }
+
     // ── Notification sound ─────────────────────────────────────────────────
     //
     // The daemon had none: cards appeared in complete silence. That is the whole
@@ -639,6 +712,12 @@ Singleton {
 
     function playNotificationSound(notification) {
         if (!(Config?.options.notifications.sound ?? true)) return;
+        // A picture or a recording the SHELL copied is not news from an app: the
+        // card in the top-right corner already says it, and a chime for something
+        // the user did themselves -- a snip, a stopped take -- is noise (asked for
+        // 2026-11-15: "it shouldn't make the notification sound").
+        if (String(notification?.appName ?? "") === GlobalStates.saveableAppName)
+            return;
         const hints = notification?.hints ?? {};
         if (hints["suppress-sound"] === true) return;
         const name = hints["sound-name"] ?? "";

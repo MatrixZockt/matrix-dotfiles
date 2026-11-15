@@ -224,11 +224,17 @@ Singleton {
                 // naming a file you will never open again) was a lie with a
                 // timestamp on it -- the length of the take is the useful fact.
                 const temp = lines.includes("temp");
-                const label = temp
-                    ? (copied ? Translation.tr("Copied") : Translation.tr("Recorded"))
-                        + " · " + root.clock(root._elapsed)
-                    : Translation.tr("Saved") + " · " + name
-                        + (copied ? " · " + Translation.tr("copied") : "");
+                                  // "Video" is in every variant on purpose. The panel keeps this
+                  // line long after the toast is gone (see notifySaveable), and
+                  // "Copied · 0:12" next to "Image copied" said nothing about
+                  // what had been copied -- asked for 2026-11-15. The two words
+                  // also pick the card's glyph: NotificationUtils reads `video`
+                  // out of the summary and draws a camera.
+                  const label = temp
+                      ? (copied ? Translation.tr("Video copied") : Translation.tr("Video recorded"))
+                          + " · " + root.clock(root._elapsed)
+                      : Translation.tr("Video saved") + " · " + name
+                          + (copied ? " · " + Translation.tr("copied") : "");
                 GlobalStates.showSignalToast(label, "videocam", 2600);
                 // And the same notice where it can still be acted on: the panel
                 // keeps the clip's path, so a recording whose toast was missed can

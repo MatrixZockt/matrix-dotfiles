@@ -12,6 +12,11 @@ Singleton {
         if (summary.length === 0) return defaultType;
 
         const keywordsToTypes = {
+            // A clip, drawn as the camera that made it. Before this, the shell's
+            // own recording notices ("Video copied · 0:12", services/
+            // QuickRecord.qml) wore the default speech bubble and read as a
+            // message someone had sent.
+            'video': 'videocam',
             'reboot': 'restart_alt',
             'record': 'screen_record',
             'battery': 'power',

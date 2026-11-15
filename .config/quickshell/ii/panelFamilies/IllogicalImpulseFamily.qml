@@ -77,8 +77,6 @@ Scope {
     PanelLoader { component: RegionSelector {} }
     // The in-shell colour picker (SUPER + C; replaces hyprpicker).
     PanelLoader { component: ColorPicker {} }
-    // The SUPER+R quick-record status pill (only visible while recording).
-    PanelLoader { component: RecordingPill {} }
     // The visual window sizer (SUPER+SHIFT+R / dock right-click "Resize…"):
     // an accent frame with drag handles around the armed window.
     PanelLoader { component: VisualSizerWindow {} }
@@ -93,5 +91,15 @@ Scope {
     // "always in front" holds no matter what is open.
     PanelLoader { component: TaskManagerOverlay {} }
     PanelLoader { extraCondition: Config.options.bar.enable && Config.options.bar.vertical; component: VerticalBar {} }
-    PanelLoader { component: WallpaperSelector {} }
+        PanelLoader { component: WallpaperSelector {}}
+    // The SUPER+R quick-record status pill and the red frame around the captured
+    // area (only visible while recording).
+    //
+    // LAST, and that is load-bearing: layer-shell surfaces stack in the order
+    // they are created, so declared here among the middle of the list the frame
+    // went UNDER every surface built after it -- the sidebars, the switcher, the
+    // launcher -- and opening one of those hid the red border and the clock
+    // while the take was still running. A recording marker has to be over
+    // anything you can open without stopping it.
+    PanelLoader { component: RecordingPill {} }
 }

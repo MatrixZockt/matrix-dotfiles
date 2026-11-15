@@ -2598,14 +2598,28 @@ property bool loadingFailFlash: false
         const focusedName = String(Hyprland.focusedMonitor?.name ?? "");
         const snip = root.lastSnipRegion;
         const fresh = snip !== null && (Date.now() - Number(snip.at ?? 0)) < root.snipRegionFreshMs;
-        const region = fresh
+        // The region only becomes the card's content when it is roughly the
+        // shape of a card. A copied strip of text -- the case this was reported
+        // from, 2026-11-15 -- has an aspect of one to twenty, and zooming the
+        // mirror onto it produced a sliver that read as "the play button did
+        // nothing". What was asked for is "show the screen of that desktop", so
+        // an odd-shaped snip gets the whole monitor instead.
+        const snipAspect = fresh && Number(snip.w) > 0
+            ? Number(snip.h) / Number(snip.w)
+            : 0;
+        const region = fresh && snipAspect >= 0.45 && snipAspect <= 2.2
             ? { x: snip.x, y: snip.y, w: snip.w, h: snip.h }
             : null;
         const screenName = fresh && String(snip.screen ?? "").length > 0
             ? String(snip.screen)
             : focusedName;
-        if (screenName.length === 0)
+        if (screenName.length === 0) {
+            // Silence here read as "the play button is broken": a click with no
+            // card and nothing said. There is no screen to mirror, which is a
+            // thing to say rather than a thing to swallow.
+            root.showSignalToast(Translation.tr("No screen to mirror"), "error", 1600);
             return;
+        }
         // Start the card on the FAR side of the screen from its own region. A
         // mirror that opens on top of what it is mirroring shows itself inside
         // itself, and one frame of that is baked into the picture for as long as
@@ -2613,10 +2627,19 @@ property bool loadingFailFlash: false
         const monitor = Hyprland.focusedMonitor;
         const screenW = Math.max(320, monitor?.width ?? 1707);
         const screenH = Math.max(240, monitor?.height ?? 1067);
-        const cardW = Math.min(screenW * 0.35, 520);
-        const cardH = cardW * (region
+        // The card's size follows the shape of the region, with the same two
+        // corrections PinnedImage applies to the card itself (see livePanel's
+        // cardWidth): a strip is grown until it is legible, a tall one is
+        // narrowed until it fits. Placement has to agree with the real size or
+        // the mirror opens half off the screen.
+        const aspect = region
             ? (Math.max(1, region.h) / Math.max(1, region.w))
-            : (screenH / screenW));
+            : (screenH / screenW);
+        let cardW = Math.min(screenW * 0.35, 520);
+        if (cardW * aspect < 90)
+            cardW = Math.min(90 / aspect, screenW * 0.5);
+        cardW = Math.min(cardW, (screenH * 0.5) / aspect);
+        const cardH = cardW * aspect;
         const marginX = Math.round(screenW * 0.02);
         const marginY = Math.round(screenH * 0.03);
         let placeX = 160;

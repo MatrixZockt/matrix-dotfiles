@@ -213,8 +213,24 @@ Scope {
                 visible: root.isLive
                 // Kept below the image cap: a mirror at nearly half the screen
                 // would cover the desktop it is showing. Height follows the
-                // snipped region's shape, so a wide strip stays a wide strip.
-                width: Math.min(root.maxWidth, 520)
+                // snipped region's shape.
+                //
+                // The width is solved rather than taken: a wide strip of text at
+                // 520 wide is a 20px sliver, and a card that small reads as "the
+                // play button did nothing" instead of as a mirror (reported
+                // 2026-11-15, for a copied strip of text). So a thin region is
+                // widened until it is at least 90px tall, and a tall one is
+                // narrowed until the card fits on the screen it mirrors.
+                readonly property real cardWidth: {
+                    const aspect = Math.max(0.02, root.liveAspect);
+                    const screenW = root.targetScreen?.width ?? 1707;
+                    const screenH = root.targetScreen?.height ?? 1067;
+                    let w = Math.min(root.maxWidth, 520);
+                    if (w * aspect < 90)
+                        w = Math.min(90 / aspect, screenW * 0.5);
+                    return Math.min(w, (screenH * 0.5) / aspect);
+                }
+                width: cardWidth
                 height: width * root.liveAspect
                 radius: Appearance.rounding.small
                 color: Qt.rgba(0, 0, 0, 0.6)

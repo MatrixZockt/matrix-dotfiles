@@ -335,8 +335,18 @@ Singleton {
                         root.announcedTail = newest
                     } else {
                         root.announcedTail = newest
+                        // The quiet window is checked HERE as well as in the
+                        // watch handler, and that is not belt-and-braces: the
+                        // image watcher in execs.lua calls
+                        // `cliphistService update` itself the moment it has
+                        // stored a picture, so an image copy reaches this
+                        // refresh without ever passing the handler (reported
+                        // 2026-11-15: a dictation flashed "Image copied" for
+                        // the picture it put back on the clipboard, which the
+                        // user had not copied at all).
                         if (newest !== ""
                             && !own
+                            && Date.now() >= root.quietUntil
                             && !root.entryIsFileUri(newest)
                             && Config.options?.workSafety?.enable?.clipboard !== true) {
                             const isImage = root.entryIsImage(newest)

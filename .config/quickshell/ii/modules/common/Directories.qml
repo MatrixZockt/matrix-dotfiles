@@ -73,7 +73,11 @@ Singleton {
     // a graceful stop. This is what services/QuickRecord.qml drives; record.sh
     // above is the older wf-recorder path and still exists for anything that
     // calls it directly.
-    property string recordRegionScriptPath: FileUtils.trimFileProtocol(`${Directories.scriptPath}/videos/record-region.sh`)
+          property string recordRegionScriptPath: FileUtils.trimFileProtocol(`${Directories.scriptPath}/videos/record-region.sh`)
+      // The snip's text extractor. Reads a cropped picture and hands the words to
+      // the transcript card; it never touches the clipboard (see the script's
+      // header for why that changed).
+      property string ocrToCardScriptPath: FileUtils.trimFileProtocol(`${Directories.scriptPath}/images/ocr-to-card.sh`)
     property string userAvatarPathAccountsService: FileUtils.trimFileProtocol(`/var/lib/AccountsService/icons/${SystemInfo.username}`)
     property string userAvatarPathRicersAndWeirdSystems: FileUtils.trimFileProtocol(`${Directories.home}.face`)
     property string userAvatarPathRicersAndWeirdSystems2: FileUtils.trimFileProtocol(`${Directories.home}.face.icon`)

@@ -41,6 +41,9 @@ Singleton {
             return `curl -sF files[]=@'${StringUtils.shellSingleQuoteEscape(filePath)}' ${root.fileUploadApiEndpoint} | jq -r '.files[0].url'`
         }
         const annotationCommand = `${Config.options.regionSelector.annotation.useSatty ? "satty" : "swappy"} -f -`;
+        // The text-extraction helper: reads the cropped picture and writes the
+        // words to the transcript card (scripts/images/ocr-to-card.sh).
+        const ocrToCardScript = Directories.ocrToCardScriptPath;
         switch (action) {
             case ScreenshotAction.Action.Copy:
                 if (saveDir === "") {
@@ -65,7 +68,15 @@ Singleton {
                 return ["bash", "-c", `${cropInPlace} && xdg-open "${root.imageSearchEngineBaseUrl}$(${uploadAndGetUrl(screenshotPath)})" && ${cleanup}`]
                 break;
             case ScreenshotAction.Action.CharRecognition:
-                return ["bash", "-c", `${cropInPlace} && tesseract '${StringUtils.shellSingleQuoteEscape(screenshotPath)}' stdout -l $(tesseract --list-langs | awk 'NR>1{print $1}' | tr '\\n' '+' | sed 's/\\+$/\\n/') | wl-copy && ${cleanup}`]
+                // NOT a copy. This used to be `tesseract ... | wl-copy`, which
+                // gave the clipboard a sentence nobody asked for and took the
+                // previous selection -- usually the picture being read -- away
+                // with it (asked for 2026-11-15: nothing is copied by a
+                // transcription). The words go to the shell's transcript card
+                // instead, which has its own Copy, and the clipboard is left
+                // exactly as it was.
+                return ["bash", "-c",
+                    `${cropInPlace} && '${StringUtils.shellSingleQuoteEscape(ocrToCardScript)}' '${StringUtils.shellSingleQuoteEscape(screenshotPath)}' ; ${cleanup}`]
                 break;
             case ScreenshotAction.Action.Record:
                 return ["bash", "-c", `${Directories.recordScriptPath} --region '${slurpRegion}'`]

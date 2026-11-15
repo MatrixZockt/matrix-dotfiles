@@ -282,7 +282,11 @@ paste_text() {
     # (and the pill) open for 120 s until the daemon killed it, on
     # 2026-11-14. Three seconds is the same order as the call's own work,
     # and losing the quiet window only costs a "Copied" card.
-    timeout 3 qs -c ii ipc call cliphistService quietFor 2500 >/dev/null 2>&1 || true
+    # 4000, not 2500: the restore below happens after the paste window, and a
+    # window that ends first lets the shell announce the user's own picture as
+    # "Image copied" again -- a copy nobody made (reported 2026-11-15: a
+    # dictation sometimes re-copied the screenshot that was already there).
+    timeout 3 qs -c ii ipc call cliphistService quietFor 4000 >/dev/null 2>&1 || true
     # --sensitive makes the copy advertise x-kde-passwordManagerHint=secret, which
     # cliphist honours by NOT storing it. Without this a dictation is typed into
     # the cursor and then quietly kept forever in the clipboard history database.
@@ -817,8 +821,13 @@ finish_raw() {
             if ! paste_text "$out" "$paste_mod"; then
                 sleep 0.15
                 if ! paste_text "$out" "$paste_mod"; then
-                    printf '%s' "$out" | wl-copy --sensitive -t text/plain 2>/dev/null
-                    method="wl-copy (paste failed: ${PASTE_FAIL:-unknown})"
+                    # NO clipboard rescue. This used to leave the sentence on
+                    # the selection when the paste could not be made, which is
+                    # how a dictation ended up "copying itself" -- reported
+                    # 2026-11-15: nothing is copied unless Copy is pressed. The
+                    # card raised below is the rescue, and it is the only place
+                    # the words can be picked up from.
+                    method="failed (${PASTE_FAIL:-unknown})"
                 fi
             fi ;;
         wtype)   printf '%s' "$out" | wtype - ;;

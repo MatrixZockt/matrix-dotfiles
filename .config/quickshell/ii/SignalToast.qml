@@ -59,19 +59,24 @@ Scope {
     // copied. The card takes input only in this case — see the mask below.
     readonly property bool hasImage: GlobalStates.signalToastImage.length > 0
 
-    // A copied TEXT carries the same pin, for a different reason: it has a live
-    // source -- the clipboard itself -- so pinning it puts a card on the desktop
-    // that follows what was copied last (GlobalStates.pinLiveText). Which is as
-    // close as a pin can get to "the thing I copied, but live": pixels have no
-    // such source, text does.
     // The clipboard's own chip: any non-picture copy. Keyed on the glyph the
     // clipboard names its card with, not on the label -- "Copied" is one word and
     // so are several other signals that have nothing to pin.
     readonly property bool hasTextPayload: !hasImage
         && GlobalStates.signalToastIcon === "content_copy"
-    // Whether the chip is a control at all. Everything else about the card is
-    // unchanged: it becomes a target only when there is something to pin on it.
-    readonly property bool pinnable: hasImage || hasTextPayload
+    // Whether the chip is a control at all: PICTURES ONLY.
+    //
+    // A copied text used to carry the pin too, as a live card that followed the
+    // clipboard (GlobalStates.pinLiveText). Taken off the card on request
+    // (2026-11-15: "remove the pin from 'copied' message that arent images"): a
+    // text copy is a glance at a string, and a pin on every one of them turned a
+    // confirmation into a decision. `pinLiveText` is untouched -- it is still
+    // there for anything that wants a live text card on purpose.
+    //
+    // Side effect, and it is the right one: with nothing to press, a text
+    // toast's input region is empty (see the mask below), so the card is pure
+    // click-through and cannot swallow a press meant for the window under it.
+    readonly property bool pinnable: hasImage
 
     // What is left of the hold when the pointer is resting on the card. Hovering
     // freezes the countdown instead of letting it expire: the card is the only
@@ -498,15 +503,8 @@ Scope {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            // A picture pins as a picture; text pins as a live
-                            // card, because that is the one of the two that can
-                            // keep changing.
-                            onClicked: {
-                                if (root.hasImage)
-                                    GlobalStates.pinSignalToastImage();
-                                else
-                                    GlobalStates.pinLiveText();
-                            }
+                            // Pictures only -- `pinnable` is `hasImage`.
+                            onClicked: GlobalStates.pinSignalToastImage()
                         }
                     }
                 }

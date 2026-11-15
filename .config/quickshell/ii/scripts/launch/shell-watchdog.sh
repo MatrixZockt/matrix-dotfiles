@@ -236,8 +236,31 @@ sweepStrayUdevMonitors() {
             misses=0
             continue
         fi
-        answer=$(timeout 6 qs -c "$qsConfig" ipc call theme state 2>/dev/null)
-        case "$answer" in
+                  # The probe has to ask IN THE SESSION'S ENVIRONMENT, and this is the
+          # whole of the reload storm.
+          #
+          # `qs ... ipc call` locates the shell's socket through the display it is
+          # told about. This service starts with `Environment=` empty -- no
+          # WAYLAND_DISPLAY at all -- and a client started like that answers
+          # "No running instances for .../ii/shell.qml" while listing the dead
+          # instances it can see. That message was read as a wedged shell, so
+          # guard 0b restarted a shell that was answering perfectly well: 59 such
+          # restarts sit in /tmp/shell-watchdog.log, and on 2026-11-15 they came
+          # every 90 seconds -- the "hyprland keeps reloading quickshell" report.
+          #
+          # Measured, not guessed: the identical command with only WAYLAND_DISPLAY
+          # added answers `mode=dark surfaceBright=...`, and with `env -i` it
+          # answers "No running instances". session-env is the same prober the
+          # launcher uses, so the two views of the session cannot drift apart.
+          probe_env="$("$HOME/.local/bin/session-env" 2>/dev/null)" || probe_env=""
+          if [ -z "$probe_env" ]; then
+              # No compositor to ask: that is not a wedge, and restarting the
+              # shell would only fail for the same reason.
+              misses=0
+              continue
+          fi
+          answer=$(env $probe_env timeout 6 qs -c "$qsConfig" ipc call theme state 2>/dev/null)
+          case "$answer" in
             mode=*) misses=0; continue ;;
         esac
         misses=$(( misses + 1 ))

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Freebuff (0.0.184)
+GenericName=Freebuff Desktop, older build
+Comment=The 0.0.184 desktop build, side by side with the current one -- for MCP connectors that sign in with OAuth
+Exec=/home/matrix/.local/bin/freebuff-desktop-0.0.184 %U
+Icon=freebuff
+Terminal=false
+Categories=Development;
+StartupWMClass=@codebuff/freebuff-desktop

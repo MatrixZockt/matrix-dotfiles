@@ -1,0 +1,80 @@
+#!/bin/bash
+# Freebuff Desktop 0.0.184, running BESIDE the current build.
+#
+# Why this file exists: the current build (0.0.202) is the one the user uses
+# day to day, and they want an older copy next to it to test MCP connectors
+# that sign in with OAuth -- the published MCP docs were written and tested
+# against 0.0.184, and the Connectors/MCP surface has moved around since
+# (see github.com/CodebuffAI/freebuff/issues/1627, which reports 0.0.201
+# shipping the MCP backend with no panel to drive it).
+#
+# Two things make the two builds coexist:
+#
+#   1. A SEPARATE USER DATA DIRECTORY. Electron keeps its single-instance
+#      lock, its cookies and its window state in userData, so two builds
+#      pointed at the same directory would fight over it: the second launch
+#      would hand its arguments to the first and exit. --user-data-dir moves
+#      the whole lot aside, which is also what keeps the two sign-ins apart.
+#
+#   2. ITS OWN APPIMAGE PATH, never rewritten. The bundled updater replaces
+#      the file it was started from, so an old build that is left to update
+#      itself would quietly turn into the current one on the next launch.
+#      Keeping the version in the filename makes the version being tested
+#      visible in `ps` and in the window list.
+#
+# Not shared: ~/.agents/mcp.json and ~/.freebuff/mcp.json are per-user, not per
+# install, so both builds read the same MCP servers and the same approvals
+# sidecar. That is deliberate here -- comparing the two against one set of
+# connector configs is the point -- but it does mean an approval made in one
+# build is visible to the other.
+#
+# Scale is pinned to the panel's 1.5 like the current build; FREEBUFF_0184_SCALE
+# overrides it for a machine where that trade goes the other way.
+set -u
+
+APP="$HOME/Applications/Freebuff-0.0.184-linux-x86_64.AppImage"
+DATA="${FREEBUFF_0184_DATA:-$HOME/.config/Freebuff-0.0.184}"
+SCALE="${FREEBUFF_0184_SCALE:-1.5}"
+
+if [ ! -x "$APP" ]; then
+    echo "freebuff-desktop-0.0.184: $APP is missing or not executable" >&2
+    echo "  download it from github.com/CodebuffAI/codebuff-community/releases/tag/freebuff-desktop-v0.0.184" >&2
+    exit 1
+fi
+
+mkdir -p "$DATA" 2>/dev/null
+
+# Own log, so the two builds do not interleave their words in one file.
+log="$DATA/launch.log"
+
+# SOFTWARE RENDERING, because this build's GPU process does not survive here.
+# Measured on the first launch (2026-11-15): the window mapped, then the app
+# logged
+#     GPU process launch failed: error_code=1002        (x9)
+#     FATAL:gpu_data_manager_impl_private.cc GPU process isn't usable. Goodbye.
+# and exited. That is the same class of failure ~/.local/bin/freebuff-desktop
+# documents for the current build: a GPU process this machine cannot keep alive,
+# after which no flag set rescues it because it is the failure that kills the
+# app, not a slow path inside it. Software compositing is instant and stable,
+# which is what matters for a build whose whole job is testing a connector
+# dialog. FREEBUFF_0184_RENDER=gpu opts back in if this ever starts working.
+#
+# No --enable-features either: on this machine carrying any feature switch on
+# the command line halves the frame rate (measured 2026-11-15, see
+# ~/.local/bin/claude-desktop), and none of them are needed here.
+unset ELECTRON_OZONE_PLATFORM_HINT
+render="${FREEBUFF_0184_RENDER:-soft}"
+if [ "$render" = "gpu" ]; then
+    exec "$APP" \
+        --user-data-dir="$DATA" \
+        --ozone-platform=wayland \
+        --force-device-scale-factor="$SCALE" \
+        --enable-gpu-rasterization --ignore-gpu-blocklist \
+        "$@" >>"$log" 2>&1
+fi
+exec "$APP" \
+    --user-data-dir="$DATA" \
+    --ozone-platform=wayland \
+    --force-device-scale-factor="$SCALE" \
+    --disable-gpu \
+    "$@" >>"$log" 2>&1

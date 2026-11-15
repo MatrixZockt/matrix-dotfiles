@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily sweep of the hypr desktop temporary folder (~/Temp)
+
+[Timer]
+# Once a day, and once shortly after login if the machine was off when it was
+# due: Persistent=true is what makes a laptop that sleeps through the slot still
+# sweep when it wakes rather than skipping the day entirely.
+OnCalendar=daily
+OnBootSec=10min
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

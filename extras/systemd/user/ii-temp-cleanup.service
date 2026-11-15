@@ -1,0 +1,9 @@
+[Unit]
+Description=hypr desktop temporary folder sweep (~/Temp, older than 3 days)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/ii-temp-cleanup
+# The sweep is eventually-consistent by nature: a failure is worth one line in
+# the journal, not a unit that sits in "failed" until someone looks.
+SuccessExitStatus=0

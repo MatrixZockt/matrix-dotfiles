@@ -1,0 +1,100 @@
+#!/bin/bash
+# Delete what has been sitting in the temporary folder for three days.
+#
+# The folder is ~/Temp -- the one pinned in the file manager's sidebar as the
+# place to drop something you do not intend to keep. "Temporary" only meant
+# "I will remember to clean this up", which never happens; this makes it true on
+# its own (REQUESTED 2026-11-15: "so every time I put the file after three days
+# it will be deleted").
+#
+# Run by ii-temp-cleanup.timer once a day. Safe to run by hand at any time:
+#
+#   ii-temp-cleanup              sweep ~/Temp, deleting entries older than 3 days
+#   ii-temp-cleanup --dry-run    say what WOULD go, delete nothing
+#   II_TEMP_DIR=/some/dir ii-temp-cleanup    sweep another folder (the test path)
+#
+# WHAT "OLDER" MEANS: the entry's own mtime, not the newest file inside it. Write
+# to a file and its clock restarts; drag a file in and its clock restarts. A
+# folder is judged by when it was last changed itself, so a folder full of old
+# files can survive while its own timestamp is fresh -- that is the surprising
+# half of mtime, and the reason the log prints the timestamp it decided on.
+#
+# WHAT IS NEVER TOUCHED:
+#   * dot-entries -- ~/Temp/.claude and ~/Temp/.freebuff are tool state that
+#     happens to live there, not files a person put in a temporary folder.
+#     Deleting them would break whichever tool wrote them, three days later,
+#     with nothing in the folder to point at.
+#   * anything outside the folder -- no symlink is followed, so a link to a
+#     real directory is removed as the link, never as what it points at.
+set -u
+
+dir="${II_TEMP_DIR:-$HOME/Temp}"
+days="${II_TEMP_DAYS:-3}"
+dry=0
+[ "${1:-}" = "--dry-run" ] && dry=1
+
+log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/ii"
+log="$log_dir/temp-cleanup.log"
+
+say() { printf '%s\n' "$*"; }
+note() {
+    # The log is for "what happened while I was not looking", so it only needs
+    # to be readable: one line per sweep, one per deleted entry, trimmed when it
+    # grows past a few hundred KB.
+    mkdir -p "$log_dir" 2>/dev/null
+    printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$log" 2>/dev/null
+}
+
+if [ ! -d "$dir" ]; then
+    say "ii-temp-cleanup: $dir is not a directory; nothing to do"
+    note "skip: $dir is not a directory"
+    exit 0
+fi
+
+# A guard, not a feature: this script deletes, so a mistyped II_TEMP_DIR must not
+# be able to point it at $HOME or at / . The real folder is always a directory
+# inside the home directory.
+case "$(readlink -f -- "$dir")" in
+    "$(readlink -f -- "$HOME")"|"/"|"/home"|"/tmp")
+        say "ii-temp-cleanup: refusing to sweep $dir" >&2
+        note "refused: $dir"
+        exit 1
+        ;;
+esac
+
+minutes=$((days * 1440))
+count=0
+freed=0
+
+# -maxdepth 1: the top level of the folder is what ages. An old folder takes its
+# contents with it, which is why -exec rm -rf is used rather than rm.
+while IFS= read -r -d '' entry; do
+    name=${entry##*/}
+    when=$(date -r "$entry" '+%F %T' 2>/dev/null || echo '?')
+    size=$(du -sb -- "$entry" 2>/dev/null | cut -f1)
+    size=${size:-0}
+    if [ "$dry" = 1 ]; then
+        say "would delete  $name  (last changed $when, $((size / 1048576)) MB)"
+    else
+        if rm -rf -- "$entry" 2>/dev/null; then
+            say "deleted  $name  (last changed $when, $((size / 1048576)) MB)"
+            note "deleted $name (mtime $when, $size bytes)"
+        else
+            say "FAILED   $name" >&2
+            note "FAILED  $name"
+        fi
+    fi
+    count=$((count + 1))
+    freed=$((freed + size))
+done < <(find "$dir" -mindepth 1 -maxdepth 1 \
+            -name '.*' -prune -o \
+            -mmin +"$minutes" -print0 2>/dev/null)
+
+if [ "$count" = 0 ]; then
+    say "nothing in $dir is older than $days days"
+    [ "$dry" = 1 ] || note "swept $dir: nothing older than $days days"
+else
+    verb="deleted"; [ "$dry" = 1 ] && verb="would delete"
+    say "$verb $count entr$([ "$count" = 1 ] && echo y || echo ies), $((freed / 1048576)) MB"
+    [ "$dry" = 1 ] || note "swept $dir: deleted $count, freed $freed bytes"
+fi

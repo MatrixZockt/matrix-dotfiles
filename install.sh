@@ -95,6 +95,22 @@ if [[ -d "$REPO/extras/systemd/user" ]]; then
                 echo "  (could not enable $name -- enable it by hand)"
         fi
     done
+    # TIMERS get the same treatment, and need it more: a timer that is installed
+    # but not enabled does absolutely nothing, and `*.service` never matched one
+    # -- so a scheduled unit would have sat in the repo looking deployed. The
+    # service it triggers is installed by the loop above; enabling the timer is
+    # what puts it on the clock.
+    for f in "$REPO/extras/systemd/user"/*.timer; do
+        [[ -e "$f" ]] || continue
+        name="$(basename "$f")"
+        echo "  timer   $name"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            install -m 0644 "$f" "$HOME/.config/systemd/user/$name"
+            systemctl --user daemon-reload >/dev/null 2>&1
+            systemctl --user enable "$name" >/dev/null 2>&1 || \
+                echo "  (could not enable $name -- enable it by hand)"
+        fi
+    done
 fi
 
 

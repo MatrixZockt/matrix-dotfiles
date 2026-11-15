@@ -2852,16 +2852,20 @@ property bool loadingFailFlash: false
         id: notifySaveableProc
     }
 
-    // ── A recording is copied, not saved ─────────────────────────────────────
+    // ── Copying what a notice is about ───────────────────────────────────────
     //
-    // Asked for plainly (2026-11-15: "dont save the videos by default only copy
-    // them"). Starting a save on a clip scattered named copies of the same mp4
-    // into ~/Videos every time the button was pressed, for a file the recorder
-    // had already put on the clipboard -- so the panel's button on a recording
-    // now does the copy itself and writes nothing anywhere. What it leaves on the
-    // selection is a file-manager copy (clip-file.py: gnome-copied-files plus the
-    // uri-list, the same handover the recorder ends with), so it pastes into a
-    // chat or a folder like any copied file.
+    // Both kinds of notice get a COPY next to their save, because both are things
+    // people paste (asked for 2026-11-15: "Images aka screenshots can't be
+    // copied"). What "copied" means follows what the file is:
+    //
+    //   a picture    -> PNG bytes on the selection, the snip's own handover, so
+    //                   it pastes as an image into anything.
+    //   a recording  -> a file-manager copy (clip-file.py: gnome-copied-files
+    //                   plus the uri-list, the same handover the recorder ends
+    //                   with), so it pastes into a chat or a folder.
+    //
+    // A recording is still not saved by default: it is written to the recorder's
+    // cache and copied, and nothing lands in ~/Videos unless the save is pressed.
     readonly property var videoExtensions: ["mp4", "mkv", "webm", "mov", "gif"]
 
     function isVideoPath(path) {
@@ -2871,15 +2875,34 @@ property bool loadingFailFlash: false
 
     function copyNoticeFile(path) {
         const p = String(path ?? "");
-        if (p.length === 0 || !root.isVideoPath(p))
+        if (p.length === 0)
             return;
-        // No --transient: that option makes the helper delete the file when the
-        // selection is dropped, and this file is a clip the recorder still owns
-        // (it prunes its own cache). A copy must not be what deletes it.
-        Quickshell.execDetached(["bash", "-c",
-            'setsid python3 "$1" "$2" >/dev/null 2>&1 </dev/null &',
-            "_", `${Directories.scriptPath}/videos/clip-file.py`, p]);
-        root.showSignalToast(Translation.tr("Copied"), "content_copy", 1400);
+        if (root.isVideoPath(p)) {
+            // No --transient: that option makes the helper delete the file when
+            // the selection is dropped, and this file is a clip the recorder
+            // still owns (it prunes its own cache). A copy must not be what
+            // deletes it.
+            Quickshell.execDetached(["bash", "-c",
+                'setsid python3 "$1" "$2" >/dev/null 2>&1 </dev/null &',
+                "_", `${Directories.scriptPath}/videos/clip-file.py`, p]);
+            root.showSignalToast(Translation.tr("Copied"), "content_copy", 1400);
+            return;
+        }
+        // A picture goes on the selection as picture BYTES, the way a snip does:
+        // an image is a thing you paste into a document, not a file path.
+        copyNoticeProcess.command = ["bash", "-c", 'wl-copy --type image/png < "$1"', "_", p];
+        copyNoticeProcess.running = true;
+    }
+
+    Process {
+        id: copyNoticeProcess
+        onExited: (exitCode) => {
+            if (exitCode !== 0) {
+                root.showSignalToast(Translation.tr("Could not copy"), "error", 2000);
+                return;
+            }
+            root.showSignalToast(Translation.tr("Copied"), "content_copy", 1400);
+        }
     }
 
     // The panel's Save button: the same dialog the card uses, pointed at the file

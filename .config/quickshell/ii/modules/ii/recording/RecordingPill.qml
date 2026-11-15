@@ -1,5 +1,7 @@
 import QtQuick
 import Quickshell
+// For Process/StdioCollector, used by the layer probe below.
+import Quickshell.Io
 // GlobalShortcut is declared in Quickshell.Hyprland (it registers with the
 // compositor's global shortcut registry) -- without this import it resolves
 // to "GlobalShortcut is not a type" and the shell refuses to load.
@@ -52,18 +54,96 @@ Scope {
         onPressed: QuickRecord.toggle()
     }
 
+    // ── The marker, in a Loader so it can out-rank a popup ───────────────────
+    //
+    // A layer surface is stacked by the moment it was MAPPED, not by the order
+    // it was declared in. Declaring the marker last among the shell's surfaces
+    // therefore only beats the surfaces that were already up when the take
+    // started -- anything that maps afterwards (the notification popup, which
+    // appears the instant something arrives) lands on top of it and the red line
+    // goes under a panel while the recording is still running.
+    //
+    // layer-shell has no "raise", so the only lever is to be the last one
+    // mapped: the probe below watches the overlay layer and this Loader throws
+    // the two windows away and builds them again, which is a fresh surface at
+    // the end of the list. Both windows go together -- a rebuilt frame under a
+    // stale box would be the same bug in one colour.
     RecordingPillWindow {}
     // The frame around what is being captured. Its own file: it is a Variants
     // over the screens (one surface per monitor), and the box above is a single
     // window on the screen the recording lives on.
-    RecordingRegion {}
+    RecordingRegion { held: root.regate }
+
+    property real lastRemapAt: 0
+
+    // Drops both marker surfaces for one turn of the event loop and puts them
+    // back. A surface that unmaps and maps again joins the end of its layer, so
+    // this is what "raise" means here. Rebuilding the windows instead (a Loader)
+    // was tried and is worse: the box's window came back with no surface at all.
+    property bool regate: false
+
+    function remapMarker() {
+        // A re-map is a one-frame blink, so it is rate-limited: once per popup is
+        // worth it, once per probe tick is not.
+        const now = Date.now();
+        if (now - root.lastRemapAt < 900)
+            return;
+        root.lastRemapAt = now;
+        root.regate = true;
+        Qt.callLater(() => root.regate = false);
+    }
+
+    // Only while a take is running: with no marker there is nothing to keep on
+    // top, and a `hyprctl` every 700ms for nothing is a worse habit than the
+    // bug. `triggeredOnStart` catches the popup that opened a breath before the
+    // recording did.
+    Timer {
+        running: QuickRecord.recording
+        interval: 700
+        repeat: true
+        triggeredOnStart: true
+        onTriggered: if (!overlayProbe.running) overlayProbe.running = true
+    }
+
+    Process {
+        id: overlayProbe
+        command: ["hyprctl", "layers", "-j"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                let data;
+                try {
+                    data = JSON.parse(String(this.text ?? ""));
+                } catch (e) {
+                    return;   // hyprctl missing or mid-restart: try again next tick
+                }
+                // Overlay is level 3, and within it the LAST entry is the one
+                // drawn highest. Both marker surfaces have to be the newest two;
+                // a single one of them buried is the red line gone.
+                const ours = ns => ns === "quickshell:recordingRegion"
+                    || ns === "quickshell:recordingPill";
+                let onTop = false;
+                for (const key in data) {
+                    const list = data[key]?.levels?.["3"] ?? [];
+                    if (list.length === 0)
+                        continue;
+                    onTop = ours(list[list.length - 1]?.namespace ?? "")
+                        && (list.length < 2 || ours(list[list.length - 2]?.namespace ?? ""));
+                }
+                if (!onTop)
+                    root.remapMarker();
+            }
+        }
+    }
 
     component RecordingPillWindow: PanelWindow {
         id: win
 
         readonly property bool show: QuickRecord.recording
         // Kept mapped through the closing animation, then released.
-        visible: root.show || win.hideAnim > 0.001
+        //
+        // `regate` is the one-turn drop that re-raises the box after a popup
+        // maps over it -- see RecordingPill.remapMarker.
+        visible: (root.show || win.hideAnim > 0.001) && !root.regate
         // The screen the recording is ON, not the first one in the list: a
         // region recorded on a second monitor must not have its box and frame
         // drawn on the primary one.

@@ -39,6 +39,13 @@ import Quickshell.Wayland
 Variants {
     model: Quickshell.screens
 
+    // Unmap me for a moment. The recording marker has to be the newest surface
+    // in the overlay layer to stay above the shell's popups (see
+    // RecordingPill.remapMarker: a surface that maps again joins the end of its
+    // layer), and this is how the box and the frame are dropped and put back
+    // together.
+    property bool held: false
+
     PanelWindow {
         id: frame
 
@@ -76,7 +83,7 @@ Variants {
         readonly property color accent: QuickRecord.paused
             ? Appearance.colors.colTertiary : Appearance.colors.colError
 
-        visible: frame.onThisScreen
+        visible: frame.onThisScreen && !held
 
         // A PanelWindow is a WINDOW, not an Item -- it has no `opacity`, so the
         // fade lives on this Item instead. (Assigning `opacity` to the window

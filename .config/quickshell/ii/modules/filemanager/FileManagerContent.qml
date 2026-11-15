@@ -6631,10 +6631,11 @@ Item {
                 // aiming at nothing beside the name put a text field in the
                 // crumbs with the caret in it -- the one corner of the window
                 // where a click to dismiss something started typing instead. The
-                // strip now only dismisses: it closes an open path editor where
-                // it stands (no navigation, nothing half-typed is used) and hands
-                // the keyboard to the list, which is what clicking empty ground
-                // means everywhere else.
+                // strip's LEFT press only dismisses: it closes an open path
+                // editor where it stands (no navigation, nothing half-typed is
+                // used) and hands the keyboard to the list, which is what
+                // clicking empty ground means everywhere else. Its RIGHT press
+                // is the folder's menu, like the empty space in the pane.
                 RowLayout {
                     id: quietTitleRow
                     Layout.fillWidth: true
@@ -6668,13 +6669,31 @@ Item {
                             color: Appearance.colors.colOnLayer0
                             elide: Text.ElideRight
                         }
-                        // Behind the name: empty ground, and it only ever
-                        // unfocuses. Declared first so the name's own press
-                        // (below) sits on top of it.
+                        // Behind the name: the rest of the strip. Declared first
+                        // so the name's own press (below) sits on top of it.
+                        //
+                        // The RIGHT button here is the folder's own menu -- New
+                        // folder, New file, Paste, Select all, sort, view, Open
+                        // in terminal, Properties -- the same menu the empty
+                        // space of the pane opens, because this strip is that
+                        // same folder ground, one row higher (REQUESTED
+                        // 2026-11-15). On this machine a two-finger tap IS a
+                        // right button (clickfinger), so it arrives here as this
+                        // press and needs no gesture handling of its own. The
+                        // left press still only dismisses: the words to the left
+                        // are what opens the path editor.
                         MouseArea {
+                            id: quietTitleGround
                             anchors.fill: parent
                             hoverEnabled: false
-                            onClicked: root.dismissPathEdit()
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                            onClicked: mouse => {
+                                if (mouse.button === Qt.RightButton) {
+                                    root.openFolderMenuAt(quietTitleGround, mouse.x, mouse.y);
+                                    return;
+                                }
+                                root.dismissPathEdit();
+                            }
                         }
                         // The words themselves: the target that edits the path,
                         // exactly as wide as what is painted there.

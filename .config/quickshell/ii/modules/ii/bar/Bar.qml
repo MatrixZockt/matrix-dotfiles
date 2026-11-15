@@ -1671,6 +1671,23 @@ Scope {
                                     && barRoot.probeY > Appearance.sizes.barHeight + 2) {
                                     barRoot.fsShow = false;
                                     fsHideTimer.stop();
+                                    // ...and the HOLD goes too, which is the part
+                                    // that was missing (2026-11-15: "when I
+                                    // click on the fullscreen app again I want
+                                    // it to drop back out, not wait 2s").
+                                    //
+                                    // The reveal is not kept down by `fsShow`
+                                    // any more -- nothing ever sets it true, so
+                                    // it is always false and clearing it there
+                                    // changed nothing. What keeps the bar down
+                                    // is `fsBarAllowedOpen`, whose clock is
+                                    // `fsHoverSince` and the 2s `fsOpenHoldMs`.
+                                    // Spending the press here is the difference
+                                    // between "the bar goes at once when the
+                                    // cursor is below it" and "the bar sits over
+                                    // the game until the hold runs out".
+                                    barRoot.clearFullscreenHover();
+                                    barRoot.clearEdgePress();
                                 }
                                 return;
                             }

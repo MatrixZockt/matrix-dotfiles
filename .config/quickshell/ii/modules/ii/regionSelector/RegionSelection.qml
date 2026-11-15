@@ -1,4 +1,10 @@
 pragma ComponentBehavior: Bound
+// `import qs` for the GlobalStates singleton. Without it the region handed to
+// the live pin (GlobalStates.noteSnipRegion, just before the snip command runs)
+// is a ReferenceError, and that is enough to break the confirm tap: the snip
+// never fired and SUPER+S looked dead. The waffle panel imports it; this file
+// did not.
+import qs
 import qs.modules.common
 import qs.modules.common.utils
 import qs.modules.common.functions

@@ -1,35 +1,58 @@
 #!/bin/bash
 # Freebuff Desktop 0.0.184, running BESIDE the current build.
 #
-# Why this file exists: the current build (0.0.202) is the one the user uses
-# day to day, and they want an older copy next to it to test MCP connectors
-# that sign in with OAuth -- the published MCP docs were written and tested
-# against 0.0.184, and the Connectors/MCP surface has moved around since
-# (see github.com/CodebuffAI/freebuff/issues/1627, which reports 0.0.201
-# shipping the MCP backend with no panel to drive it).
+# Why this file exists: the current build (0.0.202) is the one the user uses day
+# to day, and they want an older copy next to it to test MCP connectors that
+# sign in with OAuth -- the published MCP docs were written and tested against
+# 0.0.184, and the Connectors/MCP surface has moved since (see
+# github.com/CodebuffAI/freebuff/issues/1627, which reports 0.0.201 shipping the
+# MCP backend with no panel to drive it).
 #
-# Two things make the two builds coexist:
+# Every line below that is not a `--flag` was forced by this build failing
+# without it, measured on 2026-11-15. They are in the order they bit.
 #
-#   1. A SEPARATE USER DATA DIRECTORY. Electron keeps its single-instance
-#      lock, its cookies and its window state in userData, so two builds
-#      pointed at the same directory would fight over it: the second launch
-#      would hand its arguments to the first and exit. --user-data-dir moves
-#      the whole lot aside, which is also what keeps the two sign-ins apart.
+# ── 1. A separate profile, in two places ────────────────────────────────
+# Electron keeps its single-instance lock, cookies and window state in
+# userData, so --user-data-dir moves the lot aside. That alone is not enough:
+# the orchestrator (a Bun child) keeps its own state file and a lock beside it,
+# and the running build hands its own FREEBUFF_DESKTOP_STATE_PATH to every shell
+# it starts -- so by the time this file runs, the variable is ALREADY SET to the
+# live profile. Defaulting it (`${VAR:-...}`) kept the real path, the second
+# orchestrator hit the same lock and the window came up and vanished with
 #
-#   2. ITS OWN APPIMAGE PATH, never rewritten. The bundled updater replaces
-#      the file it was started from, so an old build that is left to update
-#      itself would quietly turn into the current one on the next launch.
-#      Keeping the version in the filename makes the version being tested
-#      visible in `ps` and in the window list.
+#     process ... ended (code 75, signal none)
+#
+# in the log. So it is overwritten, never defaulted. `echo
+# $FREEBUFF_DESKTOP_STATE_PATH` in a desktop-started shell answers
+# /home/matrix/.config/freebuff-desktop/state.json, which is the value being
+# replaced here. FREEBUFF_0184_STATE moves it elsewhere on purpose.
+#
+# ── 2. No updater ───────────────────────────────────────────────────────
+# Within a minute of starting, this build offered itself 0.0.202 and tried to
+# download it ([updater] update download failed: net::ERR_FAILED). An update
+# replaces the very file under test, which is the whole thing being pinned. The
+# app's own dev launcher switches the check off with this same variable.
+#
+# ── 3. Software rendering, over XWayland ────────────────────────────────
+# The first launch mapped a window and then died:
+#
+#     GPU process launch failed: error_code=1002        (x9)
+#     FATAL:gpu_data_manager_impl_private.cc GPU process isn't usable. Goodbye.
+#
+# --disable-gpu alone did not stop it (same nine failures, same death); adding
+# --no-sandbox got it up, and over NATIVE WAYLAND it then died again a few
+# minutes later -- "[network service crashed, restarting service]" followed by a
+# graceful shutdown. The same flags over XWayland ran 100 s with zero crash
+# markers, so that is the backend here, matching what ~/.local/bin/freebuff-desktop
+# already documents for the current build (XWayland + software is the path that
+# has worked on this machine; native Wayland + GPU is the one that crashes).
+# FREEBUFF_0184_RENDER=wayland tries the other backend.
 #
 # Not shared: ~/.agents/mcp.json and ~/.freebuff/mcp.json are per-user, not per
 # install, so both builds read the same MCP servers and the same approvals
 # sidecar. That is deliberate here -- comparing the two against one set of
-# connector configs is the point -- but it does mean an approval made in one
-# build is visible to the other.
-#
-# Scale is pinned to the panel's 1.5 like the current build; FREEBUFF_0184_SCALE
-# overrides it for a machine where that trade goes the other way.
+# connector configs is the point -- but an approval made in one build is visible
+# to the other.
 set -u
 
 APP="$HOME/Applications/Freebuff-0.0.184-linux-x86_64.AppImage"
@@ -43,75 +66,65 @@ if [ ! -x "$APP" ]; then
 fi
 
 mkdir -p "$DATA" 2>/dev/null
-
-# Own log, so the two builds do not interleave their words in one file.
 log="$DATA/launch.log"
 
-# SOFTWARE RENDERING, because this build's GPU process does not survive here.
-# Measured on the first launch (2026-11-15): the window mapped, then the app
-# logged
-#     GPU process launch failed: error_code=1002        (x9)
-#     FATAL:gpu_data_manager_impl_private.cc GPU process isn't usable. Goodbye.
-# and exited. That is the same class of failure ~/.local/bin/freebuff-desktop
-# documents for the current build: a GPU process this machine cannot keep alive,
-# after which no flag set rescues it because it is the failure that kills the
-# app, not a slow path inside it. Software compositing is instant and stable,
-# which is what matters for a build whose whole job is testing a connector
-# dialog. FREEBUFF_0184_RENDER=gpu opts back in if this ever starts working.
-#
-# --no-sandbox is part of the same fix and was measured by addition, not by
-# theory: with --disable-gpu alone the new instance still logged the same nine
-# GPU-process launch failures and died the same way; adding --no-sandbox it came
-# up, kept its window and its orchestrator stayed ready. This is a local desktop
-# app reading local files, not a browser of untrusted pages, which is the trade
-# this flag makes.
-#
-# No --enable-features either: on this machine carrying any feature switch on
-# the command line halves the frame rate (measured 2026-11-15, see
-# ~/.local/bin/claude-desktop), and none of them are needed here.
-# The orchestrator, not Electron, is what refuses the second copy: with the
-# current build up it logs
-#
-#     Another Freebuff orchestrator is already using this Desktop state profile.
-#     Stop it, or launch this test with a fresh FREEBUFF_DESKTOP_STATE_PATH.
-#
-# and exits with code 75 -- a window came up and then vanished, which is worse
-# than a launch that never maps because it looks like it worked. A separate
-# --user-data-dir covers Electron's own lock but not this profile, so the state
-# path is moved under the same directory and the two builds stop competing for
-# it. Nothing here touches $HOME/.freebuff, which the running build keeps.
-# ...and the value has to be OVERWRITTEN, not defaulted. The running desktop
-# hands its own FREEBUFF_DESKTOP_STATE_PATH to every shell it starts (that is
-# how an agent shell knows which profile launched it), so by the time this file
-# runs the variable is already set -- to the CURRENT build's profile. A
-# `${VAR:-default}` therefore kept the real path, the second orchestrator hit the
-# same lock, and the window came up and vanished with
-#
-#     process ... ended (code 75, signal none)
-#
-# in the log. Measured 2026-11-15: `echo $FREEBUFF_DESKTOP_STATE_PATH` in a
-# desktop-started shell answers /home/matrix/.config/freebuff-desktop/state.json.
-# FREEBUFF_0184_STATE moves it somewhere else on purpose.
-unset ELECTRON_OZONE_PLATFORM_HINT
-export FREEBUFF_DESKTOP_STATE_PATH="${FREEBUFF_0184_STATE:-$DATA/state/state.json}"
-# No updater. This build offered itself 0.0.202 within a minute of starting and
-# tried to download it (net::ERR_FAILED in the log); an update would replace the
-# very file being tested, which is the whole thing being pinned here. The app's
-# own dev launcher uses this same variable to switch the check off.
 export FREEBUFF_DISABLE_UPDATE_CHECK=1
+export FREEBUFF_DESKTOP_STATE_PATH="${FREEBUFF_0184_STATE:-$DATA/state/state.json}"
 mkdir -p "$(dirname "$FREEBUFF_DESKTOP_STATE_PATH")" 2>/dev/null
-render="${FREEBUFF_0184_RENDER:-soft}"
-if [ "$render" = "gpu" ]; then
+
+# A socket file is not proof of a server: this desk has a stale
+# /tmp/.X11-unix/X0 that answers nothing, and picking it by name produced
+# "Missing X server or $DISPLAY" with no window at all.
+x_display_answers() {
+    [ -S "/tmp/.X11-unix/X${1#:}" ] || return 1
+    DISPLAY="$1" timeout 2 xrandr --current >/dev/null 2>&1
+}
+
+find_x_display() {
+    local n d
+    if [ -n "${DISPLAY:-}" ] && x_display_answers "$DISPLAY"; then
+        printf '%s' "$DISPLAY"; return 0
+    fi
+    for n in 0 1 2 3; do
+        d=":$n"
+        if x_display_answers "$d"; then printf '%s' "$d"; return 0; fi
+    done
+    return 1
+}
+
+# The pointer. An X11 client does not inherit the compositor's XCURSOR_THEME, so
+# without these the cursor changes artwork the moment it enters the window.
+export XCURSOR_THEME=Bibata-Modern-Ice
+export XCURSOR_SIZE="${XCURSOR_SIZE:-24}"
+export XCURSOR_PATH=~/.local/share/cursor-shims:~/.local/share/icons:~/.icons:/usr/share/icons:/usr/share/pixmaps
+
+if [ "${FREEBUFF_0184_RENDER:-x11}" = "wayland" ]; then
+    # DISPLAY must NOT be set here, or Chromium can pick X11 even when told
+    # wayland. Kept as the experiment it is: it crashed on this machine.
+    unset DISPLAY ELECTRON_OZONE_PLATFORM_HINT
     exec "$APP" \
         --user-data-dir="$DATA" \
         --ozone-platform=wayland \
         --force-device-scale-factor="$SCALE" \
-        --enable-gpu-rasterization --ignore-gpu-blocklist \
+        --disable-gpu --no-sandbox \
         "$@" >>"$log" 2>&1
 fi
+
+if ! xdisp=$(find_x_display); then
+    echo "freebuff-desktop-0.0.184: no X display answered; start XWayland or run FREEBUFF_0184_RENDER=wayland $0" >&2
+    exit 1
+fi
+export DISPLAY="$xdisp"
+# An empty XAUTHORITY also means "look in ~/.Xauthority", so only set it when
+# absent -- and this session does not export one.
+if [ -z "${XAUTHORITY:-}" ] && [ -f "$HOME/.Xauthority" ]; then
+    export XAUTHORITY="$HOME/.Xauthority"
+fi
+unset ELECTRON_OZONE_PLATFORM_HINT
+
 exec "$APP" \
     --user-data-dir="$DATA" \
-    --ozone-platform=wayland \
+    --ozone-platform=x11 \
     --force-device-scale-factor="$SCALE" \
     --disable-gpu --no-sandbox \
     "$@" >>"$log" 2>&1

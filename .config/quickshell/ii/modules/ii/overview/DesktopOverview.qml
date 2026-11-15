@@ -667,11 +667,21 @@ Scope {
 
     // Pointer moved while a window is in hand: the card under it is the target.
     //
-    // The "+" slot is NOT one. Dropping an app there would have to invent a
-    // desktop and then move the window onto it -- two actions wearing one
-    // gesture -- and the slot's own click already creates desktops on demand.
-    // The desktop it came from is not a target either: that drop is a no-op,
-    // and a ring that does nothing is a lie about what the drop will do.
+    // THE "+" SLOT IS ONE (REQUESTED 2026-11-15: "when dragging a desktop app
+    // (from the desktops overview page) to a new desktop page, i then want you
+    // to create a new desktop page with that desktop app in it"). It used to be
+    // excluded, on the argument that inventing a desktop and moving a window
+    // onto it is two actions in one gesture. That argument loses to the two
+    // facts around it: the slot's own id -- `desktopOfCell(last cell)`, which is
+    // `desktopCount + 1` -- is already the id of the desktop that does not exist
+    // yet, and the compositor CREATES a workspace when a window is moved to an
+    // id that has none (the same rule `goTo` relies on for a click). So the two
+    // actions are not two: the drop is `window.move` to an id, and creating it
+    // is what that dispatch already does. Nothing here invents a desktop by
+    // hand.
+    //
+    // The desktop it came from is not a target: that drop is a no-op, and a
+    // ring that does nothing is a lie about what the drop will do.
     function trackWindowDrag(px, py) {
         // Nothing in hand, no target: a cancel (Escape) ends the gesture while
         // the pointer may still be travelling with the button down, and a card
@@ -683,7 +693,7 @@ Scope {
         }
         const cell = root.cellAt(px, py);
         let target = -1;
-        if (cell >= 0 && cell !== root.cellCount - 1) {
+        if (cell >= 0) {
             const id = root.desktopOfCell(cell);
             if (id !== root.dragWindowFrom)
                 target = id;
@@ -1194,7 +1204,9 @@ Scope {
                     Text {
                         Layout.fillWidth: true
                         visible: root.dragWindowTo >= 0
-                        text: Translation.tr("Desktop %1").arg(root.dragWindowTo)
+                        text: root.dragWindowTo > root.desktopCount
+                            ? Translation.tr("New desktop %1").arg(root.dragWindowTo)
+                            : Translation.tr("Desktop %1").arg(root.dragWindowTo)
                         color: Appearance.colors.colPrimary
                         font.family: Appearance.font.family.main
                         font.pixelSize: Appearance.font.pixelSize.tiny
@@ -1934,7 +1946,10 @@ Scope {
                             anchors.margins: 1
                             radius: parent.radius - 1
                             color: "transparent"
-                            visible: root.windowDragActive && !card.isNewSlot
+                            // The "+" slot is a target too (see
+                            // trackWindowDrag): dropping there creates the
+                            // desktop whose id it already names.
+                            visible: root.windowDragActive
                                 && card.desktopId !== root.dragWindowFrom
                             border.width: card.desktopId === root.dragWindowTo ? 3 : 1.5
                             border.color: card.desktopId === root.dragWindowTo
@@ -1947,7 +1962,9 @@ Scope {
                             Text {
                                 anchors.centerIn: parent
                                 visible: card.desktopId === root.dragWindowTo
-                                text: Translation.tr("Drop on desktop %1").arg(card.desktopId)
+                                text: card.isNewSlot
+                                    ? Translation.tr("New desktop %1").arg(card.desktopId)
+                                    : Translation.tr("Drop on desktop %1").arg(card.desktopId)
                                 color: Appearance.colors.colPrimary
                                 font.family: Appearance.font.family.title
                                 font.pixelSize: Appearance.font.pixelSize.large
@@ -2306,12 +2323,13 @@ Scope {
                                 // A press on a card IS the drop for a carry no
                                 // release ended: the app was picked up with a
                                 // press and let go of over empty space, so the
-                                // click on a desktop is the placement. A card
-                                // that cannot take it -- the "+" slot, or the
-                                // desktop it came from -- abandons the carry
-                                // rather than promising a move it will not make.
+                                // click on a card is the placement. The "+" slot
+                                // takes it as well and creates the desktop it
+                                // names; only the desktop the window came from
+                                // abandons the carry, rather than promising a
+                                // move it will not make.
                                 if (root.windowDragActive) {
-                                    const dropId = card.isNewSlot ? -1 : root.desktopOfCell(card.index);
+                                    const dropId = root.desktopOfCell(card.index);
                                     if (!root.dropWindowDragOn(dropId))
                                         root.cancelWindowDrag();
                                     root.dragConsumed = true;

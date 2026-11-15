@@ -409,6 +409,47 @@ Scope {
                             }
                         }
                     }
+
+                    // Pin: keep the picture on the desktop as a floating image
+                    // instead of a four-second glance (requested 2026-11-15).
+                    // Same shape as the save button on purpose -- two actions on
+                    // one picture should not look like two different widgets --
+                    // with the pin glyph naming what it does.
+                    //
+                    // The card hands over and leaves: the pin owns its own copy
+                    // of the bytes and its own surface, so a toast that stayed up
+                    // for another four seconds would be a second copy of the
+                    // same picture on a timer.
+                    Item {
+                        id: pinButton
+                        Layout.alignment: Qt.AlignVCenter
+                        visible: root.hasImage
+                        width: 30
+                        height: 30
+                        scale: pinArea.containsMouse ? 1.16 : 1.0
+
+                        Behavior on scale {
+                            NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+                        }
+
+                        MaterialSymbol {
+                            anchors.centerIn: parent
+                            text: "keep"
+                            iconSize: 18
+                            color: pinArea.containsMouse
+                                ? Appearance.colors.colPrimary
+                                : Appearance.colors.colOnSurface
+                            Behavior on color { ColorAnimation { duration: 150 } }
+                        }
+
+                        MouseArea {
+                            id: pinArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: GlobalStates.pinSignalToastImage()
+                        }
+                    }
                 }
 
                 // Freeze on hover: the picture can only be saved from here, so

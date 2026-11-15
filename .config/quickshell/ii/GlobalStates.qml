@@ -2475,9 +2475,124 @@ property bool loadingFailFlash: false
     readonly property string savePortalDir: `${Quickshell.env("XDG_RUNTIME_DIR")}/ii-portal`
     property string pendingSaveToken: ""
 
+    // ── Pinned pictures ─────────────────────────────────────────────────────
+    //
+    // The card's pin keeps a copied picture on the desktop as a floating image
+    // that can be moved, saved, copied and unpinned (REQUESTED 2026-11-15). The
+    // list is the whole registry: PinnedImages.qml makes one surface per entry,
+    // so pinning is an append and unpinning is a filter, and nothing has to
+    // track windows behind the surface's back.
+    //
+    // x/y are only the STARTING position, the cascade a new pin lands on. The
+    // live position belongs to the surface itself: writing it back here would
+    // rebuild this list -- and with it every pinned surface -- for a place on the
+    // screen nobody asked to persist.
+    property var pinnedImages: []
+    // Where a pin's own copy lives. The toast's path is the clipboard service's
+    // decode, which the next copy overwrites and a cleanup deletes -- so a
+    // pinned picture owns its bytes instead of pointing at that.
+    readonly property string pinnedDir: `${Quickshell.env("XDG_RUNTIME_DIR") || "/tmp"}/ii-pinned`
+
+    property string pendingPinKey: ""
+    property string pendingPinPath: ""
+
+    function pinSignalToastImage() {
+        const src = String(root.signalToastImage ?? "");
+        if (src.length === 0)
+            return;
+        const key = `pin-${Date.now()}`;
+        const path = `${root.pinnedDir}/${key}.png`;
+        root.pendingPinKey = key;
+        root.pendingPinPath = path;
+        // The copy comes first and the surface second: a pinned picture whose
+        // file had not landed yet would be a surface holding a load error, and
+        // Image loads once. The exit handler adds the entry.
+        pinCopyProcess.command = ["bash", "-c",
+            'mkdir -p -- "$1" && cp -f -- "$2" "$3"', "_",
+            root.pinnedDir, src, path];
+        pinCopyProcess.running = true;
+    }
+
+    Process {
+        id: pinCopyProcess
+        stderr: StdioCollector { id: pinCopyErr }
+        onExited: (exitCode) => {
+            const key = root.pendingPinKey;
+            const path = root.pendingPinPath;
+            root.pendingPinKey = "";
+            root.pendingPinPath = "";
+            if (exitCode !== 0 || key.length === 0) {
+                console.warn("[signalToast] could not pin the picture:", exitCode, pinCopyErr.text);
+                root.showSignalToast(Translation.tr("Could not pin"), "error", 2000);
+                return;
+            }
+            // Cascade, so two pins do not land exactly on top of each other.
+            const n = root.pinnedImages.length;
+            root.pinnedImages = [...root.pinnedImages, {
+                key: key,
+                path: path,
+                x: 160 + (n % 6) * 28,
+                y: 120 + (n % 6) * 28,
+            }];
+            root.hideSignalToast();
+        }
+    }
+
+    function unpinImage(key) {
+        const entry = root.pinnedImages.find(e => e.key === key);
+        if (!entry)
+            return;
+        root.pinnedImages = root.pinnedImages.filter(e => e.key !== key);
+        Quickshell.execDetached(["bash", "-c", 'rm -f -- "$1"', "_", entry.path]);
+    }
+
+    function copyPinnedImage(key) {
+        const entry = root.pinnedImages.find(e => e.key === key);
+        if (!entry)
+            return;
+        copyPinnedProcess.command = ["bash", "-c", 'wl-copy --type image/png < "$1"', "_", entry.path];
+        copyPinnedProcess.running = true;
+    }
+
+    Process {
+        id: copyPinnedProcess
+        onExited: (exitCode) => {
+            if (exitCode !== 0) {
+                root.showSignalToast(Translation.tr("Could not copy"), "error", 2000);
+                return;
+            }
+            root.showSignalToast(Translation.tr("Copied"), "content_copy", 1400);
+        }
+    }
+
+    // Save a PINNED picture: the same dialog as the card's, but the source is the
+    // pin's own copy and the clipboard is not consulted -- the whole point of a
+    // pin is that it outlives the copy it came from.
+    function savePinnedImage(key) {
+        const entry = root.pinnedImages.find(e => e.key === key);
+        if (!entry)
+            return;
+        root.saveFromClipboard = false;
+        root.saveSourcePath = entry.path;
+        root.openSaveDialog();
+    }
+
+    // The source a save is about, and whether the clipboard may answer it
+    // instead. The card's save asks the clipboard first (a later copy replaces
+    // the decode, and what was on screen is what should be kept); a pin's never
+    // does.
+    property string saveSourcePath: ""
+    property bool saveFromClipboard: false
+
     function saveSignalToastImage() {
         if (root.signalToastImage.length === 0)
             return;
+        root.saveFromClipboard = true;
+        root.saveSourcePath = root.signalToastImage;
+        root.openSaveDialog();
+    }
+
+    function openSaveDialog() {
         const token = `signaltoast-${Date.now()}`;
         root.pendingSaveToken = token;
         const job = JSON.stringify({
@@ -2509,7 +2624,8 @@ property bool loadingFailFlash: false
     function saveImageTo(target) {
         if (!target || target.length === 0)
             return;
-        saveImageProcess.source = root.signalToastImage;
+        saveImageProcess.source = root.saveSourcePath;
+        saveImageProcess.fromClipboard = root.saveFromClipboard;
         saveImageProcess.target = target;
         saveImageProcess.running = true;
     }
@@ -2565,6 +2681,10 @@ property bool loadingFailFlash: false
         id: saveImageProcess
         property string source: ""
         property string target: ""
+        // Whether the clipboard is allowed to answer for the source. True for
+        // the toast (its decode can be stale), false for a pinned picture (its
+        // file IS the truth, and the clipboard has moved on by definition).
+        property bool fromClipboard: false
         // The clipboard is the truth, not the decoded preview. The preview is a
         // temp file that a later copy can replace, so `cp` from it could keep an
         // image nobody was looking at; wl-paste asks for the picture that is
@@ -2572,9 +2692,9 @@ property bool loadingFailFlash: false
         // clipboard no longer holds an image (the card outlives a copy).
         command: ["bash", "-c",
             'mkdir -p "$(dirname -- "$3")" || exit 1; '
-            + 'if wl-paste --type image/png > "$3" 2>/dev/null && [ -s "$3" ]; then exit 0; fi; '
+            + '[ "$4" = "1" ] && wl-paste --type image/png > "$3" 2>/dev/null && [ -s "$3" ] && exit 0; '
             + 'cp -f -- "$2" "$3"',
-            "_", "", source, target]
+            "_", "", source, target, fromClipboard ? "1" : "0"]
         // Kept so a failure says WHY in the shell log instead of only telling the
         // user it did not work.
         stderr: StdioCollector { id: saveErr }

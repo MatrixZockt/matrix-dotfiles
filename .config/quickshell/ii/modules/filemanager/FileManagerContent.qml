@@ -7639,7 +7639,15 @@ Item {
                                 // So the press is tested against the label's own
                                 // painted text: past the end of the name (by 4 px,
                                 // so the last glyph still belongs to it) and still
-                                // inside the cell is the folder's. A name cut by the
+                                // inside the cell is the folder's.
+                                //
+                                // That test is the RIGHT button's only (2026-11-15).
+                                // The left button no longer consults it: a
+                                // double-click in the tail opened the folder's menu,
+                                // which read as "double-clicking a folder does
+                                // nothing but open a right-click menu", so the
+                                // double-click now opens the row it landed on, the
+                                // same everywhere in the row. A name cut by the
                                 // column (elided) has no tail -- the text runs to
                                 // the wall -- so `min(contentWidth, width)` makes
                                 // the range empty and the whole cell stays the
@@ -7756,18 +7764,27 @@ Item {
                                     }
                                     // The double-click contract, in one place: the
                                     // window opens, the picker only selects.
+                                    //
+                                    // A double-click NEVER opens a menu -- not even
+                                    // in the blank tail (REQUESTED 2026-11-15:
+                                    // "double tapping on a folder in the file
+                                    // manager, it acts as a right click ... it
+                                    // doesn't open a folder"). It used to, on the
+                                    // theory that the strip is folder ground and
+                                    // the folder's menu is what folder ground
+                                    // answers. What that actually did: the name
+                                    // cell is 334 px and "Documents" ends 114 px
+                                    // into it (probeNameBlank, 2026-11-15), so four
+                                    // fifths of a short name's row opened New
+                                    // folder / Rename instead of the folder. Two
+                                    // clicks in the same spot are one gesture in
+                                    // every file manager there is, and that gesture
+                                    // is "open this". The strip keeps the FOLDER's
+                                    // menu on the RIGHT button, which is what the
+                                    // blank-tail work was for; the left button is
+                                    // the row's, everywhere in the row.
                                     onDoubleClicked: mouse => {
                                         if (mouse.button !== Qt.LeftButton) return;
-                                        // Double-tapping that same background opens
-                                        // the folder's menu where the pointer is, so
-                                        // adding a file or a folder needs no aim at
-                                        // the command bar. Same menu as the
-                                        // right-click above, by design: the strip is
-                                        // the folder, and both gestures say so.
-                                        if (rowRoot.inNameBlank(mouse.x)) {
-                                            root.openFolderMenuAt(rowHover, mouse.x, mouse.y);
-                                            return;
-                                        }
                                         root.activate(index);
                                     }
                                 }

@@ -53,6 +53,27 @@ Scope {
     readonly property var liveScreen: Quickshell.screens.find(
         s => s.name === String(modelData?.screen ?? "")) ?? targetScreen
 
+    // The part of that monitor the snip covered, when the selector recorded one.
+    // The capture itself always takes the whole monitor -- it has no crop of its
+    // own -- so the crop is geometry here: the view is drawn bigger than the card
+    // and offset so that this rectangle is what the card shows.
+    readonly property var liveRegion: modelData?.region ?? null
+
+    // The desktop the pin belongs to. A pin is of THAT desktop, so it does not
+    // follow you to another one: while its desktop is not on screen the feed is
+    // held at the last frame, and it resumes the moment you come back.
+    readonly property int liveWorkspace: modelData?.workspace ?? -1
+    readonly property bool onItsDesktop: {
+        if (liveWorkspace < 0)
+            return true;
+        const monitor = Hyprland.monitorFor(root.liveScreen);
+        return (monitor?.activeWorkspace?.id ?? -1) === liveWorkspace;
+    }
+
+    readonly property real liveAspect: liveRegion
+        ? (Math.max(1, liveRegion.h) / Math.max(1, liveRegion.w))
+        : ((liveScreen?.height ?? 9) / Math.max(1, liveScreen?.width ?? 16))
+
     // Where the picture sits, in screen pixels from the top-left corner. Seeded
     // from the entry and updated while dragging; it lives here rather than in
     // the registry because writing the list back on every release would rebuild
@@ -191,22 +212,40 @@ Scope {
                 id: livePanel
                 visible: root.isLive
                 // Kept below the image cap: a mirror at nearly half the screen
-                // would cover the desktop it is showing.
+                // would cover the desktop it is showing. Height follows the
+                // snipped region's shape, so a wide strip stays a wide strip.
                 width: Math.min(root.maxWidth, 520)
-                height: width * ((root.liveScreen?.height ?? 9) / Math.max(1, root.liveScreen?.width ?? 16))
+                height: width * root.liveAspect
                 radius: Appearance.rounding.small
                 color: Qt.rgba(0, 0, 0, 0.6)
                 border.width: 1
                 border.color: Appearance.colors.colOutlineVariant
                 clip: true
 
-                ScreencopyView {
-                    id: liveView
+                Item {
+                    id: liveClip
                     anchors.fill: parent
                     anchors.margins: 1
-                    captureSource: root.isLive ? root.liveScreen : null
-                    live: true
-                    paintCursor: false
+                    clip: true
+
+                    // How much the monitor is blown up so that the pin's region
+                    // fills the card. With no region recorded this is simply
+                    // "fit the monitor", which is the whole-desktop pin.
+                    readonly property real zoom: root.liveRegion
+                        ? (width / Math.max(1, root.liveRegion.w))
+                        : (width / Math.max(1, root.liveScreen?.width ?? 16))
+
+                    ScreencopyView {
+                        id: liveView
+                        captureSource: root.isLive ? root.liveScreen : null
+                        live: root.onItsDesktop
+                        paintCursor: false
+                        constraintSize: Qt.size(
+                            Math.round((root.liveScreen?.width ?? 16) * liveClip.zoom),
+                            Math.round((root.liveScreen?.height ?? 9) * liveClip.zoom))
+                        x: root.liveRegion ? -root.liveRegion.x * liveClip.zoom : 0
+                        y: root.liveRegion ? -root.liveRegion.y * liveClip.zoom : 0
+                    }
                 }
 
                 // Until the compositor delivers its first frame there is nothing
@@ -245,7 +284,10 @@ Scope {
                         }
 
                         StyledText {
-                            text: Translation.tr("Live")
+                            // "Held", not "Live", while its desktop is off screen:
+                            // the card is showing the last frame of that desktop
+                            // rather than pretending to be a live view of this one.
+                            text: root.onItsDesktop ? Translation.tr("Live") : Translation.tr("Held")
                             font.pixelSize: Appearance.font.pixelSize.smaller
                             color: "white"
                         }

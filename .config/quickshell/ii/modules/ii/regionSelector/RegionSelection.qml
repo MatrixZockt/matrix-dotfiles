@@ -344,6 +344,10 @@ PanelWindow {
             screenshotAction, //
             screenshotDir
         )
+        // The live pin mirrors a region, and this is the only surface that knows
+        // which one: hand the rectangle over as the picture leaves.
+        GlobalStates.noteSnipRegion(root.screen?.name, root.regionX, root.regionY,
+            root.regionWidth, root.regionHeight);
         Quickshell.execDetached(command);
         root.dismiss();
     }

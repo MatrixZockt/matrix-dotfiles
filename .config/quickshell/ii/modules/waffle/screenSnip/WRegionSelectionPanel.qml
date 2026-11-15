@@ -169,6 +169,11 @@ PanelWindow {
                 , root.screenshotPath //
                 , screenshotAction //
                 , screenshotDir); // yo wtf is this formatting qmlls do be funnie
+                // The live pin mirrors a region, and this is the only surface
+                // that knows which one: hand the rectangle over as the picture
+                // leaves.
+                GlobalStates.noteSnipRegion(root.screen?.name, dragArea.selectionX,
+                    dragArea.selectionY, dragArea.selectionWidth, dragArea.selectionHeight);
                 snipProc.command = command;
 
                 // Image post-processing

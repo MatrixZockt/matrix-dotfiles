@@ -2564,18 +2564,82 @@ property bool loadingFailFlash: false
     // The monitor, not the workspace: a workspace that is not on screen is not
     // rendered by the compositor at all, so there is nothing to mirror. What the
     // card shows is that output, whatever is on it at the moment.
+    // The rectangle the last snip covered, in that monitor's own logical pixels.
+    //
+    // Nothing on the clipboard carries geometry, so "the part of the screen I
+    // snipped" has to come from the surface that did the snipping: the region
+    // selector hands the rectangle over as it takes the picture (see
+    // noteSnipRegion, called from both selector panels).
+    //
+    // `at` is what keeps it honest: a rectangle minutes old belongs to a picture
+    // that is no longer the one on the clipboard, and a live pin made then would
+    // mirror the wrong part of the screen.
+    property var lastSnipRegion: null
+    readonly property int snipRegionFreshMs: 15000
+
+    function noteSnipRegion(screenName, x, y, w, h) {
+        if (!(w > 0) || !(h > 0))
+            return;
+        root.lastSnipRegion = {
+            screen: String(screenName ?? ""),
+            x: Math.round(x),
+            y: Math.round(y),
+            w: Math.round(w),
+            h: Math.round(h),
+            workspace: Hyprland.focusedMonitor?.activeWorkspace?.id ?? -1,
+            at: Date.now(),
+        };
+    }
+
     function pinLiveDesktop() {
-        const screenName = String(Hyprland.focusedMonitor?.name ?? "");
+        const focusedName = String(Hyprland.focusedMonitor?.name ?? "");
+        const snip = root.lastSnipRegion;
+        const fresh = snip !== null && (Date.now() - Number(snip.at ?? 0)) < root.snipRegionFreshMs;
+        const region = fresh
+            ? { x: snip.x, y: snip.y, w: snip.w, h: snip.h }
+            : null;
+        const screenName = fresh && String(snip.screen ?? "").length > 0
+            ? String(snip.screen)
+            : focusedName;
         if (screenName.length === 0)
             return;
+        // Start the card on the FAR side of the screen from its own region. A
+        // mirror that opens on top of what it is mirroring shows itself inside
+        // itself, and one frame of that is baked into the picture for as long as
+        // the pin exists.
+        const monitor = Hyprland.focusedMonitor;
+        const screenW = Math.max(320, monitor?.width ?? 1707);
+        const screenH = Math.max(240, monitor?.height ?? 1067);
+        const cardW = Math.min(screenW * 0.35, 520);
+        const cardH = cardW * (region
+            ? (Math.max(1, region.h) / Math.max(1, region.w))
+            : (screenH / screenW));
+        const marginX = Math.round(screenW * 0.02);
+        const marginY = Math.round(screenH * 0.03);
+        let placeX = 160;
+        let placeY = 120;
+        if (region) {
+            const centreX = region.x + region.w / 2;
+            const centreY = region.y + region.h / 2;
+            placeX = centreX > screenW / 2 ? marginX : Math.round(screenW - cardW - marginX);
+            placeY = centreY > screenH / 2 ? marginY : Math.round(screenH - cardH - marginY * 2);
+        }
+        placeX = Math.max(0, Math.min(placeX, Math.round(screenW - cardW)));
+        placeY = Math.max(0, Math.min(placeY, Math.round(screenH - cardH)));
+
         const n = root.pinnedImages.length;
         root.pinnedImages = [...root.pinnedImages, {
             key: `pin-${Date.now()}`,
             kind: "live",
             screen: screenName,
+            // The window the pin belongs to: what the card shows is ITS desktop,
+            // so a switch to another one leaves it where it was (see the live
+            // card's `onItsDesktop`).
+            workspace: fresh ? snip.workspace : (Hyprland.focusedMonitor?.activeWorkspace?.id ?? -1),
+            region: region,
             path: "",
-            x: 160 + (n % 6) * 28,
-            y: 120 + (n % 6) * 28,
+            x: placeX + (n % 6) * 20,
+            y: placeY + (n % 6) * 20,
         }];
         root.hideSignalToast();
     }

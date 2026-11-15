@@ -30,6 +30,10 @@ Item { // Notification item area
         return body.startsWith("/") ? body : "";
     }
 
+    // A recording gets a copy instead of a save: see
+    // GlobalStates.copyNoticeFile for why nothing is written to disk for those.
+    readonly property bool saveableIsVideo: GlobalStates.isVideoPath(root.saveablePath)
+
     // The row was clicked with the primary button. The group that owns the
     // expansion state listens for this; the row cannot expand itself, because
     // `expanded` is a binding on it.
@@ -400,7 +404,8 @@ Item { // Notification item area
                     // around.
                     visible: !root.popup && !root.expanded
 
-                    // Save the file this notice names.
+                    // Save the file this notice names -- or, for a recording,
+                    // copy it.
                     //
                     // Sits beside the × at the right end of the row, so a copy or
                     // a recording that was missed can still be kept from the panel
@@ -410,6 +415,7 @@ Item { // Notification item area
                         Layout.preferredHeight: root.actionSize
                         Layout.alignment: Qt.AlignVCenter
                         visible: root.saveablePath.length > 0
+                        enabled: root.saveableIsVideo || !GlobalStates.saveBusy
 
                         Rectangle {
                             anchors.fill: parent
@@ -427,11 +433,26 @@ Item { // Notification item area
 
                         MaterialSymbol {
                             anchors.centerIn: parent
-                            text: "download"
+                            // The wait has to look like a wait. A still glyph with
+                            // no answer for the second the picker takes to open
+                            // reads as "the press did nothing" and invites
+                            // another one, so the icon becomes a spinner until
+                            // the save is written or given up on.
+                            text: root.saveableIsVideo
+                                ? "content_copy"
+                                : (GlobalStates.saveBusy ? "progress_activity" : "download")
                             iconSize: root.actionIconSize
                             color: saveHover.containsMouse
                                 ? Appearance.colors.colPrimary
                                 : Appearance.m3colors.m3outline
+
+                            RotationAnimation on rotation {
+                                running: GlobalStates.saveBusy && !root.saveableIsVideo
+                                loops: Animation.Infinite
+                                from: 0
+                                to: 360
+                                duration: 900
+                            }
                         }
 
                         // Hover only, like the ×: the tap is the handler's.
@@ -446,7 +467,13 @@ Item { // Notification item area
                         }
 
                         TapHandler {
-                            onTapped: GlobalStates.saveFileFromNotification(root.saveablePath)
+                            // Belt and braces with the guard inside
+                            // openSaveDialog: no second dialog from a repeated
+                            // press, however fast the presses arrive.
+                            enabled: root.saveableIsVideo || !GlobalStates.saveBusy
+                            onTapped: root.saveableIsVideo
+                                ? GlobalStates.copyNoticeFile(root.saveablePath)
+                                : GlobalStates.saveFileFromNotification(root.saveablePath)
                         }
                     }
 

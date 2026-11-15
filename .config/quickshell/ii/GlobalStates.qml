@@ -2474,6 +2474,9 @@ property bool loadingFailFlash: false
     // dialog closes.
     readonly property string savePortalDir: `${Quickshell.env("XDG_RUNTIME_DIR")}/ii-portal`
     property string pendingSaveToken: ""
+    // True from the moment a save dialog is opened until its answer is used or
+    // given up on -- what the notification panel's Save button spins on.
+    property bool saveBusy: false
 
     // ── Pinned pictures ─────────────────────────────────────────────────────
     //
@@ -2772,6 +2775,15 @@ property bool loadingFailFlash: false
     }
 
     function openSaveDialog() {
+        // One save at a time. A second tap while a picker is still open would
+        // write a second job file and wait on a second answer -- and the answer
+        // belongs to whichever token was written last, so the first dialog's
+        // file would land under the name of the second. The button shows a
+        // spinner from the tap until the file is written; this is the same fact
+        // enforced in the one place both callers pass through.
+        if (root.saveBusy)
+            return;
+        root.saveBusy = true;
         const token = `signaltoast-${Date.now()}`;
         root.pendingSaveToken = token;
         // The name follows the SOURCE: a copied picture is a screenshot, a
@@ -2840,6 +2852,36 @@ property bool loadingFailFlash: false
         id: notifySaveableProc
     }
 
+    // ── A recording is copied, not saved ─────────────────────────────────────
+    //
+    // Asked for plainly (2026-11-15: "dont save the videos by default only copy
+    // them"). Starting a save on a clip scattered named copies of the same mp4
+    // into ~/Videos every time the button was pressed, for a file the recorder
+    // had already put on the clipboard -- so the panel's button on a recording
+    // now does the copy itself and writes nothing anywhere. What it leaves on the
+    // selection is a file-manager copy (clip-file.py: gnome-copied-files plus the
+    // uri-list, the same handover the recorder ends with), so it pastes into a
+    // chat or a folder like any copied file.
+    readonly property var videoExtensions: ["mp4", "mkv", "webm", "mov", "gif"]
+
+    function isVideoPath(path) {
+        const match = String(path ?? "").toLowerCase().match(/\.([a-z0-9]{1,5})$/);
+        return !!match && root.videoExtensions.includes(match[1]);
+    }
+
+    function copyNoticeFile(path) {
+        const p = String(path ?? "");
+        if (p.length === 0 || !root.isVideoPath(p))
+            return;
+        // No --transient: that option makes the helper delete the file when the
+        // selection is dropped, and this file is a clip the recorder still owns
+        // (it prunes its own cache). A copy must not be what deletes it.
+        Quickshell.execDetached(["bash", "-c",
+            'setsid python3 "$1" "$2" >/dev/null 2>&1 </dev/null &',
+            "_", `${Directories.scriptPath}/videos/clip-file.py`, p]);
+        root.showSignalToast(Translation.tr("Copied"), "content_copy", 1400);
+    }
+
     // The panel's Save button: the same dialog the card uses, pointed at the file
     // the notification names.
     function saveFileFromNotification(path) {
@@ -2866,8 +2908,12 @@ property bool loadingFailFlash: false
 
     Process {
         id: saveResultWatch
+        // The watcher gives up after ten minutes; the button has to stop
+        // spinning whether or not anybody answered.
+        onExited: (exitCode, exitStatus) => { root.saveBusy = false; }
         stdout: StdioCollector {
             onStreamFinished: {
+                root.saveBusy = false;
                 const raw = String(this.text ?? "").trim();
                 const token = root.pendingSaveToken;
                 if (token.length === 0)

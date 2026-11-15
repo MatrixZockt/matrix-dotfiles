@@ -230,6 +230,10 @@ Singleton {
                     : Translation.tr("Saved") + " · " + name
                         + (copied ? " · " + Translation.tr("copied") : "");
                 GlobalStates.showSignalToast(label, "videocam", 2600);
+                // And the same notice where it can still be acted on: the panel
+                // keeps the clip's path, so a recording whose toast was missed can
+                // be saved from there instead of being hunted for in the cache.
+                GlobalStates.notifySaveable(label, p);
             }
         }
         onExited: (exitCode, exitStatus) => {

@@ -14,6 +14,22 @@ Item { // Notification item area
     property var notificationObject
     property bool expanded: false
 
+    // The file this notice is about, when it is one of the shell's own saveable
+    // notices: the daemon sends those with the app name `saveableAppName` and
+    // the path as the body (see GlobalStates.notifySaveable). Read from the body
+    // rather than from an app-supplied action on purpose -- the panel restores
+    // its history with the action list dropped, so an action would be a Save
+    // button that only exists until the next reload.
+    readonly property string saveablePath: {
+        const n = root.notificationObject;
+        if (!n)
+            return "";
+        if (String(n.appName ?? "") !== GlobalStates.saveableAppName)
+            return "";
+        const body = String(n.body ?? "").trim();
+        return body.startsWith("/") ? body : "";
+    }
+
     // The row was clicked with the primary button. The group that owns the
     // expansion state listens for this; the row cannot expand itself, because
     // `expanded` is a binding on it.
@@ -383,6 +399,56 @@ Item { // Notification item area
                     // an email, is the worst possible thing to leave lying
                     // around.
                     visible: !root.popup && !root.expanded
+
+                    // Save the file this notice names.
+                    //
+                    // Sits beside the × at the right end of the row, so a copy or
+                    // a recording that was missed can still be kept from the panel
+                    // long after its corner card went away.
+                    Item {
+                        Layout.preferredWidth: root.actionSize
+                        Layout.preferredHeight: root.actionSize
+                        Layout.alignment: Qt.AlignVCenter
+                        visible: root.saveablePath.length > 0
+
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: Appearance.rounding.small
+                            color: Appearance.colors.colPrimary
+                            opacity: saveHover.containsMouse ? 0.14 : 0
+
+                            Behavior on opacity {
+                                NumberAnimation {
+                                    duration: root.hoverDuration
+                                    easing.type: root.hoverCurve
+                                }
+                            }
+                        }
+
+                        MaterialSymbol {
+                            anchors.centerIn: parent
+                            text: "download"
+                            iconSize: root.actionIconSize
+                            color: saveHover.containsMouse
+                                ? Appearance.colors.colPrimary
+                                : Appearance.m3colors.m3outline
+                        }
+
+                        // Hover only, like the ×: the tap is the handler's.
+                        MouseArea {
+                            id: saveHover
+                            anchors.centerIn: parent
+                            width: root.actionHitSize
+                            height: root.actionHitSize
+                            hoverEnabled: true
+                            acceptedButtons: Qt.NoButton
+                            propagateComposedEvents: true
+                        }
+
+                        TapHandler {
+                            onTapped: GlobalStates.saveFileFromNotification(root.saveablePath)
+                        }
+                    }
 
                     // Dismiss this one notification.
                     //

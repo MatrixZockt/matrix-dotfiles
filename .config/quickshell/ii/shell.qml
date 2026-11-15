@@ -54,13 +54,6 @@ ShellRoot {
     // the only chance to rescue one that never reached a text box.
     TranscriptCard {}
 
-    // Pinned pictures: a screenshot pinned from the clipboard's "Image copied"
-    // card becomes a floating image above the windows -- movable, saving and
-    // copying from its right-click menu, unpinned from its own corner button.
-    // Family-independent, like the cards above: it belongs to the desktop, not to
-    // a panel.
-    PinnedImages {}
-
     // The fullscreen dictation tell: a small pill that drops out of the top edge
     // while a dictation is live and a fullscreen window covers the screen. The
     // bar's dictation pill sits in the bar, which a fullscreen app does not show,
@@ -756,4 +749,17 @@ ShellRoot {
         // arrived, which the shell timestamps from the event stream itself.
         // One fact, read from the source, beats two reads that can disagree.
     }
+
+    // Pinned pictures: a screenshot (or a live mirror) kept on the desktop as a
+    // floating card -- movable, saving and copying from its right-click menu,
+    // unpinned from its own corner button. Family-independent: it belongs to the
+    // desktop, not to a panel.
+    //
+    // DECLARED LAST, and that is load-bearing. Layer-shell surfaces stack in the
+    // order they are created, so a card that must sit in front of the bar, the
+    // sidebars, the notification popup and the recording pill has to be built
+    // after every one of them. Declared up with the other overlays, each pin sat
+    // underneath every surface created later -- which is what "not in front of
+    // all apps and popups" was.
+    PinnedImages {}
 }

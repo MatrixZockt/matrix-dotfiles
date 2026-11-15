@@ -848,8 +848,16 @@ Singleton {
 			if (!newNotifObject.isTransient && !newNotifObject.isSignal)
 				root.archive(newNotifObject);
 
+            // ── Our own saveable notices skip the popup ────────────────
+            //
+            // A copied picture and a finished recording already speak through the
+            // top-right card; a second popup in the corner for the same event is
+            // noise. What the panel adds is the part the card cannot: it keeps the
+            // notice, and the file's path with it, so it can still be saved later.
+            const saveable = String(notification.appName ?? "") === GlobalStates.saveableAppName;
+
             // Popup
-            if (!root.popupInhibited) {
+            if (!root.popupInhibited && !saveable) {
                 newNotifObject.popup = true;
                 // ALWAYS armed, where this used to be skipped entirely for
                 // `expireTimeout: 0`. Skipping it is what let a "never

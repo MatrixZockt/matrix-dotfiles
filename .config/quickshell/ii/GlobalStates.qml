@@ -2774,12 +2774,20 @@ property bool loadingFailFlash: false
     function openSaveDialog() {
         const token = `signaltoast-${Date.now()}`;
         root.pendingSaveToken = token;
+        // The name follows the SOURCE: a copied picture is a screenshot, a
+        // recording is a clip, and asking to save a video as `.png` would write a
+        // file that opens as nothing.
+        const source = String(root.saveSourcePath ?? "");
+        const extMatch = source.match(/\.([A-Za-z0-9]{1,5})$/);
+        const ext = extMatch ? extMatch[1].toLowerCase() : "png";
+        const isVideo = ["mp4", "mkv", "webm", "mov", "gif"].includes(ext);
         const job = JSON.stringify({
             token: token,
             op: "save",
-            title: Translation.tr("Save picture"),
-            dir: root.screenshotsDir,
-            name: `screenshot-${Qt.formatDateTime(new Date(), "yyyy-MM-dd_HH.mm.ss")}.png`,
+            title: isVideo ? Translation.tr("Save recording") : Translation.tr("Save picture"),
+            dir: isVideo ? String(Directories.videos ?? root.screenshotsDir).replace(/^file:\/\//, "")
+                         : root.screenshotsDir,
+            name: `${isVideo ? "recording" : "screenshot"}-${Qt.formatDateTime(new Date(), "yyyy-MM-dd_HH.mm.ss")}.${ext}`,
             directory: false,
             multiple: false,
         });
@@ -2798,6 +2806,49 @@ property bool loadingFailFlash: false
             'for _ in $(seq 1 3000); do if [ -f "$1" ]; then cat "$1"; exit 0; fi; sleep 0.2; done; exit 1',
             "_", `${root.savePortalDir}/${token}.result.json`];
         saveResultWatch.running = true;
+    }
+
+    // ── Notifications you can still act on ───────────────────────────────────
+    //
+    // The cards over the desktop last a few seconds. The notification panel keeps
+    // what it is given, so the same event is sent there too -- same title, and the
+    // FILE PATH as the body. The path is the whole point: the panel's Save button
+    // reads it back out of the archived notification, which is why it survives a
+    // reload (the panel drops app-supplied actions when it restores its history,
+    // and a notification with no way to reach the file would be a dead card).
+    //
+    // One app name marks them, so the panel knows which cards get that button and
+    // the daemon can keep them out of the popup corner, where the toast already
+    // said the same thing.
+    readonly property string saveableAppName: "ii"
+
+    function notifySaveable(title, path) {
+        const p = String(path ?? "");
+        if (p.length === 0)
+            return;
+        notifySaveableProc.command = ["gdbus", "call", "--session",
+            "--dest", "org.freedesktop.Notifications",
+            "--object-path", "/org/freedesktop/Notifications",
+            "--method", "org.freedesktop.Notifications.Notify",
+            root.saveableAppName, "0", "", String(title ?? ""), p,
+            "[]", "{}", "6000"];
+        notifySaveableProc.running = false;
+        notifySaveableProc.running = true;
+    }
+
+    Process {
+        id: notifySaveableProc
+    }
+
+    // The panel's Save button: the same dialog the card uses, pointed at the file
+    // the notification names.
+    function saveFileFromNotification(path) {
+        const p = String(path ?? "");
+        if (p.length === 0)
+            return;
+        root.saveFromClipboard = false;
+        root.saveSourcePath = p;
+        root.openSaveDialog();
     }
 
     function saveImageTo(target) {

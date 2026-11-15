@@ -576,7 +576,11 @@ Singleton {
                 GlobalStates.showSignalToast(label, "image", 1200);
                 return;
             }
-            GlobalStates.showSignalToast(label, "image", root.copyToastImageMs, toastImageProc.dest);
+                          GlobalStates.showSignalToast(label, "image", root.copyToastImageMs, toastImageProc.dest);
+              // The card is gone in four seconds; the notification panel keeps the
+              // same notice, with the decoded picture's path in it, so a copy that
+              // was missed can still be saved from there.
+              GlobalStates.notifySaveable(label, toastImageProc.dest);
         }
     }
 

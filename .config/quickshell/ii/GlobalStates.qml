@@ -2554,6 +2554,32 @@ property bool loadingFailFlash: false
     // pinned surface on each copy.
     property string liveClipboardText: ""
 
+    // ── Live desktop pins ───────────────────────────────────────────────────
+    //
+    // A pin can also be a live mirror of the monitor instead of a frozen
+    // picture: ScreencopyView, the same capture the dock's window previews and
+    // the overview use, with `live` on. That is a compositor feed, not a
+    // snapshot loop -- no process, no temp files, no CPU spent on encoding.
+    //
+    // The monitor, not the workspace: a workspace that is not on screen is not
+    // rendered by the compositor at all, so there is nothing to mirror. What the
+    // card shows is that output, whatever is on it at the moment.
+    function pinLiveDesktop() {
+        const screenName = String(Hyprland.focusedMonitor?.name ?? "");
+        if (screenName.length === 0)
+            return;
+        const n = root.pinnedImages.length;
+        root.pinnedImages = [...root.pinnedImages, {
+            key: `pin-${Date.now()}`,
+            kind: "live",
+            screen: screenName,
+            path: "",
+            x: 160 + (n % 6) * 28,
+            y: 120 + (n % 6) * 28,
+        }];
+        root.hideSignalToast();
+    }
+
     // Whether the pending read of the clipboard should also create a card.
     property bool pendingLivePin: false
 

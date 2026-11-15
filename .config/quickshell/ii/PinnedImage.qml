@@ -45,6 +45,14 @@ Scope {
     readonly property bool isText: (modelData?.kind ?? "image") === "text"
     readonly property string cardText: isText ? GlobalStates.liveClipboardText : ""
 
+    // A live pin mirrors a monitor through the compositor's own capture path.
+    // The screen is stored by NAME rather than as an object: Hyprland rebuilds
+    // its monitor objects on any display change, and an object would go stale and
+    // blank the card.
+    readonly property bool isLive: (modelData?.kind ?? "image") === "live"
+    readonly property var liveScreen: Quickshell.screens.find(
+        s => s.name === String(modelData?.screen ?? "")) ?? targetScreen
+
     // Where the picture sits, in screen pixels from the top-left corner. Seeded
     // from the entry and updated while dragging; it lives here rather than in
     // the registry because writing the list back on every release would rebuild
@@ -75,7 +83,7 @@ Scope {
         screen: root.targetScreen
         color: "transparent"
         // A text pin has no file to check, so it is "there" whenever it exists.
-        visible: root.isText || root.imagePath.length > 0
+        visible: root.isText || root.isLive || root.imagePath.length > 0
 
         WlrLayershell.namespace: "quickshell:pinnedImage"
         WlrLayershell.layer: WlrLayer.Overlay
@@ -102,8 +110,8 @@ Scope {
             // by an implicit size or anchors the image into its own parent: both
             // of those leave a fresh surface reporting one pixel until the load
             // settles, and a pin you cannot see is a pin you think did not work.
-            width: root.isText ? textPanel.width : Math.max(1, picture.width)
-            height: root.isText ? textPanel.height : Math.max(1, picture.height)
+            width: root.isText ? textPanel.width : (root.isLive ? livePanel.width : Math.max(1, picture.width))
+            height: root.isText ? textPanel.height : (root.isLive ? livePanel.height : Math.max(1, picture.height))
 
             // Where the pointer took hold of the frame, so the drag keeps the
             // same point under the cursor for the whole gesture.
@@ -131,10 +139,10 @@ Scope {
             // card that is meant to be moved.
             Image {
                 id: picture
-                visible: !root.isText
+                visible: !root.isText && !root.isLive
                 // Empty, not "file://" when there is nothing to show: the bare
                 // scheme resolves to the root directory and warns.
-                source: !root.isText && root.imagePath.length > 0 ? "file://" + root.imagePath : ""
+                source: !root.isText && !root.isLive && root.imagePath.length > 0 ? "file://" + root.imagePath : ""
                 asynchronous: true
                 cache: false
                 fillMode: Image.PreserveAspectFit
@@ -163,7 +171,7 @@ Scope {
             Rectangle {
                 id: frame
                 anchors.fill: parent
-                visible: !root.isText
+                visible: !root.isText && !root.isLive
                 radius: Appearance.rounding.small
                 color: "transparent"
                 border.width: 1
@@ -172,7 +180,77 @@ Scope {
             }
 
             StyledRectangularShadow {
-                target: root.isText ? textPanel : frame
+                target: root.isText ? textPanel : (root.isLive ? livePanel : frame)
+            }
+
+            // The live desktop: the monitor, mirroring itself. This is the same
+            // capture the dock and the overview use, so it is a compositor feed
+            // rather than a screenshot loop -- smooth, and free of the temp files
+            // an external grabber would need.
+            Rectangle {
+                id: livePanel
+                visible: root.isLive
+                // Kept below the image cap: a mirror at nearly half the screen
+                // would cover the desktop it is showing.
+                width: Math.min(root.maxWidth, 520)
+                height: width * ((root.liveScreen?.height ?? 9) / Math.max(1, root.liveScreen?.width ?? 16))
+                radius: Appearance.rounding.small
+                color: Qt.rgba(0, 0, 0, 0.6)
+                border.width: 1
+                border.color: Appearance.colors.colOutlineVariant
+                clip: true
+
+                ScreencopyView {
+                    id: liveView
+                    anchors.fill: parent
+                    anchors.margins: 1
+                    captureSource: root.isLive ? root.liveScreen : null
+                    live: true
+                    paintCursor: false
+                }
+
+                // Until the compositor delivers its first frame there is nothing
+                // to draw, and an empty dark card would read as a broken pin.
+                StyledText {
+                    anchors.centerIn: parent
+                    visible: !liveView.hasContent
+                    text: Translation.tr("Starting mirror…")
+                    font.pixelSize: Appearance.font.pixelSize.smaller
+                    color: Appearance.colors.colOnSurfaceVariant
+                }
+
+                // Says what the card is and marks the drag surface: a mirror of
+                // the desktop, live, rather than a picture taken once.
+                Rectangle {
+                    anchors {
+                        left: parent.left
+                        top: parent.top
+                        margins: 6
+                    }
+                    width: liveLabelRow.implicitWidth + 14
+                    height: 20
+                    radius: height / 2
+                    color: Qt.rgba(0, 0, 0, 0.55)
+
+                    RowLayout {
+                        id: liveLabelRow
+                        anchors.centerIn: parent
+                        spacing: 4
+
+                        Rectangle {
+                            width: 6
+                            height: 6
+                            radius: 3
+                            color: Appearance.colors.colPrimary
+                        }
+
+                        StyledText {
+                            text: Translation.tr("Live")
+                            font.pixelSize: Appearance.font.pixelSize.smaller
+                            color: "white"
+                        }
+                    }
+                }
             }
 
             // The live text card. Its own surface material rather than a
@@ -295,6 +373,9 @@ Scope {
                 anchors.fill: parent
                 visible: !root.isText
                 hoverEnabled: true
+                // The mirror takes no input of its own, so the whole card drags
+                // and answers a right click -- which is also the only way to
+                // reach its menu, since it has no text to select.
                 acceptedButtons: Qt.LeftButton | Qt.RightButton
                 cursorShape: menu.visible ? Qt.ArrowCursor : Qt.OpenHandCursor
                 // Distance from the pointer to the picture's corner when the drag
@@ -404,6 +485,10 @@ Scope {
                         model: root.isText
                             ? [
                                 { action: "copyText", label: Translation.tr("Copy text"), icon: "content_copy" },
+                                { action: "unpin", label: Translation.tr("Unpin"), icon: "close" },
+                            ]
+                            : root.isLive
+                            ? [
                                 { action: "unpin", label: Translation.tr("Unpin"), icon: "close" },
                             ]
                             : [

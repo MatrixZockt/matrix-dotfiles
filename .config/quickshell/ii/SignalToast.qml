@@ -425,6 +425,42 @@ Scope {
                         }
                     }
 
+                    // Live: pin the DESKTOP instead of the picture -- a mirror of
+                    // this monitor that keeps updating (ScreencopyView with `live`
+                    // in the pinned card). It sits beside the two picture actions
+                    // because it is the same question asked three ways: keep this,
+                    // keep this as text, or keep what is on the screen.
+                    Item {
+                        id: liveButton
+                        Layout.alignment: Qt.AlignVCenter
+                        visible: root.hasImage
+                        width: 30
+                        height: 30
+                        scale: liveArea.containsMouse ? 1.16 : 1.0
+
+                        Behavior on scale {
+                            NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+                        }
+
+                        MaterialSymbol {
+                            anchors.centerIn: parent
+                            text: "play_arrow"
+                            iconSize: 20
+                            color: liveArea.containsMouse
+                                ? Appearance.colors.colPrimary
+                                : Appearance.colors.colOnSurface
+                            Behavior on color { ColorAnimation { duration: 150 } }
+                        }
+
+                        MouseArea {
+                            id: liveArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: GlobalStates.pinLiveDesktop()
+                        }
+                    }
+
                     // Pin: keep the picture on the desktop as a floating image
                     // instead of a four-second glance (requested 2026-11-15).
                     // Same shape as the save button on purpose -- two actions on

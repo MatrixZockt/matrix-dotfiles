@@ -2530,12 +2530,101 @@ property bool loadingFailFlash: false
             const n = root.pinnedImages.length;
             root.pinnedImages = [...root.pinnedImages, {
                 key: key,
+                kind: "image",
                 path: path,
                 x: 160 + (n % 6) * 28,
                 y: 120 + (n % 6) * 28,
             }];
             root.hideSignalToast();
         }
+    }
+
+    // ── Live text pins ──────────────────────────────────────────────────────
+    //
+    // A picture on the clipboard has no live source. The clipboard holds pixels
+    // and only pixels: there is no handle back to the window they were taken
+    // from, and asking again means reading the screen (which the request ruled
+    // out) or OCR (no engine on this machine).
+    //
+    // TEXT does have a live source, and it is the clipboard itself -- so a live
+    // pin is a text card that follows what was copied last. Nothing is read off
+    // the screen: every copy from any app rewrites the text, and every live card
+    // shows the current one. One shared property rather than text stored per
+    // entry, because rewriting the registry would rebuild -- and blink -- every
+    // pinned surface on each copy.
+    property string liveClipboardText: ""
+
+    // Whether the pending read of the clipboard should also create a card.
+    property bool pendingLivePin: false
+
+    function pinLiveText() {
+        root.pendingLivePin = true;
+        liveClipTextProc.running = true;
+    }
+
+    // The text comes from the CLIPBOARD, not from Cliphist's label: that label is
+    // one short word ("Copied") by design, and a card that said "Copied" would be
+    // the opposite of live.
+    //
+    // An image copy is left alone: `wl-paste` would hand back PNG bytes, and the
+    // cards are words. So the last text a live card shows stays until the next
+    // text copy, which is the honest half of "live" this machine can do.
+    Process {
+        id: liveClipTextProc
+        property bool sawImage: false
+        // Exit 3 means "the clipboard holds a picture": nothing to read as text.
+        command: ["bash", "-c",
+            'if wl-paste --list-types 2>/dev/null | grep -q "^image/"; then exit 3; fi; wl-paste --no-newline 2>/dev/null']
+        stdout: StdioCollector { id: liveClipTextOut }
+        onExited: (exitCode) => {
+            if (exitCode !== 0) {
+                root.pendingLivePin = false;
+                return;
+            }
+            const text = String(liveClipTextOut.text ?? "");
+            if (text.trim().length === 0) {
+                root.pendingLivePin = false;
+                return;
+            }
+            root.liveClipboardText = text;
+            if (!root.pendingLivePin)
+                return;
+            root.pendingLivePin = false;
+            const n = root.pinnedImages.length;
+            root.pinnedImages = [...root.pinnedImages, {
+                key: `pin-${Date.now()}`,
+                kind: "text",
+                live: true,
+                path: "",
+                x: 160 + (n % 6) * 28,
+                y: 120 + (n % 6) * 28,
+            }];
+            root.hideSignalToast();
+        }
+    }
+
+    // Every copy, from any app, is the live cards' new content. Delayed a moment:
+    // the copy is announced as soon as cliphist writes its entry, and reading the
+    // selection on that same frame can still see the previous owner.
+    Timer {
+        id: liveClipRefresh
+        interval: 250
+        onTriggered: liveClipTextProc.running = true
+    }
+
+    Connections {
+        target: Cliphist
+        function onCopyToastSeqChanged() {
+            if (root.pinnedImages.some(e => e.kind === "text"))
+                liveClipRefresh.restart();
+        }
+    }
+
+    function copyPinnedText() {
+        if (root.liveClipboardText.length === 0)
+            return;
+        copyPinnedProcess.command = ["bash", "-c", 'printf %s "$1" | wl-copy', "_", root.liveClipboardText];
+        copyPinnedProcess.running = true;
     }
 
     function unpinImage(key) {

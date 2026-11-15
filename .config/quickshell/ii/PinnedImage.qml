@@ -39,6 +39,12 @@ Scope {
     readonly property string imageKey: modelData?.key ?? ""
     readonly property string imagePath: modelData?.path ?? ""
 
+    // A pin is either a picture or a live text card. Text has no file: its
+    // content is the clipboard's current text, shared by every live card (see
+    // GlobalStates.liveClipboardText), which is what makes it live at all.
+    readonly property bool isText: (modelData?.kind ?? "image") === "text"
+    readonly property string cardText: isText ? GlobalStates.liveClipboardText : ""
+
     // Where the picture sits, in screen pixels from the top-left corner. Seeded
     // from the entry and updated while dragging; it lives here rather than in
     // the registry because writing the list back on every release would rebuild
@@ -68,7 +74,8 @@ Scope {
         id: win
         screen: root.targetScreen
         color: "transparent"
-        visible: root.imagePath.length > 0
+        // A text pin has no file to check, so it is "there" whenever it exists.
+        visible: root.isText || root.imagePath.length > 0
 
         WlrLayershell.namespace: "quickshell:pinnedImage"
         WlrLayershell.layer: WlrLayer.Overlay
@@ -95,8 +102,28 @@ Scope {
             // by an implicit size or anchors the image into its own parent: both
             // of those leave a fresh surface reporting one pixel until the load
             // settles, and a pin you cannot see is a pin you think did not work.
-            width: Math.max(1, picture.width)
-            height: Math.max(1, picture.height)
+            width: root.isText ? textPanel.width : Math.max(1, picture.width)
+            height: root.isText ? textPanel.height : Math.max(1, picture.height)
+
+            // Where the pointer took hold of the frame, so the drag keeps the
+            // same point under the cursor for the whole gesture.
+            property real grabX: 0
+            property real grabY: 0
+
+            function dragStart(mouseX, mouseY) {
+                pictureFrame.grabX = mouseX;
+                pictureFrame.grabY = mouseY;
+            }
+
+            // The surface is the whole screen and never moves, so the pointer's
+            // screen place is the frame's own x plus the pointer's place in it --
+            // an absolute reading, immune to the drift accumulated deltas pick up.
+            function dragMove(mouseX, mouseY) {
+                const screenX = pictureFrame.x + mouseX - pictureFrame.grabX;
+                const screenY = pictureFrame.y + mouseY - pictureFrame.grabY;
+                root.posX = Math.max(0, Math.min(screenX, win.width - pictureFrame.width));
+                root.posY = Math.max(0, Math.min(screenY, win.height - pictureFrame.height));
+            }
 
             // The picture and its outline share one rounded frame: the shadow
             // needs a radius to blur around, and a screenshot over the desktop
@@ -104,9 +131,10 @@ Scope {
             // card that is meant to be moved.
             Image {
                 id: picture
+                visible: !root.isText
                 // Empty, not "file://" when there is nothing to show: the bare
                 // scheme resolves to the root directory and warns.
-                source: root.imagePath.length > 0 ? "file://" + root.imagePath : ""
+                source: !root.isText && root.imagePath.length > 0 ? "file://" + root.imagePath : ""
                 asynchronous: true
                 cache: false
                 fillMode: Image.PreserveAspectFit
@@ -135,6 +163,7 @@ Scope {
             Rectangle {
                 id: frame
                 anchors.fill: parent
+                visible: !root.isText
                 radius: Appearance.rounding.small
                 color: "transparent"
                 border.width: 1
@@ -143,7 +172,120 @@ Scope {
             }
 
             StyledRectangularShadow {
-                target: frame
+                target: root.isText ? textPanel : frame
+            }
+
+            // The live text card. Its own surface material rather than a
+            // screenshot's outline, because there is no picture to frame: what is
+            // being kept is words, and they need a background that text can be
+            // read on wherever it lands.
+            Rectangle {
+                id: textPanel
+                visible: root.isText
+                width: Math.min(root.maxWidth, 420)
+                height: Math.min(root.maxHeight, Math.max(110, bodyText.implicitHeight + 46))
+                radius: Appearance.rounding.small
+                color: Appearance.colors.colBackgroundSurfaceContainer
+                border.width: 1
+                border.color: Appearance.colors.colOutlineVariant
+                clip: true
+
+                // A right click anywhere on the card opens the menu, body
+                // included: the body below owns left-button selection, and a tap
+                // handler for the right button does not take that away.
+                TapHandler {
+                    acceptedButtons: Qt.RightButton
+                    onTapped: (eventPoint, button) => menu.openAt(eventPoint.position.x, eventPoint.position.y)
+                }
+
+                // The grip. Text has to stay selectable, so the card cannot be
+                // dragged from anywhere the way a picture can: this strip is what
+                // moves it, and it is also where a right click opens the menu.
+                Item {
+                    id: textHeader
+                    anchors {
+                        top: parent.top
+                        left: parent.left
+                        right: parent.right
+                    }
+                    height: 26
+
+                    MouseArea {
+                        id: headerArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        cursorShape: Qt.OpenHandCursor
+
+                        onPressed: (mouse) => {
+                            if (mouse.button === Qt.RightButton) {
+                                menu.openAt(mouse.x, mouse.y);
+                                return;
+                            }
+                            pictureFrame.dragStart(mouse.x, mouse.y);
+                        }
+
+                        onPositionChanged: (mouse) => {
+                            if (pressed && !menu.visible)
+                                pictureFrame.dragMove(mouse.x, mouse.y);
+                        }
+                    }
+
+                    RowLayout {
+                        anchors {
+                            fill: parent
+                            leftMargin: 12
+                            rightMargin: 30
+                        }
+                        spacing: 6
+
+                        MaterialSymbol {
+                            text: "sync"
+                            iconSize: 13
+                            color: Appearance.colors.colOnSurfaceVariant
+                        }
+
+                        StyledText {
+                            Layout.fillWidth: true
+                            elide: Text.ElideRight
+                            // Says what it is: a card that follows the clipboard,
+                            // not a snapshot that will go stale.
+                            text: Translation.tr("Live text")
+                            font.pixelSize: Appearance.font.pixelSize.smaller
+                            color: Appearance.colors.colOnSurfaceVariant
+                        }
+                    }
+                }
+
+                Flickable {
+                    id: bodyFlick
+                    anchors {
+                        top: textHeader.bottom
+                        left: parent.left
+                        right: parent.right
+                        bottom: parent.bottom
+                        leftMargin: 12
+                        rightMargin: 12
+                        bottomMargin: 10
+                    }
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    contentWidth: width
+                    contentHeight: bodyText.implicitHeight
+
+                    TextEdit {
+                        id: bodyText
+                        width: bodyFlick.width
+                        text: root.cardText
+                        readOnly: true
+                        selectByMouse: true
+                        wrapMode: TextEdit.Wrap
+                        color: Appearance.colors.colOnSurface
+                        selectionColor: Appearance.colors.colPrimary
+                        selectedTextColor: Appearance.colors.colOnPrimary
+                        font.pixelSize: Appearance.font.pixelSize.small
+                    }
+                }
             }
 
             // Drag, and the right-click menu's target. Left button moves the
@@ -151,6 +293,7 @@ Scope {
             MouseArea {
                 id: dragArea
                 anchors.fill: parent
+                visible: !root.isText
                 hoverEnabled: true
                 acceptedButtons: Qt.LeftButton | Qt.RightButton
                 cursorShape: menu.visible ? Qt.ArrowCursor : Qt.OpenHandCursor
@@ -169,21 +312,13 @@ Scope {
                         menu.openAt(mouse.x, mouse.y);
                         return;
                     }
-                    dragArea.grabX = mouse.x;
-                    dragArea.grabY = mouse.y;
+                    pictureFrame.dragStart(mouse.x, mouse.y);
                 }
 
                 onPositionChanged: (mouse) => {
                     if (!pressed || menu.visible)
                         return;
-                    // The surface is as big as the screen and does not move, so
-                    // the pointer's screen place is the frame's own x plus the
-                    // pointer's place in it -- an absolute reading, immune to the
-                    // drift an accumulated delta would pick up.
-                    const screenX = pictureFrame.x + mouse.x - dragArea.grabX;
-                    const screenY = pictureFrame.y + mouse.y - dragArea.grabY;
-                    root.posX = Math.max(0, Math.min(screenX, win.width - pictureFrame.width));
-                    root.posY = Math.max(0, Math.min(screenY, win.height - pictureFrame.height));
+                    pictureFrame.dragMove(mouse.x, mouse.y);
                 }
             }
 
@@ -266,11 +401,16 @@ Scope {
                     spacing: 2
 
                     Repeater {
-                        model: [
-                            { action: "save", label: Translation.tr("Save"), icon: "download" },
-                            { action: "copy", label: Translation.tr("Copy"), icon: "content_copy" },
-                            { action: "unpin", label: Translation.tr("Unpin"), icon: "close" },
-                        ]
+                        model: root.isText
+                            ? [
+                                { action: "copyText", label: Translation.tr("Copy text"), icon: "content_copy" },
+                                { action: "unpin", label: Translation.tr("Unpin"), icon: "close" },
+                            ]
+                            : [
+                                { action: "save", label: Translation.tr("Save"), icon: "download" },
+                                { action: "copy", label: Translation.tr("Copy"), icon: "content_copy" },
+                                { action: "unpin", label: Translation.tr("Unpin"), icon: "close" },
+                            ]
 
                         delegate: Rectangle {
                             id: menuItem
@@ -313,6 +453,8 @@ Scope {
                                         GlobalStates.savePinnedImage(root.imageKey);
                                     else if (menuItem.modelData.action === "copy")
                                         GlobalStates.copyPinnedImage(root.imageKey);
+                                    else if (menuItem.modelData.action === "copyText")
+                                        GlobalStates.copyPinnedText();
                                     else
                                         GlobalStates.unpinImage(root.imageKey);
                                 }

@@ -1,6 +1,7 @@
 import qs
 import qs.modules.common
 import qs.modules.common.widgets
+import qs.services
 import QtQuick
 import QtQuick.Layouts
 import Quickshell
@@ -57,6 +58,20 @@ Scope {
     // way to keep the picture and no way to check that the right thing was
     // copied. The card takes input only in this case — see the mask below.
     readonly property bool hasImage: GlobalStates.signalToastImage.length > 0
+
+    // A copied TEXT carries the same pin, for a different reason: it has a live
+    // source -- the clipboard itself -- so pinning it puts a card on the desktop
+    // that follows what was copied last (GlobalStates.pinLiveText). Which is as
+    // close as a pin can get to "the thing I copied, but live": pixels have no
+    // such source, text does.
+    // The clipboard's own chip: any non-picture copy. Keyed on the glyph the
+    // clipboard names its card with, not on the label -- "Copied" is one word and
+    // so are several other signals that have nothing to pin.
+    readonly property bool hasTextPayload: !hasImage
+        && GlobalStates.signalToastIcon === "content_copy"
+    // Whether the chip is a control at all. Everything else about the card is
+    // unchanged: it becomes a target only when there is something to pin on it.
+    readonly property bool pinnable: hasImage || hasTextPayload
 
     // What is left of the hold when the pointer is resting on the card. Hovering
     // freezes the countdown instead of letting it expire: the card is the only
@@ -242,8 +257,8 @@ Scope {
             // drop travel below the surface's top edge.
             x: content.x + card.x
             y: content.y + card.y
-            width: root.hasImage ? card.width : 0
-            height: root.hasImage ? card.height : 0
+            width: root.pinnable ? card.width : 0
+            height: root.pinnable ? card.height : 0
         }
 
         Item {
@@ -423,7 +438,7 @@ Scope {
                     Item {
                         id: pinButton
                         Layout.alignment: Qt.AlignVCenter
-                        visible: root.hasImage
+                        visible: root.pinnable
                         width: 30
                         height: 30
                         scale: pinArea.containsMouse ? 1.16 : 1.0
@@ -447,7 +462,15 @@ Scope {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: GlobalStates.pinSignalToastImage()
+                            // A picture pins as a picture; text pins as a live
+                            // card, because that is the one of the two that can
+                            // keep changing.
+                            onClicked: {
+                                if (root.hasImage)
+                                    GlobalStates.pinSignalToastImage();
+                                else
+                                    GlobalStates.pinLiveText();
+                            }
                         }
                     }
                 }

@@ -2594,25 +2594,19 @@ property bool loadingFailFlash: false
         };
     }
 
-    function pinLiveDesktop() {
-        const focusedName = String(Hyprland.focusedMonitor?.name ?? "");
-        const snip = root.lastSnipRegion;
-        const fresh = snip !== null && (Date.now() - Number(snip.at ?? 0)) < root.snipRegionFreshMs;
-        // The region only becomes the card's content when it is roughly the
-        // shape of a card. A copied strip of text -- the case this was reported
-        // from, 2026-11-15 -- has an aspect of one to twenty, and zooming the
-        // mirror onto it produced a sliver that read as "the play button did
-        // nothing". What was asked for is "show the screen of that desktop", so
-        // an odd-shaped snip gets the whole monitor instead.
-        const snipAspect = fresh && Number(snip.w) > 0
-            ? Number(snip.h) / Number(snip.w)
-            : 0;
-        const region = fresh && snipAspect >= 0.45 && snipAspect <= 2.2
-            ? { x: snip.x, y: snip.y, w: snip.w, h: snip.h }
-            : null;
-        const screenName = fresh && String(snip.screen ?? "").length > 0
-            ? String(snip.screen)
-            : focusedName;
+    // ── A live desktop, ANY desktop ─────────────────────────────────────────
+    //
+    // The card the play button raises is a window onto a desktop: the one you are
+    // on when you press it, and any other one after that through the numbers on
+    // the card. It cannot be a screen capture -- the compositor has an output
+    // only for the desktop in front of you, so capturing the monitor mirrors the
+    // very thing you are working on and nothing else (reported twice on
+    // 2026-11-15). It is built from the windows of that desktop instead, each
+    // one captured by the compositor on its own and placed at its real position
+    // (see PinnedImage.liveWindows).
+    function pinLiveDesktop(workspaceId) {
+        const monitor = Hyprland.focusedMonitor;
+        const screenName = String(monitor?.name ?? "");
         if (screenName.length === 0) {
             // Silence here read as "the play button is broken": a click with no
             // card and nothing said. There is no screen to mirror, which is a
@@ -2620,54 +2614,37 @@ property bool loadingFailFlash: false
             root.showSignalToast(Translation.tr("No screen to mirror"), "error", 1600);
             return;
         }
-        // Start the card on the FAR side of the screen from its own region. A
-        // mirror that opens on top of what it is mirroring shows itself inside
-        // itself, and one frame of that is baked into the picture for as long as
-        // the pin exists.
-        const monitor = Hyprland.focusedMonitor;
+        const asked = Number(workspaceId ?? -1);
+        const target = asked > 0 ? asked : (monitor?.activeWorkspace?.id ?? -1);
         const screenW = Math.max(320, monitor?.width ?? 1707);
         const screenH = Math.max(240, monitor?.height ?? 1067);
-        // The card's size follows the shape of the region, with the same two
-        // corrections PinnedImage applies to the card itself (see livePanel's
-        // cardWidth): a strip is grown until it is legible, a tall one is
-        // narrowed until it fits. Placement has to agree with the real size or
-        // the mirror opens half off the screen.
-        const aspect = region
-            ? (Math.max(1, region.h) / Math.max(1, region.w))
-            : (screenH / screenW);
-        let cardW = Math.min(screenW * 0.35, 520);
-        if (cardW * aspect < 90)
-            cardW = Math.min(90 / aspect, screenW * 0.5);
-        cardW = Math.min(cardW, (screenH * 0.5) / aspect);
-        const cardH = cardW * aspect;
+        const cardW = Math.min(screenW * 0.35, 520);
+        const cardH = cardW * (screenH / screenW);
         const marginX = Math.round(screenW * 0.02);
         const marginY = Math.round(screenH * 0.03);
-        let placeX = 160;
-        let placeY = 120;
-        if (region) {
-            const centreX = region.x + region.w / 2;
-            const centreY = region.y + region.h / 2;
-            placeX = centreX > screenW / 2 ? marginX : Math.round(screenW - cardW - marginX);
-            placeY = centreY > screenH / 2 ? marginY : Math.round(screenH - cardH - marginY * 2);
-        }
-        placeX = Math.max(0, Math.min(placeX, Math.round(screenW - cardW)));
-        placeY = Math.max(0, Math.min(placeY, Math.round(screenH - cardH)));
-
         const n = root.pinnedImages.length;
         root.pinnedImages = [...root.pinnedImages, {
             key: `pin-${Date.now()}`,
             kind: "live",
             screen: screenName,
-            // The window the pin belongs to: what the card shows is ITS desktop,
-            // so a switch to another one leaves it where it was (see the live
-            // card's `onItsDesktop`).
-            workspace: fresh ? snip.workspace : (Hyprland.focusedMonitor?.activeWorkspace?.id ?? -1),
-            region: region,
+            // Which desktop is being watched. Nothing else about the pin is tied
+            // to where it was made.
+            workspace: target,
             path: "",
-            x: placeX + (n % 6) * 20,
-            y: placeY + (n % 6) * 20,
+            x: Math.max(0, Math.min(160 + (n % 6) * 20, Math.round(screenW - cardW - marginX))),
+            y: Math.max(0, Math.min(120 + (n % 6) * 20, Math.round(screenH - cardH - marginY))),
         }];
         root.hideSignalToast();
+    }
+
+    // Point an existing live pin at another desktop. The card's numbers call
+    // this; nothing else moves.
+    function retargetLivePin(key, workspaceId) {
+        const id = Number(workspaceId ?? -1);
+        if (id <= 0)
+            return;
+        root.pinnedImages = root.pinnedImages.map(entry =>
+            entry.key === key ? Object.assign({}, entry, { workspace: id }) : entry);
     }
 
     // Whether the pending read of the clipboard should also create a card.

@@ -70,9 +70,64 @@ Scope {
         return (monitor?.activeWorkspace?.id ?? -1) === liveWorkspace;
     }
 
-    readonly property real liveAspect: liveRegion
-        ? (Math.max(1, liveRegion.h) / Math.max(1, liveRegion.w))
-        : ((liveScreen?.height ?? 9) / Math.max(1, liveScreen?.width ?? 16))
+    // The card keeps the monitor's own shape. What a live pin shows is a whole
+    // DESKTOP now -- every window on it, at its own place -- so the shape of
+    // whatever was snipped has nothing to do with it.
+    readonly property real liveAspect: (liveScreen?.height ?? 9)
+        / Math.max(1, liveScreen?.width ?? 16)
+
+    // ── A desktop is not a screen ────────────────────────────────────────────
+    //
+    // "Watch what is happening on desktop 3 while I work on desktop 1" cannot be
+    // a screen capture: the compositor has no output for a workspace that is not
+    // on screen, so a ScreencopyView of the monitor only ever shows the desktop
+    // in front of you (reported twice on 2026-11-15). It CAN capture each window
+    // on its own, whether or not it is visible, which is how the overview draws
+    // its cards -- so the pin is built the same way: one capture per window of
+    // that desktop, laid out at the window's real position, scaled down.
+    readonly property var liveWindows: {
+        const ws = root.liveWorkspace;
+        if (!root.isLive || ws < 0)
+            return [];
+        const out = [];
+        for (const win of (HyprlandData.windowList ?? [])) {
+            if (Number(win?.workspace?.id ?? -1) !== ws)
+                continue;
+            if (!win?.address)
+                continue;
+            out.push(win);
+        }
+        return out;
+    }
+
+    // One window address -> one number, from either spelling (hyprctl writes
+    // "0x5654…", ToplevelManager a bare number). Hex first, unconditionally:
+    // the bare form is hex too, and reading it as decimal matches nothing.
+    function parseAddress(addr) {
+        if (typeof addr === "number")
+            return Number.isFinite(addr) ? addr : -1;
+        let s = String(addr ?? "").trim();
+        if (s.length === 0)
+            return -1;
+        if (s.startsWith("0x") || s.startsWith("0X"))
+            s = s.slice(2);
+        const asHex = parseInt(s, 16);
+        return Number.isFinite(asHex) ? asHex : -1;
+    }
+
+    // The compositor's toplevel for one entry of the window list, or null while
+    // it is not known yet.
+    function toplevelFor(win) {
+        const want = root.parseAddress(win?.address);
+        if (want < 0)
+            return null;
+        const list = ToplevelManager.toplevels?.values ?? [];
+        for (const t of list) {
+            if (root.parseAddress(t?.HyprlandToplevel?.address) === want)
+                return t;
+        }
+        return null;
+    }
 
     // Where the picture sits, in screen pixels from the top-left corner. Seeded
     // from the entry and updated while dragging; it lives here rather than in
@@ -215,21 +270,9 @@ Scope {
                 // would cover the desktop it is showing. Height follows the
                 // snipped region's shape.
                 //
-                // The width is solved rather than taken: a wide strip of text at
-                // 520 wide is a 20px sliver, and a card that small reads as "the
-                // play button did nothing" instead of as a mirror (reported
-                // 2026-11-15, for a copied strip of text). So a thin region is
-                // widened until it is at least 90px tall, and a tall one is
-                // narrowed until the card fits on the screen it mirrors.
-                readonly property real cardWidth: {
-                    const aspect = Math.max(0.02, root.liveAspect);
-                    const screenW = root.targetScreen?.width ?? 1707;
-                    const screenH = root.targetScreen?.height ?? 1067;
-                    let w = Math.min(root.maxWidth, 520);
-                    if (w * aspect < 90)
-                        w = Math.min(90 / aspect, screenW * 0.5);
-                    return Math.min(w, (screenH * 0.5) / aspect);
-                }
+                // A fixed slice of the screen: the mirror's shape is the
+                // monitor's, so there is nothing left to solve for.
+                readonly property real cardWidth: Math.min(root.maxWidth, 520)
                 width: cardWidth
                 height: width * root.liveAspect
                 radius: Appearance.rounding.small
@@ -244,35 +287,59 @@ Scope {
                     anchors.margins: 1
                     clip: true
 
-                    // How much the monitor is blown up so that the pin's region
-                    // fills the card. With no region recorded this is simply
-                    // "fit the monitor", which is the whole-desktop pin.
-                    readonly property real zoom: root.liveRegion
-                        ? (width / Math.max(1, root.liveRegion.w))
-                        : (width / Math.max(1, root.liveScreen?.width ?? 16))
+                    // The card is the monitor, scaled down: one unit of screen
+                    // becomes `scale` units of card, and every window is placed
+                    // by the same arithmetic, so the desktop keeps its layout.
+                    readonly property real scale: width
+                        / Math.max(1, root.liveScreen?.width ?? 16)
 
-                    ScreencopyView {
-                        id: liveView
-                        captureSource: root.isLive ? root.liveScreen : null
-                        live: root.onItsDesktop
-                        paintCursor: false
-                        constraintSize: Qt.size(
-                            Math.round((root.liveScreen?.width ?? 16) * liveClip.zoom),
-                            Math.round((root.liveScreen?.height ?? 9) * liveClip.zoom))
-                        x: root.liveRegion ? -root.liveRegion.x * liveClip.zoom : 0
-                        y: root.liveRegion ? -root.liveRegion.y * liveClip.zoom : 0
+                    // The monitor's own origin, subtracted so a window on a
+                    // second screen is not drawn off the card.
+                    readonly property real originX: Number(Hyprland.monitorFor(root.liveScreen)?.x ?? 0)
+                    readonly property real originY: Number(Hyprland.monitorFor(root.liveScreen)?.y ?? 0)
+
+                    Repeater {
+                        model: root.liveWindows
+
+                        delegate: Item {
+                            required property var modelData
+
+                            readonly property var win: modelData
+                            readonly property var toplevel: root.toplevelFor(win)
+
+                            x: (Number(win?.at?.[0] ?? 0) - liveClip.originX) * liveClip.scale
+                            y: (Number(win?.at?.[1] ?? 0) - liveClip.originY) * liveClip.scale
+                            width: Math.max(1, Number(win?.size?.[0] ?? 0) * liveClip.scale)
+                            height: Math.max(1, Number(win?.size?.[1] ?? 0) * liveClip.scale)
+
+                            ScreencopyView {
+                                anchors.fill: parent
+                                // Live whether or not its desktop is on screen:
+                                // that is the whole point of the card. The
+                                // compositor captures a window on its own, so a
+                                // hidden desktop still delivers frames.
+                                captureSource: parent.toplevel
+                                live: true
+                                paintCursor: false
+                                constraintSize: Qt.size(
+                                    Math.round(parent.width * (root.liveScreen?.devicePixelRatio ?? 1)),
+                                    Math.round(parent.height * (root.liveScreen?.devicePixelRatio ?? 1)))
+                            }
+                        }
                     }
                 }
 
-                // Until the compositor delivers its first frame there is nothing
-                // to draw, and an empty dark card would read as a broken pin.
+                // Nothing to show yet -- either no window is open on that
+                // desktop, or the compositor has not named its windows yet.
                 StyledText {
                     anchors.centerIn: parent
-                    visible: !liveView.hasContent
-                    text: Translation.tr("Starting mirror…")
+                    visible: root.liveWindows.length === 0
+                    text: Translation.tr("This desktop is empty")
                     font.pixelSize: Appearance.font.pixelSize.smaller
                     color: Appearance.colors.colOnSurfaceVariant
                 }
+
+
 
                 // Says what the card is and marks the drag surface: a mirror of
                 // the desktop, live, rather than a picture taken once.
@@ -300,12 +367,70 @@ Scope {
                         }
 
                         StyledText {
-                            // "Held", not "Live", while its desktop is off screen:
-                            // the card is showing the last frame of that desktop
-                            // rather than pretending to be a live view of this one.
-                            text: root.onItsDesktop ? Translation.tr("Live") : Translation.tr("Held")
+                            // Which desktop this is, not "Live": the card is live
+                            // either way now, and the number is the one thing
+                            // the user needs from it at a glance.
+                            text: Translation.tr("Desktop") + " " + String(root.liveWorkspace)
                             font.pixelSize: Appearance.font.pixelSize.smaller
                             color: "white"
+                        }
+                    }
+                }
+
+                // ── Which desktop to watch ────────────────────────────────────
+                // The card can be pointed at any desktop without pinning a new
+                // one. Ten is what this desktop has configured; anything that
+                // does not exist simply shows "empty" instead of erroring.
+                Rectangle {
+                    anchors {
+                        horizontalCenter: parent.horizontalCenter
+                        bottom: parent.bottom
+                        bottomMargin: 5
+                    }
+                    height: 20
+                    radius: height / 2
+                    width: desktopRow.implicitWidth + 12
+                    color: Qt.rgba(0, 0, 0, 0.6)
+                    visible: root.liveWindows.length > 0 || root.isLive
+
+                    Row {
+                        id: desktopRow
+                        anchors.centerIn: parent
+                        spacing: 3
+
+                        Repeater {
+                            model: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+                            delegate: Rectangle {
+                                id: desktopCell
+                                required property int modelData
+                                readonly property bool current: modelData === root.liveWorkspace
+                                width: 15
+                                height: 15
+                                radius: 7.5
+                                color: current
+                                    ? Appearance.colors.colPrimary
+                                    : (desktopHover.containsMouse
+                                        ? Appearance.colors.colPrimaryContainer
+                                        : Qt.rgba(1, 1, 1, 0.10))
+
+                                StyledText {
+                                    anchors.centerIn: parent
+                                    text: String(desktopCell.modelData)
+                                    font.pixelSize: 9
+                                    color: desktopCell.current
+                                        ? Appearance.colors.colOnPrimary
+                                        : "white"
+                                }
+
+                                MouseArea {
+                                    id: desktopHover
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: GlobalStates.retargetLivePin(root.imageKey, parent.modelData)
+                                }
+                            }
                         }
                     }
                 }

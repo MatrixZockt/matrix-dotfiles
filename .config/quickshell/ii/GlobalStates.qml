@@ -2615,11 +2615,31 @@ property bool loadingFailFlash: false
             return;
         }
         const asked = Number(workspaceId ?? -1);
-        const target = asked > 0 ? asked : (monitor?.activeWorkspace?.id ?? -1);
+        // The rectangle the snip covered, when it is recent enough to belong to
+        // the picture that was just copied: the card frames THAT, not the whole
+        // desktop. The same rectangle is kept when the card is pointed at another
+        // desktop, where it frames the same place.
+        const snip = root.lastSnipRegion;
+        const fresh = snip !== null
+            && (Date.now() - Number(snip.at ?? 0)) < root.snipRegionFreshMs;
+        const region = fresh && Number(snip.w) > 0 && Number(snip.h) > 0
+            ? { x: Number(snip.x), y: Number(snip.y), w: Number(snip.w), h: Number(snip.h) }
+            : null;
+        const target = asked > 0
+            ? asked
+            : (fresh ? Number(snip.workspace ?? -1) : (monitor?.activeWorkspace?.id ?? -1));
         const screenW = Math.max(320, monitor?.width ?? 1707);
         const screenH = Math.max(240, monitor?.height ?? 1067);
-        const cardW = Math.min(screenW * 0.35, 520);
-        const cardH = cardW * (screenH / screenW);
+        // The card's own size, by the same rules PinnedImage draws it with, so it
+        // opens fully on screen instead of half past an edge.
+        const aspect = region
+            ? (region.h / Math.max(1, region.w))
+            : (screenH / screenW);
+        let cardW = Math.min(screenW * 0.35, 520);
+        if (cardW * aspect < 90)
+            cardW = Math.min(90 / aspect, screenW * 0.5);
+        cardW = Math.min(cardW, (screenH * 0.5) / Math.max(0.02, aspect));
+        const cardH = cardW * aspect;
         const marginX = Math.round(screenW * 0.02);
         const marginY = Math.round(screenH * 0.03);
         const n = root.pinnedImages.length;
@@ -2630,6 +2650,8 @@ property bool loadingFailFlash: false
             // Which desktop is being watched. Nothing else about the pin is tied
             // to where it was made.
             workspace: target,
+            // The part of that desktop the card frames. Null means the whole of it.
+            region: region,
             path: "",
             x: Math.max(0, Math.min(160 + (n % 6) * 20, Math.round(screenW - cardW - marginX))),
             y: Math.max(0, Math.min(120 + (n % 6) * 20, Math.round(screenH - cardH - marginY))),

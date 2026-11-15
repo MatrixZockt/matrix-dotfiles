@@ -70,11 +70,14 @@ Scope {
         return (monitor?.activeWorkspace?.id ?? -1) === liveWorkspace;
     }
 
-    // The card keeps the monitor's own shape. What a live pin shows is a whole
-    // DESKTOP now -- every window on it, at its own place -- so the shape of
-    // whatever was snipped has nothing to do with it.
-    readonly property real liveAspect: (liveScreen?.height ?? 9)
-        / Math.max(1, liveScreen?.width ?? 16)
+    // The card takes the shape of the SELECTION when the pin was made from a
+    // snip, and the monitor's when it was not: what it shows is either that
+    // rectangle of the desktop or the whole of it. (2026-11-15: the card showed
+    // the whole screen for a snip that covered a corner, which is not what the
+    // pin was made from.)
+    readonly property real liveAspect: liveRegion
+        ? (Math.max(1, liveRegion.h) / Math.max(1, liveRegion.w))
+        : ((liveScreen?.height ?? 9) / Math.max(1, liveScreen?.width ?? 16))
 
     // ── A desktop is not a screen ────────────────────────────────────────────
     //
@@ -270,9 +273,19 @@ Scope {
                 // would cover the desktop it is showing. Height follows the
                 // snipped region's shape.
                 //
-                // A fixed slice of the screen: the mirror's shape is the
-                // monitor's, so there is nothing left to solve for.
-                readonly property real cardWidth: Math.min(root.maxWidth, 520)
+                // Solved, not taken: a wide strip of text at 520 wide is a 20px
+                // sliver, and a card that small reads as "nothing happened". So a
+                // thin selection is widened until it is at least 90px tall, and a
+                // tall one is narrowed until the card fits on the screen.
+                readonly property real cardWidth: {
+                    const aspect = Math.max(0.02, root.liveAspect);
+                    const screenW = root.targetScreen?.width ?? 1707;
+                    const screenH = root.targetScreen?.height ?? 1067;
+                    let w = Math.min(root.maxWidth, 520);
+                    if (w * aspect < 90)
+                        w = Math.min(90 / aspect, screenW * 0.5);
+                    return Math.min(w, (screenH * 0.5) / aspect);
+                }
                 width: cardWidth
                 height: width * root.liveAspect
                 radius: Appearance.rounding.small
@@ -287,16 +300,21 @@ Scope {
                     anchors.margins: 1
                     clip: true
 
-                    // The card is the monitor, scaled down: one unit of screen
-                    // becomes `scale` units of card, and every window is placed
-                    // by the same arithmetic, so the desktop keeps its layout.
+                    // What is framed is the snipped rectangle when there is one,
+                    // and the whole monitor when there is not. `scale` turns
+                    // screen units into card units, and the origin is what the
+                    // card's top-left corner corresponds to -- so the same two
+                    // numbers crop the desktop to the selection and fit it to
+                    // the card.
+                    readonly property var view: root.liveRegion
                     readonly property real scale: width
-                        / Math.max(1, root.liveScreen?.width ?? 16)
-
-                    // The monitor's own origin, subtracted so a window on a
-                    // second screen is not drawn off the card.
-                    readonly property real originX: Number(Hyprland.monitorFor(root.liveScreen)?.x ?? 0)
-                    readonly property real originY: Number(Hyprland.monitorFor(root.liveScreen)?.y ?? 0)
+                        / Math.max(1, view ? view.w : (root.liveScreen?.width ?? 16))
+                    readonly property real originX: view
+                        ? Number(view.x ?? 0)
+                        : Number(Hyprland.monitorFor(root.liveScreen)?.x ?? 0)
+                    readonly property real originY: view
+                        ? Number(view.y ?? 0)
+                        : Number(Hyprland.monitorFor(root.liveScreen)?.y ?? 0)
 
                     Repeater {
                         model: root.liveWindows

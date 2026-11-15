@@ -5357,6 +5357,15 @@ Item {
         root.editingPath = true;
         Qt.callLater(() => { pathLabel.forceActiveFocus(); pathLabel.selectAll(); });
     }
+    // A press on empty ground: leave the path editor without using what was
+    // typed, and give the keyboard back to the list. Deliberately not
+    // finishPathEdit -- that one navigates, and empty ground is not a command.
+    function dismissPathEdit() {
+        if (root.editingPath)
+            root.editingPath = false;
+        root.setFocusArea("list");
+        keyLayer.forceActiveFocus();
+    }
     function finishPathEdit() {
         if (!root.editingPath) return;
         root.editingPath = false;
@@ -6612,8 +6621,20 @@ Item {
                 // deserves, with the numbers that answer "how much of it" as
                 // tracked micro-caps on the right. The path stays above in the
                 // crumbs: this line is the answer, not the location. A click on
-                // the name opens the path for editing -- the same thing the
+                // the NAME opens the path for editing -- the same thing the
                 // crumbs' empty space does, on a target you can find.
+                //
+                // The empty ground beside the name is not that target
+                // (2026-11-15: "when tapping inside this empty space given, i
+                // dont want to focus the path input box above instead i want it
+                // to be unfocused"). The press used to fill the whole strip, so
+                // aiming at nothing beside the name put a text field in the
+                // crumbs with the caret in it -- the one corner of the window
+                // where a click to dismiss something started typing instead. The
+                // strip now only dismisses: it closes an open path editor where
+                // it stands (no navigation, nothing half-typed is used) and hands
+                // the keyboard to the list, which is what clicking empty ground
+                // means everywhere else.
                 RowLayout {
                     id: quietTitleRow
                     Layout.fillWidth: true
@@ -6647,8 +6668,18 @@ Item {
                             color: Appearance.colors.colOnLayer0
                             elide: Text.ElideRight
                         }
+                        // Behind the name: empty ground, and it only ever
+                        // unfocuses. Declared first so the name's own press
+                        // (below) sits on top of it.
                         MouseArea {
                             anchors.fill: parent
+                            hoverEnabled: false
+                            onClicked: root.dismissPathEdit()
+                        }
+                        // The words themselves: the target that edits the path,
+                        // exactly as wide as what is painted there.
+                        MouseArea {
+                            anchors.fill: quietTitle
                             hoverEnabled: true
                             cursorShape: Qt.IBeamCursor
                             onClicked: root.beginPathEdit()

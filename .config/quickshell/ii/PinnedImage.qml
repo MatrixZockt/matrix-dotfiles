@@ -53,11 +53,15 @@ Scope {
     readonly property var targetScreen: Quickshell.screens.find(s => s.name === Hyprland.focusedMonitor?.name)
         ?? (Quickshell.screens.length > 0 ? Quickshell.screens[0] : null)
 
-    // The picture may not be larger than most of the screen: a pinned screenshot
-    // of a whole monitor would otherwise cover everything it was pinned to look
-    // at. Aspect ratio is kept, because a stretched screenshot is a wrong one.
-    readonly property real maxWidth: (targetScreen?.width ?? 1920) * 0.7
-    readonly property real maxHeight: (targetScreen?.height ?? 1080) * 0.7
+    // The picture may not be larger than a third of the screen: a pinned
+    // screenshot should sit on the desktop as a reference beside the windows,
+    // not cover the windows it was pinned to look at. A third of each side is
+    // roughly half the AREA of the old 70%, which still read as "a window".
+    // Anything smaller than this keeps its own size -- a small snip is pinned
+    // exactly as large as it was taken, never blown up to fill the cap. Aspect
+    // ratio is kept either way, because a stretched screenshot is a wrong one.
+    readonly property real maxWidth: (targetScreen?.width ?? 1920) * 0.35
+    readonly property real maxHeight: (targetScreen?.height ?? 1080) * 0.35
 
 
     PanelWindow {

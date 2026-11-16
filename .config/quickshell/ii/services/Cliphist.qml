@@ -26,13 +26,58 @@ Singleton {
     property bool sloppySearch: Config.options?.search.sloppy ?? false
     property real scoreThreshold: 0.2
     property list<string> entries: []
-    readonly property var preparedEntries: entries.map(a => ({
+
+    // ── Copies of the same value, all of them kept ──────────────────────
+    // REQUESTED (2026-11-16): "when copying a value, even though the value is
+    // the exact same one, show it inside the clipboard multiple times."
+    //
+    // cliphist refuses to store a value that equals the newest entry: the store
+    // does not grow and the list does not change (verified on this machine --
+    // three copies of the same text left one entry, one id). So a repeat has to
+    // be counted here and expanded when the list is handed to the UI.
+    //
+    // Keyed by cliphist's id, because that is what a row carries. The count
+    // starts at 1 for the copy that was actually stored and grows by one per
+    // repeat; an id that leaves the list loses its count (see the prune).
+    // How many times the value at the TOP of the list has been copied since it
+    // got there, and which text and row that was.
+    //
+    // cliphist stores a repeat of the newest value under a NEW id and drops the
+    // row it replaces, so the store still holds one row for it and the list
+    // would show one row (verified on this machine: three copies of one value,
+    // ids 5950/5951/5952, one row left). Consecutive copies are therefore
+    // counted here and the list shows the value once per copy.
+    //
+    // Only the newest entry is affected: copy A, then B, then A again and A is
+    // a fresh top entry at 1, which is what the list should say.
+    property string repeatText: ""
+    property int repeatTimes: 1
+    property string lastTopId: ""
+    readonly property int repeatCap: 99
+
+    // One row per COPY: the stored entry, then one more for every repeat of it.
+    // `entries` stays the raw listing -- other code reads `entries[0]` as "what
+    // is on the clipboard now", and a value copied three times must not change
+    // what that means.
+    readonly property list<string> shownEntries: {
+        const out = [];
+        for (const e of root.entries) {
+            out.push(e);
+            if (String(e).split("\t")[0] === root.lastTopId) {
+                for (let i = 1; i < root.repeatTimes; i++)
+                    out.push(e);
+            }
+        }
+        return out;
+    }
+
+    readonly property var preparedEntries: shownEntries.map(a => ({
         name: Fuzzy.prepare(`${a.replace(/^\s*\S+\s+/, "")}`),
         entry: a
     }))
     function fuzzyQuery(search: string): var {
         if (search.trim() === "") {
-            return entries;
+            return root.shownEntries;
         }
         if (root.sloppySearch) {
             const results = entries.slice(0, 100).map(str => ({
@@ -291,6 +336,7 @@ Singleton {
             if (exitCode === 0) {
                 const previous = root.entries
                 root.entries = readProc.buffer
+
                 // The newest entry, which cliphist prints FIRST -- verified against
                 // a live store, where the highest id is the first line. This used to
                 // take the LAST line, so the toast was tracking the OLDEST entry,
@@ -322,6 +368,32 @@ Singleton {
                         newest = line
                     }
                 }
+                // ── Another copy of the value that is already newest ─────────
+                // Same TEXT as the previous top, different ROW: that is cliphist
+                // replacing the row it just stored with an identical one, i.e.
+                // a copy the user made. The text test alone is not enough --
+                // clipboard-plain.sh fires a second change event for a rich copy
+                // that it rewrites, and that one stores nothing (its marker
+                // guard skips the store), so it arrives with an UNCHANGED id and
+                // must not be counted as a copy.
+                //
+                // `pendingChange` keeps plain refreshes (an IPC ask, the pin
+                // list, an eviction) out of the count; the shell's own copies
+                // are excluded the way the toast excludes them.
+                const topText = String(newest).replace(/^\d+\t/, "")
+                const topId = String(newestId)
+                if (root.pendingChange
+                    && !root.pendingOwnCopy
+                    && Date.now() >= root.quietUntil
+                    && newest !== ""
+                    && topText === root.repeatText
+                    && topId !== root.lastTopId) {
+                    root.repeatTimes = Math.min(root.repeatCap, root.repeatTimes + 1)
+                } else if (topText !== root.repeatText) {
+                    root.repeatTimes = 1
+                }
+                root.repeatText = topText
+                root.lastTopId = topId
                 if (newest !== root.announcedTail) {
                     root.pendingChange = false
                     root.toastRetries = 0
@@ -465,9 +537,12 @@ Singleton {
     function pinnedEntriesWithPinnedFirst() {
         const pins = [];
         const rest = [];
-        for (let i = 0; i < root.entries.length; i++) {
-            if (root.isPinned(root.entries[i])) pins.push(root.entries[i]);
-            else rest.push(root.entries[i]);
+        // shownEntries, not entries: the list is one row per COPY (see
+        // repeatTimes), and pinning a row pins the value, so all of its
+        // repeats follow it into the pinned section.
+        for (let i = 0; i < root.shownEntries.length; i++) {
+            if (root.isPinned(root.shownEntries[i])) pins.push(root.shownEntries[i]);
+            else rest.push(root.shownEntries[i]);
         }
         return pins.concat(rest);
     }
@@ -644,6 +719,12 @@ Singleton {
         }
         // "a copy is happening, do not announce the next change(s)": called by
         // the dictation script around its own clipboard write.
+        // How many rows the list is offering, and why: stored entries vs rows.
+        // One line, for a "why does the same value appear three times" question
+        // (and for the check that it does).
+        function rows(): string {
+            return `entries=${root.entries.length} rows=${root.shownEntries.length} topCopies=${root.repeatTimes}`;
+        }
         function quietFor(ms: string): void {
             root.quiet(ms)
         }

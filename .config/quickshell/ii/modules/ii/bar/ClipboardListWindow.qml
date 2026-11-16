@@ -730,7 +730,7 @@ Scope {
                             Layout.alignment: Qt.AlignVCenter
                             text: root.searching
                                 ? Cliphist.fuzzyQuery(root.searchText.trim()).length + " " + Translation.tr("results")
-                                : Cliphist.entries.length + " " + Translation.tr("entries")
+                                : Cliphist.shownEntries.length + " " + Translation.tr("entries")
                             font.pixelSize: Appearance.font.pixelSize.smaller
                             color: Appearance.colors.colSubtext
                         }

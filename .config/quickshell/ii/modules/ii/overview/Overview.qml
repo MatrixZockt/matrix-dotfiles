@@ -349,6 +349,27 @@ Scope {
         }
 
         onReleased: {
+            // ── A DICTATION IS NEVER A TAP ──────────────────────────────────
+            //
+            // The tap/hold distinction above is a 300 ms timer racing the
+            // release, and it loses the race sometimes: the release is handled
+            // while the flag is still armed, the search card opens under the
+            // pointer, and because that card takes the keyboard focus the
+            // dictation's Ctrl+V then lands nowhere -- the sentence is lost and
+            // has to be copied out of the transcript card by hand (reported
+            // 2026-11-15; the dictation log said it plainly at the time:
+            // `target: class='?'`, i.e. no window had the focus any more).
+            //
+            // The dictation daemon knows something the timer cannot: it only
+            // reports `recording` once SUPER has been held ALONE for 300 ms
+            // (dictate-daemon.py, ARM_MS), which a tap never reaches. So a
+            // non-idle dictation at this instant is proof that this release
+            // ended a hold, not a tap -- and the card must not open on it. The
+            // flag is cleared as well, so the next tap is a fresh one.
+            if (Dictation.state !== "idle") {
+                GlobalStates.superReleaseMightTrigger = false;
+                return;
+            }
             if (!GlobalStates.superReleaseMightTrigger) {
                 GlobalStates.superReleaseMightTrigger = true;
                 return;

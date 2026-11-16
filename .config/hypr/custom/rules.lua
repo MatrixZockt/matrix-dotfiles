@@ -422,3 +422,37 @@ hl.window_rule({
     no_anim = true,
     opacity = "0 0",
 })
+-- An application's own message box belongs in the middle of the screen.
+--
+-- Reported 2026-11-16 with a screenshot: Claude Desktop's "Couldn't load app
+-- settings" box mapped into the tile slot at the top-left of the desktop,
+-- with the first line of text hidden behind the bar's clock. A one-sentence
+-- box is not a window to arrange -- it is something to read and dismiss -- so
+-- it is floated and centred, which is also where the eye already is.
+--
+-- First the property version of the same idea, because it needs no guessing:
+-- a MODAL window is by definition a box the app is waiting on ("Are you
+-- sure", an error, a prompt). Those get floated and centred wherever they
+-- come from, X11 or native Wayland, whatever their title.
+hl.window_rule({
+    name  = "modal-dialogs-centred",
+    match = { modal = true },
+    float = true,
+    center = true,
+})
+
+-- The title version, for the boxes that are not flagged modal.
+--
+-- `xwayland = true` is the filter that makes this safe to write broadly:
+-- Electron apps (Claude, Discord, WhatsApp, Freebuff) run on XWayland and
+-- their GTK message boxes inherit the app's WM_CLASS, so their titles are the
+-- only way to tell a box from the main window -- an X11 window titled "Error"
+-- or "Couldn't ..." is a box. Native Wayland apps are left alone: a browser's
+-- window title follows the page, and a page called "Error" must not turn into
+-- a floating card mid-session.
+hl.window_rule({
+    name  = "message-boxes-centred",
+    match = { xwayland = true, title = "^(Error|Warning|Message|Problem|Confirm|Question|Ok|OK)$|^.*[Cc]ouldn.t .*$" },
+    float = true,
+    center = true,
+})

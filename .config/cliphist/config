@@ -7,16 +7,22 @@
 # "Nothing is copied", and the entry was still listed and still decoded.
 #
 # The only thing that ever removed an entry was the store's cap. The default is
-# 750, and this store sits permanently at it: 750 rows with the newest id 3120,
+# 750, and the store sat permanently at it: 750 rows with the newest id 3120,
 # i.e. 2370 copies already dropped. A copy you meant to keep silently ages out
 # as newer ones arrive.
 #
-# 2000 (was 750) — about three times the retention. Measured cost of the
-# current store: ~55 MB on disk for 750 entries (images dominate the size), so
-# this settles near 150 MB at the cap. Per-item size is still bounded by
-# cliphist's own max-store-size default (5 MB), and `cliphist wipe -older-than`
-# remains the explicit way to expire history — nothing expires on a timer.
+# 100, on request (2026-11-16). The cap is enforced by cliphist itself on every
+# store, so the hundred-and-first copy deletes the oldest one by itself -- no
+# timer, no script of ours in the path, and a copy made by hand with `cliphist
+# store` obeys it too. The old 2000 was chosen for retention and settled near
+# 150 MB on disk (images dominate); 100 is a small fraction of that and, at the
+# rate this machine copies, about a day of history.
+#
+# The cost of the cap is that a PIN does not outlive it: pins are matched by
+# content (see ClipboardListWindow/Cliphist.qml), and once the cap deletes an
+# entry its content is gone from the store, so the pinned section drops it.
+# Re-pin it, or copy it again, to bring it back to the top of the hundred.
 #
 # Format: one "<key> <value>" per line, read by every cliphist call (the
 # wl-paste watchers in hyprland/execs.lua pass no flags, so they inherit this).
-max-items 2000
+max-items 100

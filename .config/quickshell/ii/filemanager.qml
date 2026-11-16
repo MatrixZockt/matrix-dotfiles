@@ -352,6 +352,9 @@ Window {
         function probePathType(text: string): void { content.probePathType(text); }
         function probeCrumbHit(): string { return content.probeCrumbHit(); }
         function probePathDone(): void { content.finishPathEdit(); }
+        // Escape, the way the key layer runs it: what a cut left pending is
+        // answered here rather than by closing the window (see escapeInList).
+        function probeEscape(): string { return content.escapeInList() ? "cut" : "dismiss"; }
         // The keyboard's route, readable and walkable from a terminal: which
         // area Tab is on, what the arrows are on inside it, and the same steps
         // the keys take. "The Tab key does nothing" is checkable here without

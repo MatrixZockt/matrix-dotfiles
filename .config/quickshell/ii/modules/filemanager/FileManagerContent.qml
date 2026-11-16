@@ -1875,6 +1875,10 @@ Item {
             root.historyIndex = next.length - 1;
         }
         root.syncTab();
+        // A cut brought back to the folder it was cut FROM is over: see
+        // cancelCutBackIn. Done last, so the rows it un-fades are the ones the
+        // new listing is about to draw.
+        root.cancelCutBackIn(dest);
     }
     function goBack() {
         if (root.historyIndex <= 0) return;
@@ -4116,6 +4120,41 @@ Item {
             + " >/dev/null 2>&1 & echo $! > " + root.shq(root.clipboardPidFile)];
         clipboardProc.running = false;
         clipboardProc.running = true;
+    }
+    // A CUT that has not been pasted anywhere yet. A copy is not this: it is a
+    // standing offer ("paste me as often as you like") and nothing cancels it.
+    readonly property bool cutPending: root.clipboard.length > 0
+        && root.clipboard.every(c => c.cut)
+    // ── Ending a cut without moving anything ────────────────────────────
+    //
+    // A cut is a pending question -- "where is this going?" -- and it was the
+    // one pending thing in this window that nothing could answer. The faded
+    // rows stayed faded, the move stayed claimed, and the only way out was to
+    // paste it somewhere. Escape answers it (that is what Escape does to every
+    // other question here), and so does walking back into the folder it was cut
+    // FROM, where pasting it is the one thing that cannot work.
+    function cancelCut() {
+        if (!root.cutPending) return false;
+        root.clipboard = [];
+        root.selection = [];
+        root.selIndex = -1;
+        root.anchorIndex = -1;
+        root.statusNote = Translation.tr("Cut cancelled");
+        // The DESKTOP clipboard too, or the same cut is still waiting in every
+        // other Files window and in every app that reads a file paste -- after
+        // this window has told the person the move is off.
+        clipboardProc.command = ["bash", "-c", root.clipboardStopCommand()];
+        clipboardProc.running = false;
+        clipboardProc.running = true;
+        return true;
+    }
+    // Coming back to the folder a cut came from ends that cut: there is nowhere
+    // left for it to go in here (pasteInto says "already in this folder").
+    function cancelCutBackIn(dir) {
+        if (!root.cutPending) return false;
+        const d = String(dir ?? "").replace(/\/+$/, "") || "/";
+        if (!root.clipboard.every(c => root.dirName(c.path) === d)) return false;
+        return root.cancelCut();
     }
     function copySelection(cut) {
         if (root.selection.length === 0) { root.toast(Translation.tr("Nothing selected"), ""); return; }
@@ -10343,6 +10382,17 @@ Item {
         else if (root.pickerMode) root.pickerCancelled();
         else root.quitRequested();
     }
+    // Escape in the file list, in one place: the key layer calls this, and so
+    // does a probe, so what a check exercises is what the key does.
+    //
+    // A pending cut is answered FIRST. Escape closed the window, and a cut
+    // waiting in a window that just vanished is exactly the "it keeps coming
+    // back" a cut leaves behind -- the desktop clipboard still held it.
+    function escapeInList(): bool {
+        if (root.cancelCut()) return true;
+        root.dismissTopLevel();
+        return false;
+    }
 
     // Arrow keys and Escape live on the pane's key layer, where they belong:
     // a Shortcut for every arrow would fight the search box, and Escape here
@@ -10421,7 +10471,7 @@ Item {
                 root.goUp();
                 event.accepted = true;
             } else if (event.key === Qt.Key_Escape) {
-                root.dismissTopLevel();
+                root.escapeInList();
                 event.accepted = true;
             }
         }
@@ -11571,6 +11621,9 @@ Item {
                 addVisible: newTabBtn.visible,
             },
             clipboard: root.clipboard.length,
+            // A cut that is still pending, which Escape and walking back into
+            // the folder it came from both end (see cancelCut).
+            cutPending: root.cutPending,
             // How many times this app has put something on the DESKTOP's
             // clipboard: the internal list above can be full while the desktop
             // half never happened, which is exactly the state that made

@@ -1734,8 +1734,19 @@ Scope {
                         readonly property real workAreaX: root.workOffsetX
                         readonly property real workAreaY: root.workOffsetY
 
-                        Layout.preferredWidth: root.cardWidth
-                        Layout.preferredHeight: root.cardHeight
+                                                  Layout.preferredWidth: root.cardWidth
+                          Layout.preferredHeight: root.cardHeight
+
+                          // Is the pointer on THIS card? A HoverHandler rather
+                          // than the card's MouseArea: that MouseArea lives
+                          // inside the card's content, under the window
+                          // previews, so it is not a reliable "pointer is over
+                          // the card" signal. This one is the card's own.
+                          HoverHandler {
+                              id: cardHover
+                              onHoveredChanged: root.debugHovered = cardHover.hovered
+                                  ? card.index : (root.debugHovered === card.index ? -1 : root.debugHovered)
+                          }
 
                         // THE ROW FOLLOWS THE POINTER -- the TaskList trick,
                         // verbatim. A Translate, not a position write: the
@@ -1879,16 +1890,45 @@ Scope {
                                         t?.HyprlandToplevel
                                         && root.sameWindow(t, win))
 
+                                    // Two layers, because one layer BLINKED.
+                                    //
+                                    // A view that goes from still to live
+                                    // starts its capture from nothing, and until
+                                    // the first frame lands it paints black.
+                                    // Switching desktop therefore blanked the
+                                    // card you switched TO for a beat, while
+                                    // every other card -- still frames it had
+                                    // already captured -- looked normal: "it
+                                    // blinks when I change to a desktop that is
+                                    // not new anymore" (2026-11-16).
+                                    //
+                                    // So the still capture is always there
+                                    // underneath, and the live one is drawn over
+                                    // it ONLY once it actually has a frame
+                                    // (`hasContent`). Going live can no longer
+                                    // show black: the picture that was already
+                                    // on screen stays until the live one can
+                                    // replace it with the same picture moving.
+                                    ScreencopyView {
+                                        id: stillView
+                                        anchors.fill: parent
+                                        captureSource: root.open ? parent.toplevel : null
+                                        live: false
+                                        opacity: 0.9
+                                    }
+
                                     // Live only for the desktop you are on: N
                                     // simultaneous live captures across a grid
                                     // is the one thing here that can cost
                                     // frames, and a card is a glance, not a
-                                    // mirror. Every other card still gets a
-                                    // real capture, just a still one.
+                                    // mirror. Every other card keeps its still
+                                    // capture above.
                                     ScreencopyView {
+                                        id: liveView
                                         anchors.fill: parent
-                                        captureSource: root.open ? parent.toplevel : null
+                                        captureSource: card.isActive && root.open ? parent.toplevel : null
                                         live: card.isActive
+                                        visible: card.isActive && liveView.hasContent
                                         opacity: 0.9
                                     }
                                 }
@@ -1980,12 +2020,28 @@ Scope {
                             width: parent.width - 20
                             height: 26
 
+                            // Hidden until the pointer is on this card: the
+                            // number names the desktop, and that is only worth
+                            // reading while you are pointing at the one you mean.
+                            // The window count on the other side stays -- that is
+                            // a fact about the desktop, not a label on it.
                             Rectangle {
                                 id: numPill
                                 anchors.left: parent.left
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: 26
                                 height: 26
+                                // Two sources on purpose: the card's own
+                                // HoverHandler, and the selection the card's
+                                // MouseArea already drives from hover (see its
+                                // onEntered). Either one means "the pointer is
+                                // on this card", and the label must never stay
+                                // hidden because one of the two was quiet.
+                                opacity: (cardHover.hovered || card.isSelected) ? 1 : 0
+                                visible: opacity > 0
+                                Behavior on opacity {
+                                    NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+                                }
                                 radius: Appearance.rounding.small
                                 color: card.isActive
                                     ? Appearance.colors.colPrimary
@@ -2758,6 +2814,10 @@ Scope {
         command: ["sh", "-c", `printf '{"open":${GlobalStates.desktopOverviewOpen},"ts":${root.stateTs}}' > '${root.statePath}'`]
     }
 
+    // Diagnostic only: which card the pointer is on, readable from the IPC
+    // probe in debug() (hover is otherwise invisible to every existing readout).
+    property int debugHovered: -1
+
     function publishOpenState() {
         root.stateTs = Date.now() / 1000;
         stateWriter.running = false;
@@ -2959,6 +3019,7 @@ Scope {
                 `toplevels=${tops.length}`,
                 `firstWin=${first ? `${first.class}@${first.address} at ${first.at} size ${first.size}` : "(none)"}`,
                 `firstWinMatches=${match}`,
+                `hoveredCard=${root.debugHovered} selected=${root.selectedCell}`
             ].join(" ");
         }
         // Land on a specific desktop (used by tests and by the gesture's

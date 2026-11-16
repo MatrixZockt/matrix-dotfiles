@@ -46,6 +46,17 @@ Scope {
             return [];
         return HyprlandData.windowList
             .filter(w => w.workspace?.id === root.activeWorkspaceId)
+            // ── MOST RECENTLY USED FIRST ────────────────────────────────────
+            //
+            // The list used to be whatever order the compositor handed over,
+            // which is neither the order you worked in nor stable between
+            // presses: index 0 could be the app already on screen, so the first
+            // ALT+Tab picked it again, re-covered it, and looked like the key
+            // did nothing at all. `focusHistoryID` is the compositor's own
+            // recency: 0 is the window with focus, 1 the one before it. Sorted
+            // this way, index 0 is "you are here" and the rest of the order is
+            // the order you were in -- which is what a switcher is for.
+            .sort((a, b) => (Number(a.focusHistoryID) || 0) - (Number(b.focusHistoryID) || 0))
             .map(w => ({
                 kind: "window",
                 address: w.address,
@@ -116,12 +127,36 @@ Scope {
             root.selection = 0;
     }
 
+    // Where the highlight STARTS: the first row that is not the window you are
+    // looking at.
+    //
+    // It used to be index 0 -- the top of the list -- which meant every ALT+Tab
+    // started from the same place whatever was on screen, and with a
+    // fullscreen-covered app at the top of the list it picked the app you were
+    // already in: the panel closed, that window was re-covered, and nothing
+    // appeared to happen. In the app list (most recently used first) the first
+    // "other" row is the app you were on BEFORE the one on screen, so the first
+    // press is always "switch to the other app", and it follows whatever is
+    // currently shown because the order is built from it.
+    function firstOtherIndex() {
+        const list = root.items;
+        if (list.length === 0 || root.mode !== "apps")
+            return 0;
+        const cur = String(HyprlandData.activeWindow?.address ?? "");
+        const i = list.findIndex(it => String(it.address ?? "") !== cur);
+        return i < 0 ? 0 : i;
+    }
+
     // First press opens the panel; every press after that walks the highlight.
     function begin(which) {
         if (!root.open || root.mode !== which) {
             root.mode = which;
-            root.selection = 0;
+            // OPEN before the index is chosen: the row list is only built while
+            // the panel is open (see appItems), so asking where to start before
+            // that answered against an empty list and always said 0 -- the very
+            // bug this is fixing, one layer down.
             root.open = true;
+            root.selection = root.firstOtherIndex();
         } else {
             root.selection += 1;
         }
@@ -169,11 +204,11 @@ Scope {
             // established way this shell runs config-side Lua; FilesWindowHost,
             // CompactMedia and InputService all do it. The payload repeats the
             // checks custom/general.lua's swipe body makes before it covers
-            // anything, and adds the address test that this commit needs and the
-            // swipe does not: the eval arrives after the focus dispatch, so it
-            // verifies it is looking at the window that was PICKED before it
-            // touches anything. A window that is already expanded, or already
-            // covered, is left exactly as it is.
+            // anything, and it does the FOCUS itself (see below), so "did the
+            // switch land on the window that was picked?" is checked inside its
+            // own run instead of being a race with a dispatch it hopes arrived.
+            // A window that is already expanded, or already covered, is left
+            // exactly as it is.
             //
             // "Expanded" and not "fullscreen": the test is `> 0`, so a window
             // the user MAXIMIZED (fullscreen == 1, SUPER+D or SUPER+ALT+D) is
@@ -184,27 +219,65 @@ Scope {
             // filling a maximized window edge-to-edge would replace its
             // maximize, and the way back out would then leave it tiled instead
             // of maximized. On this build 1 = maximized, 2 = fullscreen.
-            const targetExpanded = (item.fullscreen ?? 0) > 0;
-            Hyprland.dispatch(`hl.dsp.focus({ window = "address:${item.address}" })`);
-            if (!targetExpanded)
-                Quickshell.execDetached(["hyprctl", "eval", `
+            // -- LEAVE THE FULLSCREEN APP, THEN SWITCH ----------------------
+            //
+            // On this compositor a focus change is IGNORED while the active
+            // window is fullscreen: measured with two windows on one workspace,
+            // the same `hl.dsp.focus` that moves focus normally moved nothing
+            // until the fullscreen window was un-fullscreened first. That is the
+            // whole of "ALT+Tab does not switch while I am fullscreen": the pick
+            // was right, the dispatch ran, and the compositor kept focus where it
+            // was. A window that is COVERED (custom/cover.lua, the swipe's own
+            // fullscreen) has to be let go the same way.
+            //
+            // Two evals with a beat between them, not one: the compositor applies
+            // the un-fullscreen on its next frame, so a focus arriving in the same
+            // eval can still be judged against the old state. Measured -- it
+            // switched on one run and not the next. Thirty-odd milliseconds of
+            // bash sleep is the whole fix for that race.
+            const leave = `
+local cur = hl.get_active_window()
+if not cur then return end
+local cover = require("custom.cover")
+local fs = cur.fullscreen or 0
+if fs ~= 0 then
+    hl.dispatch(hl.dsp.window.fullscreen({ window = cur,
+        mode = (fs == 2) and "fullscreen" or "maximized", action = "unset" }))
+elseif cover.owns(cur) then
+    cover.exit(cur)
+end`
+            // -- FOCUS NEEDS A WINDOW OBJECT, NOT AN ADDRESS ----------------
+            //
+            // This used to be `hl.dsp.focus({ window = "address:0x..." })`, and
+            // this build REJECTS a string there -- "expected a window object or
+            // selector" -- so ALT+Tab picked a row, closed the panel and focused
+            // NOTHING. A window object can only be made inside the config's Lua,
+            // which is why the focus lives in this payload (it was already here
+            // for the cover). The lookup strips `0x` and lower-cases both sides,
+            // because both spellings turn up, and it goes through a VARIABLE
+            // because Lua rejects a method call on a string literal.
+            const go = `
 local want = "${item.address}"
+want = tostring(want):lower():gsub("^0x", "")
+local target = nil
+for _, win in ipairs(hl.get_windows() or {}) do
+    local a = tostring(win.address or ""):lower():gsub("^0x", "")
+    if a == want then target = win break end
+end
+if not target then return end
+hl.dispatch(hl.dsp.focus({ window = target }))
 local w = hl.get_active_window()
 if not w then return end
-local got = w.address
-if got == nil then return end
--- Through variables, not through the literals: Lua does not allow a method
--- call on a string LITERAL ("x":lower() is a syntax error -- caught here by
--- running the payload by hand before trusting it), and this comparison has to
--- survive both spellings of an address.
-want = tostring(want):lower():gsub("^0x", "")
-got = tostring(got):lower():gsub("^0x", "")
+local got = tostring(w.address or ""):lower():gsub("^0x", "")
 if got ~= want then return end
 if (w.fullscreen or 0) ~= 0 then return end
 local cover = require("custom.cover")
 if cover.owns(w) then return end
 require("custom.popup").rememberSlot(w)
-cover.enter(w)`]);
+cover.enter(w)`
+            Quickshell.execDetached(["bash", "-c",
+                "hyprctl eval '" + leave + "' >/dev/null 2>&1; sleep 0.12; "
+                + "hyprctl eval '" + go + "' >/dev/null 2>&1"]);
         } else if (item.kind === "desktop") {
             Hyprland.dispatch(`hl.dsp.focus({ workspace = ${item.id} })`);
         } else if (item.kind === "new") {
@@ -448,6 +521,21 @@ cover.enter(w)`]);
         }
         function cancel(): void {
             root.close();
+        }
+        // What the panel is showing, for a check driven from a terminal: the
+        // mode, where the highlight is, which window the compositor says has
+        // focus, and the rows in the order they are drawn. That last one is the
+        // only way to see that the cycle follows the CURRENT app -- the panel's
+        // pixels say nothing about the order behind them.
+        function state(): string {
+            return JSON.stringify({
+                open: root.open,
+                mode: root.mode,
+                selection: root.selection,
+                focused: String(HyprlandData.activeWindow?.address ?? ""),
+                row: String(root.items[root.selection]?.address ?? ""),
+                items: root.items.map(it => String(it.address ?? it.title ?? ""))
+            });
         }
     }
 

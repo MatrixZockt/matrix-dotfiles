@@ -5083,343 +5083,102 @@ hl.on("window.open", function(w)
     hl.timer(check, { timeout = 60, type = "oneshot" })
 end)
 
--- ═══ A new app must be SEEN, so a fullscreen neighbour steps aside ═════
+-- ═══ A window that opens over a fullscreen app no longer evicts it ═════
 --
--- REQUESTED: opening another app while something is fullscreen should leave
--- fullscreen and go back to ATTACHED, so the app that just opened is
--- actually visible.
+-- REVERSAL (2026-11-16). This used to be a hook -- "a new app must be SEEN, so
+-- a fullscreen neighbour steps aside": it found the expanded incumbent and
+-- un-fullscreened it (or exited a cover, or shrank a floating one), then
+-- handed focus to the newcomer. The user has since asked for the opposite:
+-- "instead of minimizing the fullscreen, I want a small signal that something
+-- has opened in the background". The eviction therefore has to go from both
+-- places it existed in:
 --
--- WHY IT IS NOT ALREADY TRUE
--- -------------------------
--- The hook above handles the OPPOSITE case: a window that ARRIVES fullscreen
--- gets demoted. This one handles a window that arrives NORMAL while a
--- DIFFERENT window is already fullscreen. Nothing in the config looked at
--- that, so the new app mapped itself into the layout underneath a
--- fullscreen window that covered all of it -- the launcher was dismissed, the
--- new app was running, and the screen looked unchanged. Measured shape of the
--- bug: the new window is in `hl.get_windows()` at a normal tiled rect, and
--- the fullscreen one is still `fullscreen == 2` on top of it.
+--   * the compositor's own policy. Measured while the hook was written: with
+--     the hook disabled, the fullscreen window still dropped to fs=0 at about
+--     300ms. That is `misc:on_focus_under_fullscreen`, and custom/env.lua now
+--     sets it to 0 -- the newcomer opens BEHIND the fullscreen window without
+--     being focused, and the fullscreen window is left alone.
+--   * the hook that used to live here, which demoted the incumbent itself so
+--     that the newcomer could be seen.
 --
--- WHY UNSETTING IS ENOUGH, and why the window goes back to ATTACHED rather
--- than being floated
--- -------------------------------------------------------------------------
--- A fullscreen window on this build is still a TILED window: the tiler never
--- dropped it, so its slot is intact and `fullscreen {action = "unset"}`
--- returns it to exactly that slot. Nothing has to be reconstructed, which is
--- why this is a one-line demotion and not a re-tile. (The same fact is what
--- makes the "attached, not floating" wording correct here.)
+-- What replaces the reveal is a signal rather than a rearrangement: while a
+-- fullscreen window covers its monitor, the shell draws one small card naming
+-- the window that just arrived (modules/ii/bar/BackgroundArrival.qml, on the
+-- overlay layer so it renders above the fullscreen client). Nothing steals
+-- focus, nothing leaves fullscreen, and going to look stays the user's
+-- decision -- SUPER+Tab and the overview do that exactly as before.
 --
--- WHAT IS DELIBERATELY NOT TOUCHED
--- --------------------------------
---   * DIALOGS. A polkit prompt or a file chooser floats ABOVE fullscreen
---     already, so it is visible without this. Demoting for one would yank
---     the user out of a video for a dialog they can already see.
---   * SPECIAL/HIDDEN WORKSPACES. A window arriving on one is not stealing the
---     screen, so there is nothing to reveal.
---   * THE ARRIVING WINDOW ITSELF. Only the incumbent is demoted. A window
---     that opens fullscreen is the hook above's business, and doing both
---     here would fight it.
---   * A WORKSPACE WITH NO FULLSCREEN WINDOW. The common case: nothing to do,
---     and the early return keeps this off the hot path entirely.
+-- The case above is deliberately untouched: a window that itself ARRIVES
+-- fullscreen is still demoted to a tile. That is the newcomer taking the whole
+-- screen, not the incumbent being pushed off it.
 --
--- The mode is read the same way as everywhere else in this file (1 =
--- maximized, 2 = fullscreen, probed on this build) so unsetting never stacks
--- a maximized state on top of a fullscreen one.
+-- Set HERE rather than in custom/env.lua, which is sourced before
+-- hyprland/general.lua: that file sets 2 itself, so an early override is
+-- simply overwritten. This file is sourced after it, which is why the value
+-- below is the one the compositor runs with. Verified after a reload with
+-- `hyprctl getoption misc:on_focus_under_fullscreen`.
+hl.config({
+    misc = {
+        on_focus_under_fullscreen = 0,
+    },
+})
+
+-- ── And a restore, for the half the option does not cover ───────────────
+--
+-- The option governs what the COMPOSITOR does with a focus request. It does
+-- not stop the rest of this config, and measured on this desktop an arrival
+-- still left the incumbent out of fullscreen with the option at 0 -- the
+-- tiler gives every new window a maximized frame on arrival, so the
+-- workspace's expanded state changes underneath the window that had it.
+--
+-- So the incumbent is put back. Its address and mode are remembered at map
+-- time, and a beat later -- twice, because the burst settles across several
+-- frames -- the fullscreen is re-asserted if it went missing. The guards are
+-- the part that matters, because this is the one thing here that could fight
+-- the user:
+--
+--   * only an incumbent that WAS fullscreen at map time is restored;
+--   * a window that is still fullscreen is left alone (the common case);
+--   * nothing happens once the active desktop has changed, so navigating away
+--     to go and look at the newcomer ends the matter immediately;
+--   * it gives up after two tries (~1.1s) and never re-arms, so a deliberate
+--     SUPER+F inside that second costs at most one extra press.
 hl.on("window.open", function(w)
-    -- `w.address`, NOT `tostring(w)`. The payload is a USERDATA window, and
-    -- tostring on it yields "HL.Window(0x55dda1d33060)" -- a debug string
-    -- that contains the address but is not one. Probed, not guessed:
-    --
-    --   type=userdata tostring=HL.Window(0x55dda1d33060)
-    --
-    -- findWindow() compares `w.address == addr`, so a tostring'd payload
-    -- never matches, `newcomer` was nil on every tick, and the hook returned
-    -- without ever demoting anything. It looked like it worked -- the
-    -- fullscreen window did come out of fullscreen when a new app opened --
-    -- which is the dangerous part: that was the FIRST hook above doing its
-    -- own job, not this one, so the trace never fired and the real cause
-    -- would have been misfiled as "already fixed".
-    --
-    -- The first hook gets away with tostring because it compares tostring
-    -- against tostring of a window from the same list, so the two debug
-    -- strings are equal by pointer identity. Matching a debug string is not
-    -- the same as matching an address, and only one of the two is correct.
-    local addr = w.address
-    if not addr then return end
-    local settled = false
-    local function step()
-        pcall(function()
-            if settled then return end
-            local newcomer = findWindow(addr)
-            -- Not in the list yet is the NORMAL first tick, not "nothing to
-            -- do" -- measured, and the reason the popup hook below documents
-            -- at length. So return without settling and let the timer retry.
-            if not newcomer then return end
-            -- ── A DRAG GHOST IS NOT A WINDOW THAT NEEDS THE SCREEN ───────
-            -- Dragging anything OUT of an app makes that app's toolkit map a
-            -- helper toplevel under the cursor: the drag image / drag proxy.
-            -- It has no class, no title and no input, and it lives exactly as
-            -- long as the drag. (rules.lua floats the identity-less ones for
-            -- the same reason -- "windows with no identity at all".)
-            --
-            -- This hook demotes the fullscreen incumbent for ANY newcomer, so
-            -- that ghost un-fullscreened the app the user was dragging FROM:
-            -- "drag and dropping things of an app still closes the
-            -- fullscreen", reported twice. The trace has it verbatim, five
-            -- times over:
-            --
-            --   fullscreen: stepped aside for Freebuff so  is visible
-            --
-            -- -- an empty class between the two spaces, at the moment of a
-            -- drag. Vacating the screen for a drag image is never what the
-            -- user asked for: the window the ghost belongs to is the one they
-            -- are working in, and it is the one that gets demoted.
-            --
-            -- A window with neither class nor title IS that ghost, by the
-            -- same definition rules.lua uses; `accepts_input == false`
-            -- catches the ones whose toolkit gives them a class. The input
-            -- test does NOT settle -- it is one read at map time, and a real
-            -- app that answered "no" for a frame must still be able to
-            -- demote on a retry tick.
-            local noIdentity = (newcomer.class == nil or newcomer.class == "")
-                and (newcomer.title == nil or newcomer.title == "")
-            if noIdentity then
-                tracef("fullscreen: left alone for a drag ghost (%s)", tostring(addr))
-                settled = true
-                return
+    local newcomer = w.address
+    if newcomer == nil then return end
+    pcall(function()
+        local act = hl.get_active_workspace()
+        if not act then return end
+        local incumbent, mode = nil, nil
+        for _, other in ipairs(hl.get_windows() or {}) do
+            if other.address ~= newcomer
+                and other.workspace and other.workspace.id == act.id
+                and (other.fullscreen or 0) ~= 0 then
+                incumbent = other.address
+                mode = ((other.fullscreen or 0) == 1) and "maximized" or "fullscreen"
+                break
             end
-            if newcomer.accepts_input == false then return end
-            -- ANY window counts now. There used to be an early return here:
-            --
-            --     if newcomer.floating or isDialogClass(...) then
-            --         settled = true; return
-            --     end
-            --
-            -- which meant a POPUP opening never demoted anything. That was
-            -- defensible when the rule only protected tiled windows -- a
-            -- floating dialog already draws above a fullscreen tiled window,
-            -- so it did not need the screen vacated. But the request is
-            -- simply "if another app or popup opens, the fullscreen app
-            -- becomes attached automatically", and that early return is
-            -- exactly the case that was failing: the newcomer was skipped
-            -- before the incumbent was ever looked for, so fullscreen stayed
-            -- and the popup opened underneath it.
-            --
-            -- Nothing else is lost by dropping it. The incumbent search below
-            -- is what actually decides anything, and it still only acts on a
-            -- window that is expanded on the ACTIVE workspace, so this cannot
-            -- reach across desktops or disturb a window that was not
-            -- fullscreen in the first place.
-            local ws = newcomer.workspace
-            if not ws or (ws.id or 0) < 1 then
-                settled = true
-                return -- special/hidden: not stealing the screen
-            end
-            local act = hl.get_active_workspace()
-            if not act or act.id ~= ws.id then
-                settled = true
-                return -- background spawn on another workspace
-            end
-            -- Find the incumbent: another window, same workspace, expanded.
-            --
-            -- TWO PASSES, tiled first. The first is the original rule and is
-            -- unchanged. The second is new and covers the case that made this
-            -- look broken on the desktop where the fullscreen window is
-            -- FLOATING rather than tiled.
-            local incumbent = nil
-            local incumbentFloating = false
-            local incumbentCovered = false
-            local wins = hl.get_windows() or {}
-            for _, other in ipairs(wins) do
-                if other.address ~= newcomer.address
-                    and other.workspace and other.workspace.id == ws.id
-                    and not other.floating
-                    and not isDialogClass(other.class or other.initialClass)
-                    and (isFullscreened(other) or cover.isCovering(other)) then
-                    incumbent = other
-                    break
-                end
-            end
-            -- Second pass: a FLOATING window that is expanded AND actually
-            -- covers the newcomer.
-            --
-            -- Why this needed adding, measured rather than guessed. With a
-            -- floating incumbent, `fullscreen {action="unset"}` clears the
-            -- flag and changes nothing else -- the window keeps its geometry,
-            -- so a window that was full-screen-sized STAYS full-screen-sized.
-            -- Observed on the live desktop: incumbent went fs=2 -> fs=0 in
-            -- under half a second, and the terminal that had just opened was
-            -- still 100% hidden behind it, because the incumbent's rect
-            -- [0,0 1707x1067] still contained the newcomer's [6,51
-            -- 1695x1010] entirely. The flag cleared; the screen did not change.
-            -- A tiled incumbent never had this problem because unsetting
-            -- returns it to its tiler slot, which is smaller than the screen
-            -- by definition.
-            --
-            -- `coversCentre` rather than "is any floating fullscreen window on
-            -- this workspace": a fullscreen window is by definition over the
-            -- whole monitor, but two windows can share a workspace id across
-            -- two monitors, and demoting the far monitor's window because
-            -- something opened here would be exactly the kind of quiet
-            -- misfire this file keeps warning about.
-            if not incumbent then
-                local function coversCentre(cover, target)
-                    local ca, cs = cover.at, cover.size
-                    local ta, ts = target.at, target.size
-                    if not (ca and cs and ta and ts) then return false end
-                    local cx = (ta.x or 0) + (ts.x or 0) / 2
-                    local cy = (ta.y or 0) + (ts.y or 0) / 2
-                    return cx >= (ca.x or 0) and cx <= (ca.x or 0) + (cs.x or 0)
-                        and cy >= (ca.y or 0) and cy <= (ca.y or 0) + (cs.y or 0)
-                end
-                for _, other in ipairs(wins) do
-                    if other.address ~= newcomer.address
-                        and other.workspace and other.workspace.id == ws.id
-                        and other.floating
-                        and not isDialogClass(other.class or other.initialClass)
-                        and (isFullscreened(other) or cover.isCovering(other))
-                        and coversCentre(other, newcomer) then
-                        incumbent = other
-                        incumbentFloating = true
-                        break
-                    end
-                end
-            end
-            if not incumbent then
-                settled = true
-                return -- the overwhelmingly common case
-            end
-            -- isFullscreened() also matches fullscreenClient, which the
-            -- compositor does NOT clear on its own when a new window maps
-            -- (see the note above on what native does and does not cover).
-            -- A client that owns its own fullscreen -- a video player, a
-            -- game, anything that toggles it internally rather than asking
-            -- the compositor -- stays covering the screen after this hook
-            -- has long since settled, and the app the user just opened is
-            -- still invisible. That is the case this exists for.
-            local mode = ((incumbent.fullscreen or 0) == 1) and "maximized" or "fullscreen"
-            hl.dispatch(hl.dsp.focus({ window = incumbent }))
-            if (incumbent.fullscreen or 0) == 0 and (incumbent.fullscreenClient or 0) == 0 then
-                -- NEITHER fullscreen flag is set, so there is no fullscreen to
-                -- unset -- the window is covering the screen as a COVER, which
-                -- is what the four-finger swipe up and SUPER+F do.
-                --
-                -- This was the whole bug. "Fills the screen" (custom/cover.lua)
-                -- deliberately never tells the app it is fullscreen: it floats
-                -- the window and gives it the monitor's exact geometry, so a
-                -- browser keeps its tab strip. fs stays 0 BY DESIGN. Every
-                -- check in this hook was `isFullscreened()`, which is false for
-                -- a cover, so a covered window was never even considered as an
-                -- incumbent -- and an app opened behind one stayed behind it,
-                -- invisibly, with no sign anything had happened.
-                --
-                -- cover.exit() is the only correct way back: it unfloats,
-                -- restores the remembered geometry and hands the window to the
-                -- tiler. A fullscreen unset here would have been a no-op.
-                pcall(function() cover.exit(incumbent) end)
-                incumbentCovered = true
-            elseif (incumbent.fullscreen or 0) ~= 0 then
-                hl.dispatch(hl.dsp.window.fullscreen({ mode = mode, action = "unset" }))
-            else
-                -- Client-owned: unset the CLIENT state, not the compositor's.
-                -- Unsetting the wrong one is a no-op that leaves the window
-                -- exactly as covered as before.
-                hl.dispatch(hl.dsp.window.fullscreen_state({
-                    internal = 0, client = 2, action = "unset"
-                }))
-            end
-            -- A FLOATING incumbent needs the second half of the job: clearing
-            -- the flag is not enough, because nothing resizes it. Shrink it to
-            -- half the monitor and park it top-left, so the newcomer -- which
-            -- the tiler has given the full width -- is visible down the right.
-            --
-            -- Done on a timer, not inline: the unsetting dispatch above is
-            -- queued, so an immediate resize would be measured against the
-            -- pre-unset geometry and would ask for half of the WRONG size.
-            if incumbentFloating and not incumbentCovered then
-                local ia = incumbent.at
-                local isz = incumbent.size
-                if ia and isz and (isz.x or 0) > 0 and (isz.y or 0) > 0 then
-                    local targetW = math.max(MIN_SIDE_W, math.floor((isz.x or 0) * 0.5))
-                    local targetH = math.max(MIN_SIDE_H, math.floor((isz.y or 0) * 0.62))
-                    hl.timer(function()
-                        pcall(function()
-                            resizeTo(incumbent.address, targetW, targetH)
-                        end)
-                    end, { timeout = 90, type = "oneshot" })
-                    -- AND focus the newcomer a second time, later.
-                    --
-                    -- The hand-back scheduled above runs at 60ms and is NOT
-                    -- enough on this path: resizeTo has to focus its own
-                    -- target first (every window dispatcher here is
-                    -- focus-scoped) and only then resizes, across up to three
-                    -- internal retries. That leaves focus parked on the
-                    -- incumbent we just shrank -- exactly the failure the
-                    -- hand-back exists to prevent, reintroduced one step
-                    -- later. 420ms is past resizeTo's worst case with room to
-                    -- spare, and re-focusing something already focused is
-                    -- free.
-                    hl.timer(function()
-                        pcall(function()
-                            local back = findWindow(addr)
-                            if back then hl.dispatch(hl.dsp.focus({ window = back })) end
-                        end)
-                    end, { timeout = 420, type = "oneshot" })
-                end
-            end
-            -- Hand focus back. The demote focuses the incumbent (every window
-            -- dispatcher on this build is focus-scoped and silently drops
-            -- otherwise), and leaving focus there would put the user on the
-            -- app they were ALREADY looking at -- the reveal would work and
-            -- the focus would still be wrong, which is worse than not doing
-            -- it, because the newly opened app then looks focused but is not.
-            --
-            -- Marked in demotedFullscreen so the once-per-session sweep does
-            -- not immediately re-demote it: the user may well fullscreen it
-            -- again on purpose, and that decision has to stick.
-            demotedFullscreen[incumbent.address] = true
-            hl.timer(function()
-                pcall(function()
-                    local back = findWindow(addr)
-                    if back then hl.dispatch(hl.dsp.focus({ window = back })) end
-                end)
-            end, { timeout = 60, type = "oneshot" })
-            tracef("fullscreen: stepped aside for %s so %s is visible",
-                tostring(incumbent.class), tostring(newcomer.class))
-            settled = true
-        end)
-    end
-    -- FIRST PASS SYNCHRONOUSLY, THEN A FEW TIMED TICKS. This ordering is the
-    -- whole fix and the opposite of what this hook did first, which is worth
-    -- recording because the symptom was identical either way.
-    --
-    -- MEASURED, and this is the part that was not obvious: Hyprland ALREADY
-    -- unfullscreens existing windows when a new one maps on their workspace.
-    -- Disabled this hook entirely and the demote still happened, with
-    -- fullscreen dropping to 0 at roughly 300ms. The first version of this
-    -- hook deferred its first look to a 90ms timer, by which time native had
-    -- already done the job -- so the hook found no incumbent, settled, and
-    -- its trace NEVER FIRED in any test. The behaviour looked correct and
-    -- the code doing it was never exercised, which is the worst combination
-    -- there is: it would have been deleted as redundant, and the client
-    -- fullscreen case below would have shipped broken.
-    --
-    -- So: look NOW, at map time, while an expanded incumbent is still
-    -- expanded. The timed retries after it are only for the case where the
-    -- window is not in hl.get_windows() on the first pass, which is the
-    -- normal first tick (measured, see above).
-    step()
-    if settled then return end
-    local tries = 0
-    local function retry()
-        if settled then return end
-        tries = tries + 1
-        step()
-        if not settled and tries < 6 then
-            hl.timer(retry, { timeout = 60, type = "oneshot" })
         end
-    end
-    hl.timer(retry, { timeout = 60, type = "oneshot" })
+        if not incumbent then return end
+        local function restore(triesLeft)
+            pcall(function()
+                local live = findWindow(incumbent)
+                if not live then return end
+                local now = hl.get_active_workspace()
+                if not now or now.id ~= act.id then return end
+                if (live.fullscreen or 0) ~= 0 then return end   -- still expanded
+                hl.dispatch(hl.dsp.focus({ window = live }))
+                hl.dispatch(hl.dsp.window.fullscreen({ mode = mode, action = "set" }))
+                tracef("fullscreen: restored %s after %s arrived",
+                    tostring(live.class), tostring(newcomer))
+            end)
+            if triesLeft > 1 then
+                hl.timer(function() restore(triesLeft - 1) end,
+                    { timeout = 650, type = "oneshot" })
+            end
+        end
+        hl.timer(function() restore(2) end, { timeout = 380, type = "oneshot" })
+    end)
 end)
 
 -- ═══ The file chooser must be a DIALOG, not a tile ═════════════════════

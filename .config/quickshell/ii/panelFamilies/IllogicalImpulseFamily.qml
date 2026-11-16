@@ -57,6 +57,11 @@ Scope {
     // line, drawn tiny in the top-right corner while a fullscreen window
     // covers the screen (the bar -- and with it the line -- is hidden there).
     PanelLoader { component: StatusTell {} }
+    // The background-arrival tell: a small centred card naming a window that
+    // opened BEHIND a fullscreen app. The compositor no longer evicts the
+    // fullscreen window for a newcomer, so this card is the only sign the
+    // arrival happened at all.
+    PanelLoader { component: BackgroundArrival {} }
     PanelLoader { component: EdgeReveal {} }
     PanelLoader { component: Lock {} }
     PanelLoader { component: MusicPlayerPanel {} }

@@ -222,6 +222,22 @@ focused_is_xwayland() {
         | grep -q '"xwayland":[[:space:]]*true'
 }
 
+# Give the borrowed clipboard back, whatever it was before the dictation, and
+# take the sentence off it. Called by the delivery step AFTER the paste has
+# been confirmed (see the note in paste_text), not from inside it.
+restore_clipboard() {
+    local prev_file prev_type
+    prev_file="$STATE/clipboard-backup"
+    prev_type="$(cat "$STATE/clipboard-backup.type" 2>/dev/null)"
+    if [ -s "$prev_file" ] && [ -n "$prev_type" ]; then
+        wl-copy -t "$prev_type" < "$prev_file" 2>/dev/null
+    else
+        wl-copy --clear 2>/dev/null || true
+    fi
+    rm -f "$prev_file" "$STATE/clipboard-backup.type"
+    PASTE_STAGED=0
+}
+
 paste_text() {
     PASTE_FAIL=""
     command -v wl-copy >/dev/null && command -v wl-paste >/dev/null \
@@ -266,13 +282,23 @@ paste_text() {
     # An empty clipboard before means an empty clipboard after: `wl-copy
     # --clear`, rather than leaving the sentence as a "rescue copy". Rescuing
     # is the card's job, and the card has its own Copy button for exactly that.
+    # The borrow is made ONCE per delivery. `paste_text` is retried by the
+    # caller when the chord does not go out, and a second borrow would save our
+    # own sentence over the user's clipboard -- the restore would then put the
+    # sentence BACK instead of taking it off.
     local types prev_type prev_file
-    types="$(wl-paste --list-types 2>/dev/null | grep -vi 'x-kde-passwordManagerHint')"
-    prev_type="$(printf '%s' "$types" | head -n1)"
     prev_file="$STATE/clipboard-backup"
-    rm -f "$prev_file"
-    if command -v wl-paste >/dev/null && [ -n "$prev_type" ]; then
-        wl-paste -n -t "$prev_type" > "$prev_file" 2>/dev/null || rm -f "$prev_file"
+    if [ "${PASTE_STAGED:-0}" != 1 ]; then
+        rm -f "$prev_file" "$STATE/clipboard-backup.type"
+        types="$(wl-paste --list-types 2>/dev/null | grep -vi 'x-kde-passwordManagerHint')"
+        prev_type="$(printf '%s' "$types" | head -n1)"
+        if command -v wl-paste >/dev/null && [ -n "$prev_type" ]; then
+            if wl-paste -n -t "$prev_type" > "$prev_file" 2>/dev/null; then
+                printf '%s' "$prev_type" > "$STATE/clipboard-backup.type"
+            else
+                rm -f "$prev_file"
+            fi
+        fi
     fi
     # Ask the shell not to announce this clipboard change (nor the restore). It
     # watches the selection to show its little "Copied" card, and two of those
@@ -295,22 +321,40 @@ paste_text() {
     # can advertise application/octet-stream, and the next dictation then saw a
     # "non-text" clipboard and gave up on pasting.
     printf '%s' "$1" | wl-copy --sensitive -t text/plain 2>/dev/null \
-        || { PASTE_FAIL="wl-copy refused the text"; return 1; }
+        || { PASTE_FAIL="wl-copy refused the text"; restore_clipboard; return 1; }
     sleep 0.05
-    paste_shortcut "${2:-}" || { PASTE_FAIL="no Ctrl+V (ydotoold down and wtype missing?)"; return 1; }
-    # Long enough for the paste to be read by the app -- Electron apps take a
-    # tick longer than a plain GTK one -- but short enough that the clipboard is
-    # not visibly ours.
-    sleep 0.35
-    # Put the borrowed clipboard back, whatever it was, and take ours off it.
-    # With nothing there before, the clipboard is CLEARED: the sentence is the
-    # card's to copy, not the clipboard's to keep (see the note above).
-    if [ -s "$prev_file" ]; then
-        wl-copy -t "$prev_type" < "$prev_file" 2>/dev/null
-    else
-        wl-copy --clear 2>/dev/null || true
+    # READ IT BACK BEFORE PRESSING ANYTHING.
+    #
+    # Reported 2026-11-16: a dictation typed an EARLIER copied thing instead of
+    # what was just said. The chord does not carry text -- Ctrl+V pastes
+    # whatever the selection holds at the moment the APP reads it -- so "the
+    # paste sent our text" is only true if the copy actually took. Two ways it
+    # did not, and both end with the old clipboard being pasted:
+    #
+    #   * wl-copy can fail or lose the selection (a competing owner, a
+    #     disconnected display) while still exiting 0 in some paths, and the
+    #     chord then pastes the previous contents;
+    #   * the restore below used to run 350ms after the chord, and an app that
+    #     reads the selection later than that -- a big Electron window, an app
+    #     under load -- got the OLD clipboard back, i.e. exactly "it inputted an
+    #     earlier copied thing".
+    #
+    # So: the clipboard must read back as the sentence before the chord goes
+    # out, and the restore no longer happens here at all -- it happens in the
+    # delivery step once the paste has been seen to land (see the caller).
+    local back
+    back="$(wl-paste -n -t text/plain 2>/dev/null)"
+    if [ "$back" != "$1" ]; then
+        sleep 0.08
+        back="$(wl-paste -n -t text/plain 2>/dev/null)"
     fi
-    rm -f "$prev_file"
+    if [ "$back" != "$1" ]; then
+        PASTE_FAIL="clipboard did not take the sentence -- refusing to paste stale text"
+        restore_clipboard
+        return 1
+    fi
+    PASTE_STAGED=1
+    paste_shortcut "${2:-}" || { PASTE_FAIL="no Ctrl+V (ydotoold down and wtype missing?)"; restore_clipboard; return 1; }
     return 0
 }
 
@@ -859,6 +903,12 @@ finish_raw() {
         done
     fi
     rm -f "$SHOT_BEFORE" "$SHOT_PAIR" "$SHOT_AFTER"
+    # NOW the borrowed clipboard goes back -- after the app has had the whole
+    # landed-check window to read the sentence off the selection. Restoring on a
+    # fixed 350ms timer was the other half of "it inputted an earlier copied
+    # thing": a slow reader pasted whatever the clipboard held once it had been
+    # put back.
+    case "$method" in paste*) restore_clipboard ;; esac
     if [ "$landed" = "1" ]; then
         say "delivery landed in the focused window"
     else

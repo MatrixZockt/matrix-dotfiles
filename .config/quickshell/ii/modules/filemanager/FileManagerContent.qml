@@ -10416,10 +10416,14 @@ Item {
             hoverEnabled: true
             enabled: cmd.enabled
             cursorShape: Qt.PointingHandCursor
-            onClicked: cmd.activated(mouse.x, mouse.y)
-            ToolTip.visible: cmdHover.containsMouse && cmd.tip.length > 0
-            ToolTip.text: cmd.tip
-            ToolTip.delay: 500
+                          onClicked: cmd.activated(mouse.x, mouse.y)
+              // The shell's own chip, not Qt's default tooltip. This was one of the
+              // last places still drawing the stock grey box, which is what made it
+              // read as some other program's tooltip inside this one.
+              StyledToolTip {
+                  text: cmd.tip
+                  alternativeVisibleCondition: cmdHover.containsMouse && cmd.tip.length > 0
+              }
         }
     }
 
@@ -10463,10 +10467,11 @@ Item {
             hoverEnabled: true
             enabled: btn.enabled
             cursorShape: Qt.PointingHandCursor
-            onClicked: btn.activated(mouse.x, mouse.y)
-            ToolTip.visible: btnHover.containsMouse && btn.tip.length > 0
-            ToolTip.text: btn.tip
-            ToolTip.delay: 500
+                          onClicked: btn.activated(mouse.x, mouse.y)
+              StyledToolTip {
+                  text: btn.tip
+                  alternativeVisibleCondition: btnHover.containsMouse && btn.tip.length > 0
+              }
         }
     }
 

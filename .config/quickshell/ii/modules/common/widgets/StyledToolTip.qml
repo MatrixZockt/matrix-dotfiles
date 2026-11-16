@@ -31,8 +31,10 @@ ToolTip {
     // ContentSubsection does.
     readonly property bool internalVisibleCondition: (extraVisibleCondition && root.parent !== null
         && root.parent.hovered === true) || alternativeVisibleCondition
-    verticalPadding: 5
-    horizontalPadding: 10
+    // Roomier than the stock chip: the card is the shell's popup surface now
+    // (see StyledToolTipContent), and those cards carry this much padding.
+    verticalPadding: 7
+    horizontalPadding: 12
     background: null
     font {
         family: Appearance.font.family.main

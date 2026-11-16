@@ -619,11 +619,12 @@ Window {
             cursorShape: Qt.PointingHandCursor
             onClicked: btn.activated()
         }
-        ToolTip {
-            visible: btnMouse.containsMouse && btn.shortcut.length > 0
-            delay: 700
-            text: btn.shortcut
-        }
+                  // The shell's own chip rather than Qt's default tooltip, so a shortcut
+          // hint looks like the rest of this desktop.
+          StyledToolTip {
+              text: btn.shortcut
+              alternativeVisibleCondition: btnMouse.containsMouse && btn.shortcut.length > 0
+          }
     }
 
     ColumnLayout {

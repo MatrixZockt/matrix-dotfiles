@@ -4,12 +4,30 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
+/**
+ * One tooltip chip, drawn the way the shell draws its popups.
+ *
+ * WHAT IT USED TO BE, and why it looked out of place: a `m3surfaceContainer`
+ * rectangle with the smallest corner radius in the theme and body text in the
+ * variant colour. Every other floating surface in this shell -- the battery and
+ * clock popups, a notification card, the sidebar's panels -- is a higher surface
+ * container, hairline border, the normal corner radius and on-surface text, and
+ * it rises into place instead of appearing. A chip built from different tokens
+ * reads as "some other program's tooltip" sitting on top of this one, which is
+ * what it was reported to look like.
+ *
+ * So the chip is now the same family as those cards: the popups' own container
+ * token (OPAQUE here -- a tooltip floats over arbitrary windows, and the
+ * popup token is transparentized against the display, which over a bright window
+ * turns the text into a wash), the same hairline border, the same radius, and the
+ * same short rise+fade the shell's popups animate with.
+ */
 Item {
     id: root
     required property string text
     property bool shown: false
-    property real horizontalPadding: 10
-    property real verticalPadding: 5
+    property real horizontalPadding: 12
+    property real verticalPadding: 7
     property alias font: tooltipTextObject.font
     // How wide the text may grow before it wraps. Without this the text below
     // has `wrapMode: Text.Wrap` and no width to wrap inside, so it never wraps
@@ -17,7 +35,7 @@ Item {
     // of the screen for anything long.
     property real maximumTextWidth: 420
     // Bounded by the same ceiling the text wraps at, so a long string makes
-    // the card grow to the wrap width and no further -- the text above is
+    // the card grow to the wrap width and no further -- the text below is
     // `width`-constrained, but its `implicitWidth` is still the natural
     // single-line length, which is what used to push the tooltip off-screen.
     implicitWidth: Math.min(tooltipTextObject.implicitWidth, root.maximumTextWidth)
@@ -32,15 +50,14 @@ Item {
             bottom: root.bottom
             horizontalCenter: root.horizontalCenter
         }
-        // Same card as the battery/clock popups (StyledPopup): surface container,
-        // hairline border. The wifi and bluetooth hover chips now read as the
-        // same family of popup instead of the old inverse-tooltip grey, and the
-        // light theme gets the light card automatically -- these are theme
-        // tokens, not baked colours.
-        color: Appearance?.m3colors.m3surfaceContainer ?? "#3C4043"
+        // The shell's popup card, opaque. `colSurfaceContainerHigh` is the same
+        // solved overlay colour the notification and panel cards use, so a
+        // tooltip over a window still reads as part of this desktop rather than
+        // as a default Qt box.
+        color: Appearance?.colors.colSurfaceContainerHigh ?? "#2B2B2B"
         border.width: 1
         border.color: Appearance?.colors.colLayer0Border ?? "transparent"
-        radius: Appearance?.rounding.verysmall ?? 7
+        radius: Appearance?.rounding.normal ?? 12
         opacity: shown ? 1 : 0
         implicitWidth: shown ? (Math.min(tooltipTextObject.implicitWidth, root.maximumTextWidth)
             + 2 * root.horizontalPadding) : 0
@@ -63,7 +80,10 @@ Item {
             text: root.text
             font.pixelSize: Appearance?.font.pixelSize.smaller ?? 14
             font.hintingPreference: Font.PreferNoHinting // Prevent shaky text
-            color: Appearance?.colors.colOnSurfaceVariant ?? "#FFFFFF"
+            // On-surface, not on-surface-variant: a tooltip is the only text on
+            // its own card, so there is no hierarchy for the muted colour to sit
+            // under -- it read as washed out against a bright window.
+            color: Appearance?.colors.colOnSurface ?? "#FFFFFF"
             wrapMode: Text.Wrap
             // Wrapping is what makes `wrapMode` above do anything at all, and
             // wrapping needs a real WIDTH to wrap inside: `Text` has no
@@ -87,6 +107,5 @@ Item {
                 ? Math.min(implicitWidth, root.maximumTextWidth)
                 : -1
         }
-    }   
+    }
 }
-

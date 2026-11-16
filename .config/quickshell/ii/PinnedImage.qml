@@ -462,63 +462,6 @@ Scope {
                     }
                 }
 
-                // ── Which desktop to watch ────────────────────────────────────
-                // The card can be pointed at any desktop without pinning a new
-                // one. Ten is what this desktop has configured; anything that
-                // does not exist simply shows "empty" instead of erroring.
-                Rectangle {
-                    anchors {
-                        horizontalCenter: parent.horizontalCenter
-                        bottom: parent.bottom
-                        bottomMargin: 5
-                    }
-                    height: 20
-                    radius: height / 2
-                    width: desktopRow.implicitWidth + 12
-                    color: Qt.rgba(0, 0, 0, 0.6)
-                    visible: root.liveWindows.length > 0 || root.isLive
-
-                    Row {
-                        id: desktopRow
-                        anchors.centerIn: parent
-                        spacing: 3
-
-                        Repeater {
-                            model: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-
-                            delegate: Rectangle {
-                                id: desktopCell
-                                required property int modelData
-                                readonly property bool current: modelData === root.liveWorkspace
-                                width: 15
-                                height: 15
-                                radius: 7.5
-                                color: current
-                                    ? Appearance.colors.colPrimary
-                                    : (desktopHover.containsMouse
-                                        ? Appearance.colors.colPrimaryContainer
-                                        : Qt.rgba(1, 1, 1, 0.10))
-
-                                StyledText {
-                                    anchors.centerIn: parent
-                                    text: String(desktopCell.modelData)
-                                    font.pixelSize: 9
-                                    color: desktopCell.current
-                                        ? Appearance.colors.colOnPrimary
-                                        : "white"
-                                }
-
-                                MouseArea {
-                                    id: desktopHover
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: GlobalStates.retargetLivePin(root.imageKey, parent.modelData)
-                                }
-                            }
-                        }
-                    }
-                }
             }
 
             // The live text card. Its own surface material rather than a

@@ -139,6 +139,12 @@ Scope {
     property real posX: modelData?.x ?? 160
     property real posY: modelData?.y ?? 120
 
+    // A live card's width once the user has dragged it out (0 = automatic). Kept
+    // here while the drag runs and written to the registry on release, for the
+    // same reason the position is: a registry write on every motion frame would
+    // rebuild the surface under the pointer.
+    property real userWidth: Number(modelData?.w ?? 0)
+
     // Which monitor it was pinned on. Pinning is a thing done on the screen being
     // looked at, so the picture appears there; the fallback is the same one the
     // signal card uses, for the startup frame where the compositor has not named
@@ -212,6 +218,62 @@ Scope {
                 root.posY = Math.max(0, Math.min(screenY, win.height - pictureFrame.height));
             }
 
+            // ── Resizing a live card ──────────────────────────────────────────
+            //
+            // The card keeps the shape of what it shows, so a drag on EITHER axis
+            // changes one number: the width. Height follows from the aspect. The
+            // edge opposite the one being dragged stays put -- growing from the
+            // left or the top moves the card rather than letting it slide -- and
+            // the edges are measured from the pointer's place on the SCREEN, not
+            // from inside the handle, which travels with the card and would feed
+            // its own motion back into the gesture.
+            property real resizeStartW: 1
+            property real resizeStartX: 0
+            property real resizeStartY: 0
+            property real resizePressX: 0
+            property real resizePressY: 0
+
+            function resizeBegin(px, py) {
+                pictureFrame.resizeStartW = livePanel.width;
+                pictureFrame.resizeStartX = root.posX;
+                pictureFrame.resizeStartY = root.posY;
+                pictureFrame.resizePressX = px;
+                pictureFrame.resizePressY = py;
+            }
+
+            function resizeMove(edge, px, py) {
+                const aspect = Math.max(0.02, root.liveAspect);
+                const screenW = root.targetScreen?.width ?? 1707;
+                const screenH = root.targetScreen?.height ?? 1067;
+                // Big enough to read, and never larger than the screen it sits on.
+                const maxW = Math.max(160, Math.min(screenW, screenH / aspect));
+                // Each axis, signed so that positive always means "grow".
+                const dx = px - pictureFrame.resizePressX;
+                const dy = (py - pictureFrame.resizePressY) / aspect;
+                const stepX = (edge.indexOf("e") >= 0 ? dx : 0)
+                    - (edge.indexOf("w") >= 0 ? dx : 0);
+                const stepY = (edge.indexOf("s") >= 0 ? dy : 0)
+                    - (edge.indexOf("n") >= 0 ? dy : 0);
+                // A corner answers the axis that was actually pulled, not the sum
+                // of both: adding them made a diagonal drag grow the card at
+                // double speed (measured: a 208 px drag produced 933 px wide).
+                const corner = (stepX !== 0) && (stepY !== 0);
+                const delta = corner
+                    ? (Math.abs(stepX) >= Math.abs(stepY) ? stepX : stepY)
+                    : (stepX + stepY);
+                const w = Math.max(120, Math.min(pictureFrame.resizeStartW + delta, maxW));
+                root.userWidth = w;
+                if (edge.indexOf("w") >= 0)
+                    root.posX = Math.max(0, pictureFrame.resizeStartX + (pictureFrame.resizeStartW - w));
+                if (edge.indexOf("n") >= 0)
+                    root.posY = Math.max(0, pictureFrame.resizeStartY + (pictureFrame.resizeStartW - w) * aspect);
+            }
+
+            function resizeEnd() {
+                if (root.userWidth > 0)
+                    GlobalStates.setPinBox(root.imageKey, root.userWidth, root.posX, root.posY);
+            }
+
             // The picture and its outline share one rounded frame: the shadow
             // needs a radius to blur around, and a screenshot over the desktop
             // with a hard corner reads as a pasted rectangle rather than as a
@@ -281,6 +343,11 @@ Scope {
                     const aspect = Math.max(0.02, root.liveAspect);
                     const screenW = root.targetScreen?.width ?? 1707;
                     const screenH = root.targetScreen?.height ?? 1067;
+                    // A size the user dragged out wins over the automatic one, and
+                    // is clamped to the screen so a card can never outgrow it.
+                    if (root.userWidth > 0)
+                        return Math.max(120, Math.min(root.userWidth,
+                            Math.max(160, Math.min(screenW, screenH / aspect))));
                     let w = Math.min(root.maxWidth, 520);
                     if (w * aspect < 90)
                         w = Math.min(90 / aspect, screenW * 0.5);
@@ -601,6 +668,76 @@ Scope {
                     if (!pressed || menu.visible)
                         return;
                     pictureFrame.dragMove(mouse.x, mouse.y);
+                }
+            }
+
+            // ── The resize handles ─────────────────────────────────────────────
+            //
+            // Eight thin strips around a live card -- four edges, four corners --
+            // each with the cursor that says what it will do. They are declared
+            // after the drag area, which covers the whole card, so a press on an
+            // edge resizes instead of moving: the later sibling takes the event.
+            // A picture keeps its natural size and gets no handles.
+            Repeater {
+                model: root.isLive ? ["n", "s", "e", "w", "ne", "nw", "se", "sw"] : []
+
+                delegate: MouseArea {
+                    id: handle
+                    required property string modelData
+
+                    readonly property string edge: modelData
+                    readonly property bool east: edge.indexOf("e") >= 0
+                    readonly property bool west: edge.indexOf("w") >= 0
+                    readonly property bool north: edge.indexOf("n") >= 0
+                    readonly property bool south: edge.indexOf("s") >= 0
+
+                    // Thick enough to hit without aiming, thin enough not to eat
+                    // the card: the strips overlap at the corners, which is where
+                    // a corner handle is expected to be.
+                    readonly property int thickness: 9
+
+                    x: east
+                        ? pictureFrame.width - thickness
+                        : (west ? 0 : (pictureFrame.width - width) / 2)
+                    y: south
+                        ? pictureFrame.height - thickness
+                        : (north ? 0 : (pictureFrame.height - height) / 2)
+                    width: (east || west)
+                        ? thickness
+                        : Math.max(1, pictureFrame.width - 2 * thickness)
+                    height: (north || south)
+                        ? thickness
+                        : Math.max(1, pictureFrame.height - 2 * thickness)
+
+                    z: 20
+                    acceptedButtons: Qt.LeftButton
+                    preventStealing: true
+                    cursorShape: (east && south) || (west && north)
+                        ? Qt.SizeFDiagCursor
+                        : ((west && south) || (east && north)
+                            ? Qt.SizeBDiagCursor
+                            : ((east || west) ? Qt.SizeHorCursor : Qt.SizeVerCursor))
+
+                    // The pointer's place on the SCREEN. The handle travels with
+                    // the card, so a coordinate read inside it would measure its
+                    // own motion as well as the drag.
+                    function screenPt(mx, my) {
+                        return mapToItem(null, mx, my);
+                    }
+
+                    onPressed: (mouse) => {
+                        const p = screenPt(mouse.x, mouse.y);
+                        pictureFrame.resizeBegin(p.x, p.y);
+                    }
+
+                    onPositionChanged: (mouse) => {
+                        if (!pressed)
+                            return;
+                        const p = screenPt(mouse.x, mouse.y);
+                        pictureFrame.resizeMove(handle.edge, p.x, p.y);
+                    }
+
+                    onReleased: pictureFrame.resizeEnd()
                 }
             }
 

@@ -2659,6 +2659,30 @@ property bool loadingFailFlash: false
         root.hideSignalToast();
     }
 
+    // Remember the size a live card was dragged out to, AND where it ended up.
+    //
+    // The position is part of this rather than left to the card's own local copy
+    // because writing the entry rebuilds the pinned surface: a card resized from
+    // its LEFT edge moved its left edge as it grew, and with only the width stored
+    // it snapped back to its old corner on release -- it looked like the drag had
+    // grown it to the right instead (measured 2026-11-15). Called once, on
+    // release: writing on every motion frame would rebuild the surface while the
+    // pointer is still on its edge.
+    function setPinBox(key, width, x, y) {
+        const w = Number(width);
+        if (!(w > 0))
+            return;
+        const box = {
+            w: Math.round(w),
+            x: Math.round(Number(x ?? 0)),
+            y: Math.round(Number(y ?? 0)),
+        };
+        root.pinnedImages = root.pinnedImages.map(entry =>
+            entry.key === key && (entry.w !== box.w || entry.x !== box.x || entry.y !== box.y)
+                ? Object.assign({}, entry, box)
+                : entry);
+    }
+
     // Point an existing live pin at another desktop. The card's numbers call
     // this; nothing else moves.
     function retargetLivePin(key, workspaceId) {

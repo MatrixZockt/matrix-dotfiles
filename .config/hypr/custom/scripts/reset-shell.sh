@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # ── Failsafe: reset the desktop shell ─────────────────────────────────────────
-# Bound to  SUPER + CTRL + B  (see custom/keybinds.lua).
+# Bound to  SUPER + ALT + B  (see custom/keybinds.lua). SUPER + CTRL + B is the
+# fast reload (reload-shell.sh); this is the careful one, for when that did not
+# take. Both START the shell when none is running.
 #
 # What this is for
 # ----------------

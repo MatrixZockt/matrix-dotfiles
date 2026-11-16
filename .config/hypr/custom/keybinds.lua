@@ -394,6 +394,29 @@ end, { description = "Utilities: Clipboard history" })
 hl.bind("CTRL + SUPER + B", hl.dsp.exec_cmd("$HOME/.config/hypr/custom/scripts/reload-shell.sh"),
     { description = "Shell: Reload the desktop shell" })
 
+--# Failsafe: hard restart the desktop shell (SUPER + ALT + B)
+--
+-- The second key, for the case the reload above does not fix: a shell that is
+-- wedged badly enough that it will not let go of its layer surfaces, a reload
+-- that has been pressed twice and raced itself, or a shell that is simply not
+-- there at all. reload-shell.sh is the fast path (~1 s of dead time, no
+-- verification); this one is the careful path -- reset-shell.sh takes a lock so
+-- two presses serialise, kills what is left with TERM then KILL, waits for the
+-- compositor to release the surfaces, launches, and then WAITS until the bar is
+-- actually on screen, showing the loading indicator while it does.
+--
+-- Both keys START the shell when none is running: "reload" here never means
+-- "tell a running shell to reload its QML", it means "end it and start it".
+-- Neither can rescue a config that FAILS TO LOAD (a QML syntax error is not
+-- something a restart can fix): that is what the log is for --
+-- `tail /tmp/ii_shell.log` and `~/.local/state/quickshell/by-id/*/log.qslog`, and
+-- the watchdog writes the same failure into /tmp/shell-watchdog.log.
+--
+-- ALT+SUPER+B rather than another SHIFT variant: SHIFT+CTRL+SUPER+B is already
+-- the "clear the loading indicator" key, and the two must not be one slip apart.
+hl.bind("ALT + SUPER + B", hl.dsp.exec_cmd("$HOME/.config/hypr/custom/scripts/reset-shell.sh"),
+    { description = "Shell: Hard restart the desktop shell" })
+
 --#! Utilities
 --# Failsafe: give the mouse back (SUPER + CTRL + M)
 --

@@ -233,6 +233,13 @@ Item {
     property int transferItemsTotal: 0
     property string transferLabel: ""
     property string transferError: ""
+    // What the transfer was, in the words its END needs: a cut that lands says
+    // "Moved", a copy says "Copied", and the destination folder is the one part
+    // of that sentence a person cannot already see. Fixed when the transfer
+    // starts, because finishTransfer has to say it after a refresh() that has
+    // already forgotten where the bytes were going.
+    property bool transferMove: false
+    property string transferDestName: ""
     // ── The collision question ──────────────────────────────────────────
     //
     // Copying onto a name that is already there is a decision, not a default.
@@ -1233,10 +1240,12 @@ Item {
             root.pendingPasteDest = "";
             const list = root.parseAdoptedClipboard(String(shellProc.output ?? ""));
             if (list.length === 0) {
-                // Nothing on the desktop clipboard either: the same quiet
-                // no-op an empty local list always gave, with the
-                // "Pasting…" status cleared rather than left hanging.
-                root.statusNote = "";
+                // Nothing on the desktop clipboard either. It used to clear the
+                // "Pasting…" note and stop, which is a keypress that leaves no
+                // trace anywhere -- the second half of "Ctrl+V does nothing".
+                // One line, and the same card a failed paste would raise.
+                root.statusNote = Translation.tr("Nothing to paste");
+                root.ipcSignalToast(Translation.tr("Nothing to paste"), "content_paste_off");
                 return;
             }
             root.clipboard = list;
@@ -4280,6 +4289,15 @@ Item {
         root.transferLabel = "";
         root.transferError = "";
         root.transferSkipped = 0;
+        root.transferMove = !!move;
+        root.transferDestName = root.baseName(String(destDir ?? "")) || String(destDir ?? "");
+        // The line the bar carries WHILE it runs, written here rather than when
+        // the paste was asked for: a batch that stops to ask about a name
+        // collision is not copying anything yet, and a status bar that says
+        // "Copying…" through that question is a lie the pointer can read.
+        root.statusNote = (!!move ? Translation.tr("Moving") : Translation.tr("Copying"))
+            + " " + list.length + " " + Translation.tr("item(s)") + " → "
+            + root.transferDestName + "…";
         // A cut is consumed by the transfer, never by the question in front
         // of it.
         if (cleanup) root.clipboard = [];
@@ -4364,8 +4382,26 @@ Item {
         // BEFORE the reason is written -- the other order lost every failure
         // message in the same call that raised it.
         root.refresh();
-        root.statusNote = why;
+        // ── The end of a transfer has to be VISIBLE ─────────────────────────
+        //
+        // A paste that lands in a tenth of a second -- the same filesystem, a
+        // few small files -- left no trace at all: the bar's progress line goes
+        // the moment the process exits, refresh() re-reads the folder before
+        // anyone can see it change, and this function then wrote an EMPTY status
+        // note on success. "Ctrl+V did nothing" is exactly what that looks like
+        // from the outside. So the ending speaks the same way a copy does: the
+        // shell's one-word signal card ("Moved" / "Copied") and a line in the
+        // status bar that names the folder and the count, and stays there.
+        const moved = root.transferMove;
+        const verb = moved ? Translation.tr("Moved") : Translation.tr("Copied");
+        const n = root.transferItemsTotal;
+        const where = root.transferDestName;
+        const done = where.length > 0
+            ? Translation.tr("%1 %2 item(s) to %3").arg(verb).arg(n).arg(where)
+            : Translation.tr("%1 %2 item(s)").arg(verb).arg(n);
+        root.statusNote = failed ? why : (skipped > 0 ? done + " · " + why : done);
         if (failed) root.notify(Translation.tr("Operation failed"), why, true);
+        else root.ipcSignalToast(verb, moved ? "drive_file_move" : "content_copy");
     }
     // Where a paste that had to adopt the DESKTOP clipboard is aimed. Set
     // before the read starts: the read is asynchronous (one sh()) and the
@@ -4417,8 +4453,26 @@ Item {
         }
         return paths.map(p => ({ path: p, cut: cut }));
     }
+    // Where a paste goes when the caller names no folder. Ctrl+V, the Paste
+    // button and the menu's Paste all ask this: the folder row that is SELECTED,
+    // when exactly one row is and it is a folder.
+    //
+    // "Cut this, then paste it there" is done by pointing at the destination --
+    // click the folder, press Ctrl+V -- and Ctrl+V used to paste into the folder
+    // ON SCREEN while ignoring that click. Cut in a folder and paste in the same
+    // folder is the one case where those two answers differ and both look like
+    // nothing happening: the files were already there, so the collision question
+    // ended up asking about the very files that had just been cut. A selected
+    // FILE is not a destination, and neither are several rows: those still paste
+    // into the folder on screen.
+    function pasteDestination() {
+        const sel = root.selection;
+        if (sel.length === 1 && root.isDirPath(sel[0]))
+            return String(sel[0]);
+        return root.currentFolderPath();
+    }
     function pasteInto(dir) {
-        const dest = String(dir ?? root.currentFolderPath());
+        const dest = String(dir ?? "").length > 0 ? String(dir) : root.pasteDestination();
         if (root.clipboard.length === 0) {
             // Not this window's clipboard -- adopt the DESKTOP's. Every launch
             // is its own process, so a copy made in ANOTHER Files window (or
@@ -4450,7 +4504,14 @@ Item {
         // whole of the reported "cut and paste does not work".
         const cutting = root.clipboard.every(c => c.cut);
         const sources = root.clipboard.map(c => c.path);
-        root.statusNote = Translation.tr("Pasting") + "…";
+        // A cut pasted back into the folder it was cut FROM is not a paste: every
+        // source is already there, so the batch can only collide with itself.
+        // Said plainly instead of asked about.
+        if (cutting && sources.every(p => root.dirName(p) === dest.replace(/\/+$/, ""))) {
+            root.statusNote = Translation.tr("Already in this folder");
+            root.ipcSignalToast(Translation.tr("Already here"), "drive_file_move");
+            return;
+        }
         root.startTransfer(sources, dest, cutting, cutting);
     }
 
@@ -4869,7 +4930,7 @@ Item {
         case "pinFolder": root.togglePinFolder(target.length > 0 ? target : root.currentFolderPath()); break;
         case "newFolder": root.newFolder(); break;
         case "newFile": root.newFile(); break;
-        case "paste": root.pasteInto(root.currentFolderPath()); break;
+        case "paste": root.pasteInto(root.pasteDestination()); break;
         case "pasteInto": if (target) root.pasteInto(target); break;
         case "compress": root.compressSelection(root.menuTargets(target)); break;
         // One archive at a time: extracting a multi-selection into one folder
@@ -6928,7 +6989,7 @@ Item {
                     // what decides whether a paste can happen at all.
                     enabled: true
                     visible: !root.pickerMode
-                    onActivated: root.pasteInto(root.currentFolderPath())
+                    onActivated: root.pasteInto(root.pasteDestination())
                 }
                 QuietCommand {
                     label: Translation.tr("Rename")
@@ -10219,7 +10280,8 @@ Item {
         // anywhere. The old `clipboard.length > 0` gate made the cross-drive
         // copy/paste silently dead in every new window.
         enabled: !root.pickerMode
-        onActivated: root.pasteInto(root.currentFolderPath())
+        // The selected folder, when there is one -- see pasteDestination.
+        onActivated: root.pasteInto(root.pasteDestination())
     }
     Shortcut {
         sequence: "Ctrl+Shift+N"
@@ -12677,8 +12739,10 @@ Item {
         return String(root.clipboard.length);
     }
     function probePaste(dir) {
-        const dest = (dir === undefined || dir === null || String(dir) === "")
-            ? root.currentFolderPath() : String(dir);
+        // No folder named means what Ctrl+V means: the selected folder row, else
+        // the one on screen (see pasteDestination). Resolving it HERE would have
+        // tested a paste the shortcut never performs.
+        const dest = (dir === undefined || dir === null) ? "" : String(dir);
         root.pasteInto(dest);
         return String(root.clipboard.length);
     }

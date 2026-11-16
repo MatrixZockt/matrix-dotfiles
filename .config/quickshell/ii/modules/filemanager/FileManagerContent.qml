@@ -1110,11 +1110,22 @@ Item {
             pendingSelectTimer.restart();
             return;
         }
-        // A path handed over from outside: a folder is entered, a file is shown
-        // in its folder with the row selected.
+        // A path handed over from outside -- or typed into the path box: a
+        // folder is entered, a file is shown in its folder with the row
+        // selected, and a path that is NEITHER is said out loud. Walking into a
+        // path that is not there is how the box used to answer a typo: the
+        // folder failed to list, and "this folder does not exist" was left on
+        // screen with the folder it was typed in gone.
         if (mode === "open-path") {
-            const target = String(payload ?? "");
-            if (String(shellProc.output ?? "").trim() === "dir") {
+            const lines = String(shellProc.output ?? "").split("\n");
+            const answer = String(lines[0] ?? "").trim();
+            const target = String(lines.slice(1).join("\n")).trim() || String(payload ?? "");
+            if (answer === "none") {
+                root.notify(Translation.tr("No such file or folder"),
+                    target || String(payload ?? ""), true);
+                return;
+            }
+            if (answer === "dir") {
                 root.navigateTo(target);
                 return;
             }
@@ -1753,10 +1764,31 @@ Item {
     // because the path being opened is usually nowhere near the folder on
     // screen: `isDirPath` looks a name up in the rows, which can only ever
     // answer for what is already displayed.
+    //
+    // There is a third answer, and it has to be asked for separately: NOTHING
+    // is there. `test -d` alone says "file" for a path that does not exist, so
+    // a typo was opened as a file in its parent folder -- no folder, no row to
+    // select, and no word about it. Missing is its own answer now.
+    //
+    // The answer is two lines: the KIND, and then the NORMALISED path. One
+    // spelling has to be used for both halves of the walk -- a row is matched
+    // by its path, so `../other.txt` resolved by the shell navigated to
+    // `/x/sub/..` and then looked for `/x/sub/../other.txt` among rows that say
+    // `/x/other.txt`, and selected nothing.
+    //
+    // `realpath -sm` is the right tool rather than `-f`: it settles `..`, `.`,
+    // a doubled and a trailing slash, and it does NOT expand symlinks. A
+    // symlink is a place the list can stand in, and "show this in the file
+    // manager" on one has to show where that link IS -- resolved, it would open
+    // its target and the link the caller asked about would not be on screen.
     function openPath(p) {
-        const target = String(p ?? "").replace(/\/+$/, "");
-        if (target.length === 0) return;
-        root.sh("test -d " + root.shq(target) + " && echo dir || echo file", "open-path", target);
+        const raw = String(p ?? "").trim();
+        if (raw.length === 0) return;
+        const q = root.shq(raw);
+        root.sh("t=$(realpath -sm -- " + q + " 2>/dev/null) || t=" + q + "; "
+                + "if [ -d \"$t\" ]; then echo dir; elif [ -e \"$t\" ]; then echo file; else echo none; fi; "
+                + "printf '%s' \"$t\"",
+                "open-path", raw);
     }
     function navigateTo(p, record) {
         const dest = String(p ?? "");
@@ -5366,13 +5398,34 @@ Item {
         root.setFocusArea("list");
         keyLayer.forceActiveFocus();
     }
+    // ── Enter in the path box takes a PLACE or a FILE ────────────────────
+    //
+    // The box is handed a path, and a path that ends in a name is the way
+    // people paste a file's location -- "go to /home/x/report.pdf" is a request
+    // to SEE that file, not to walk into a folder called report.pdf. Answered
+    // with navigateTo, the second kind was a folder that does not exist: the
+    // manager complained about a missing folder over a file that was right
+    // there. openPath asks the filesystem instead (folder -> walk in, file ->
+    // open its folder and select the row), so both are the one gesture here,
+    // and a path that truly is not there still gets the missing-folder answer.
     function finishPathEdit() {
         if (!root.editingPath) return;
         root.editingPath = false;
-        const p = String(pathLabel.text ?? "").trim();
+        let p = String(pathLabel.text ?? "").trim();
         keyLayer.forceActiveFocus();
         if (p.length === 0) return;
-        root.navigateTo(p.replace(/^~/, root.homeDir));
+        // `~`, and a path relative to the folder on screen, are both places the
+        // old call could not resolve: `test -d` runs in the app's own cwd.
+        if (p === "~" || p.startsWith("~/"))
+            p = root.homeDir + p.slice(1);
+        else if (!p.startsWith("/"))
+            p = root.folderPath.replace(/\/+$/, "") + "/" + p;
+        root.openPath(p);
+    }
+    // The box filled from a terminal, so finishPathEdit can be asked what a
+    // given path DOES instead of only whether the editor opened.
+    function probePathType(t) {
+        pathLabel.text = String(t ?? "");
     }
 
     // ── The keyboard's route through the window: Tab ─────────────────────

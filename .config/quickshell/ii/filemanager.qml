@@ -345,6 +345,11 @@ Window {
             root.probeContentHeight = h > 0 ? Math.max(300, h) : 0;
         }
         function probePathEdit(): void { content.beginPathEdit(); }
+        // What is TYPED into the box, before probePathDone presses Enter. Without
+        // this a script could open the editor and close it again and never say
+        // what a typed PATH does -- which is the whole of "type a file's path and
+        // see the file", the one thing nothing but a pair of hands could check.
+        function probePathType(text: string): void { content.probePathType(text); }
         function probeCrumbHit(): string { return content.probeCrumbHit(); }
         function probePathDone(): void { content.finishPathEdit(); }
         // The keyboard's route, readable and walkable from a terminal: which

@@ -1,0 +1,16 @@
+#!/bin/sh
+# The window the SUPER menu's WhisperFlow entry opens: the mic, the model and
+# the hotkeys. Not the daemon -- that one is already running from
+# whisper-flow.service at login, so `whisper-flow daemon` from the menu was a
+# second daemon that noticed the first and exited, i.e. nothing appeared.
+#
+# The interpreter is the app's own venv whatever XDG_DATA_HOME says, so the menu
+# entry stays a one-word Exec that no desktop-file escaping can mangle.
+VENV_PYTHON="${XDG_DATA_HOME:-$HOME/.local/share}/whisper-flow/venv/bin/python3"
+
+if [ ! -x "$VENV_PYTHON" ]; then
+    echo "whisper-flow-settings: no interpreter at $VENV_PYTHON" >&2
+    exit 1
+fi
+
+exec "$VENV_PYTHON" -m whisper_flow.settings_gtk "$@"

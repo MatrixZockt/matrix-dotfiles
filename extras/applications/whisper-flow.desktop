@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=WhisperFlow
+GenericName=Voice typing
+Comment=Settings, model and hotkeys for WhisperFlow voice typing
+Exec=whisper-flow-settings
+Icon=whisper-flow
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=voice;dictation;speech;whisper;flow;transcription;hotkey;model;
+StartupNotify=true

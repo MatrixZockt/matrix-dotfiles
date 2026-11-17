@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""Put WhisperFlow's OWN recording pill on screen for the SUPER-hold dictation.
+
+WHY THIS EXISTS (2026-11-17, owner's request): the bar used to draw its own
+dictation view along the top of the screen -- a microphone, a seven-bar meter
+and a language tag, invented for this shell. The owner likes the pill the
+WhisperFlow app shows at the bottom of the screen instead: "i like the shown
+recording at the bottom when speaking please have that shown always and remove
+the self made display at the top of the bar". So the top display is gone (see
+NowBar.qml) and this watcher makes the app's pill appear for every recording,
+including the ones the shell starts with SUPER.
+
+It does not draw anything itself and it changes neither the daemon nor the
+gesture: the dictation daemon already writes its meter to status.json 20 times
+a second, and WhisperFlow's hud_app already knows how to show a pill for a
+stream of levels fed from a file (that is how its own daemon drives it). This
+script is only the elbow between the two.
+
+HOW THE APP'S HUD IS DRIVEN (src/whisper_flow/hud_app.py):
+  WHISPER_FLOW_HUD_LEVEL_FILE      file of little-endian int32 levels, appended
+                                  to; the HUD normalises them itself
+  <same>.processing                marker that switches the pill to its
+                                  "processing" state (the spinner, no bars)
+  the level file disappearing      the pill fades out and the app exits
+
+So: one hud_app process per recording, levels appended while the microphone is
+open, the processing marker while the text is being transcribed, and the file
+deleted afterwards to let the pill go away by itself.
+"""
+
+import json
+import os
+import subprocess
+import sys
+import time
+
+STATE = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "ii-dictate")
+STATUS = os.path.join(STATE, "status.json")     # written by dictate-daemon.py
+LEVELS = os.path.join(STATE, "hud-levels.bin")  # what hud_app reads
+PROCESSING = LEVELS + ".processing"
+HUD_LOG = os.path.join(STATE, "hud.log")
+
+VENV_PYTHON = os.path.expanduser("~/.local/share/whisper-flow/venv/bin/python3")
+POLL_SECONDS = 0.05  # the daemon writes at 20 Hz; no point polling faster
+INT32_MAX = 32767    # the HUD's own ceiling for a sample
+
+
+def log(message):
+    """One line on the journal, namespaced so it can be grepped apart."""
+    print("dictate-hud: " + message, flush=True)
+
+
+def wayland_display():
+    """The compositor socket the pill has to be drawn on.
+
+    A systemd user unit started from default.target does not inherit the
+    session's WAYLAND_DISPLAY, and hud_app wants one. Take the session's own
+    value when it is there, otherwise the one socket this machine has.
+    """
+    display = os.environ.get("WAYLAND_DISPLAY")
+    if display:
+        return display
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+    try:
+        names = sorted(os.listdir(runtime))
+    except OSError:
+        return ""
+    for name in names:
+        if name.startswith("wayland-") and not name.endswith(".lock"):
+            return name
+    return ""
+
+
+def read_status():
+    """(state, level) from the daemon's file; ("idle", 0.0) when it is absent."""
+    try:
+        with open(STATUS) as handle:
+            payload = json.load(handle)
+        state = payload.get("state", "idle")
+        level = float(payload.get("level", 0.0))
+    except (OSError, ValueError, TypeError):
+        return "idle", 0.0
+    if state not in ("recording", "transcribing"):
+        return "idle", 0.0
+    if state == "recording":
+        return state, min(1.0, max(0.0, level))
+    return state, 0.0
+
+
+def start_hud():
+    """Spawn one pill; None if the app is not installed where we expect it."""
+    if not os.access(VENV_PYTHON, os.X_OK):
+        log("no whisper-flow interpreter at " + VENV_PYTHON + "; no pill")
+        return None
+    # A stale stream from the last recording would put its bars in this one.
+    try:
+        open(LEVELS, "wb").close()
+        os.unlink(PROCESSING)
+    except OSError:
+        pass
+    env = dict(os.environ)
+    env["WHISPER_FLOW_HUD_LEVEL_FILE"] = LEVELS
+    # gtk4-layer-shell has to be in the process BEFORE libwayland-client, or the
+    # pill comes up as an ordinary floating window in the middle of the screen
+    # instead of the bottom overlay it is meant to be ("GtkWindow is not a layer
+    # surface", measured in hud.log on the first run). The library documents
+    # LD_PRELOAD as the fix when the link order cannot be changed, and it cannot
+    # be here: python loads GTK by dlopen at import time.
+    layer_shell = "/usr/lib/libgtk4-layer-shell.so"
+    if os.path.exists(layer_shell):
+        env["LD_PRELOAD"] = layer_shell
+    display = wayland_display()
+    if display:
+        env["WAYLAND_DISPLAY"] = display
+    try:
+        with open(HUD_LOG, "wb") as sink:
+            return subprocess.Popen(
+                [VENV_PYTHON, "-m", "whisper_flow.hud_app"],
+                stdin=subprocess.DEVNULL,
+                stdout=sink,
+                stderr=sink,
+                env=env,
+                start_new_session=True,
+            )
+    except OSError as error:
+        log("could not start the app's HUD: %s" % error)
+        return None
+
+
+def append_levels(level):
+    """Hand one sample to the HUD as the int32 it expects."""
+    try:
+        with open(LEVELS, "ab") as handle:
+            handle.write(int(level * INT32_MAX).to_bytes(4, "little", signed=True))
+    except OSError:
+        pass
+
+
+def end_hud(process, keep_marker=False):
+    """Delete the stream (the pill fades out on its own) and reap the process."""
+    if not keep_marker:
+        try:
+            os.unlink(PROCESSING)
+        except OSError:
+            pass
+    try:
+        os.unlink(LEVELS)
+    except OSError:
+        pass
+    if process is None:
+        return
+    try:
+        process.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+
+def main():
+    log("watching " + STATUS + " for the app's recording pill")
+    process = None
+    last_state = "idle"
+    while True:
+        state, level = read_status()
+
+        if state == "recording":
+            if process is None or process.poll() is not None:
+                process = start_hud()
+                if process is None:
+                    time.sleep(1.0)  # app not installed: do not spin on it
+                    continue
+                log("recording: showing the app's pill")
+            if os.path.exists(PROCESSING):
+                # The text is being transcribed after this take already; the
+                # pill is in its processing state and takes no more bars.
+                try:
+                    os.unlink(PROCESSING)
+                except OSError:
+                    pass
+            append_levels(level)
+        elif state == "transcribing":
+            if process is not None and process.poll() is None:
+                if not os.path.exists(PROCESSING):
+                    try:
+                        open(PROCESSING, "wb").close()
+                        log("transcribing: pill switched to processing")
+                    except OSError:
+                        pass
+        elif last_state != "idle":
+            if process is not None and process.poll() is None:
+                log("done: closing the app's pill")
+            end_hud(process)
+            process = None
+
+        if state == "idle" and process is not None:
+            # Died of its own accord (or never really started).
+            end_hud(process)
+            process = None
+
+        last_state = state
+        time.sleep(POLL_SECONDS)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

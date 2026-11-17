@@ -54,11 +54,11 @@ ShellRoot {
     // the only chance to rescue one that never reached a text box.
     TranscriptCard {}
 
-    // The fullscreen dictation tell: a small pill that drops out of the top edge
-    // while a dictation is live and a fullscreen window covers the screen. The
-    // bar's dictation pill sits in the bar, which a fullscreen app does not show,
-    // so without this there is no way to see that the microphone is running.
-    DictationIndicator {}
+    // No dictation tell of ours anywhere any more (2026-11-17): neither the
+    // bar's own view nor the drop-down this used to add for fullscreen apps.
+    // WhisperFlow draws the recording -- its own pill, bottom centre, and it
+    // reaches over a fullscreen window too -- from dictate-hud.py's feed of the
+    // dictation daemon's meter. One display for one microphone.
 
     // Stuff for every panel family
 

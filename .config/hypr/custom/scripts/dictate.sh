@@ -560,6 +560,22 @@ clean_transcript() {
 
 transcribe() { # transcribe <wav> -> prints the text
     local wav="$1" model="$DATA/models/$MODEL"
+    # Silence is the other half of the bad-text problem, and the model cannot
+    # see it: handed four seconds of digital silence, whisper answers
+    # " Thank you." with no_speech_prob 1e-10 and avg_logprob -0.28 -- certain,
+    # wrong, and it reaches the text field. Neither field in the reply is
+    # evidence of anything here; the recording itself is, so it is measured
+    # before a single byte is sent. -50 dB mean sits well under a soft whisper
+    # and well over room tone (this machine's silent take measured -91 dB).
+    if [ -s "$wav" ]; then
+        local level
+        level="$(ffmpeg -hide_banner -nostats -i "$wav" -af volumedetect -f null - 2>&1 \
+            | sed -n 's/.*mean_volume: \([-0-9.]*\) dB.*/\1/p' | head -1)"
+        if [ -n "$level" ] && awk -v l="$level" 'BEGIN { exit !(l + 0 < -50) }'; then
+            say "input is silent (${level} dB), nothing to transcribe"
+            return 0
+        fi
+    fi
     # Warm server first: it already holds the model, so the words come back in
     # ~0.2s instead of the second or two a fresh whisper-cli spends loading the
     # weights -- see dictate-server.sh. It is loopback only. If it is not up
@@ -588,7 +604,102 @@ transcribe() { # transcribe <wav> -> prints the text
             -o "$reply" 2>/dev/null && [ -s "$reply" ]; then
         if TF_TEXT="$out" TF_LANG="$LANG_FILE" LANG_CODES="$LANG_CODES" \
                 python3 - "$reply" <<'PY'
-import json, os, sys, time
+import json, os, re, sys, time
+
+# WHAT THIS IS FOR: whisper does not return nothing on silence, it returns
+# something. Room tone between two sentences becomes "Thank you.", a breath
+# under music becomes "*Pewds*", and a chunk cut mid-word can loop ("you you
+# you you"). Those words land in whatever the user is typing, which is worse
+# than no words at all. So the reply is judged before it is typed:
+#
+#   * the model's own certainty, per segment: `no_speech_prob` (how sure it is
+#     that this was NOT speech) and `avg_logprob` (how sure it is of the words
+#     it did pick). Both whisper.cpp and Groq report them in verbose_json.
+#   * the handful of phrases whisper hallucinates on quiet audio, which only
+#     get dropped when the certainty also says "probably not speech" -- a real
+#     "thank you" is still typed.
+#   * loops: the same sentence three times in a row is a decoding failure, not
+#     someone repeating themselves.
+#
+# Anything unreadable in the reply keeps the old behaviour (type the text), so
+# a change in the server's JSON cannot silently swallow a dictation.
+
+HALLUCINATIONS = {
+    "", ".", "you", "bye", "okay", "thank you", "thanks", "thank you very much",
+    "thank you for watching", "thanks for watching", "thank you so much",
+    "please subscribe", "like and subscribe", "subscribe to my channel",
+    "subtitles by", "transcribed by", "amara.org", "thanks for being here",
+    "thank you for watching the video", "see you next time", "see you later",
+    "vielen dank fürs zuschauen", "danke fürs zuschauen", "untertitel",
+    "untertitel der amara.org-community", "untertitel von stephanie bentley",
+    "das war's", "bis zum nächsten mal", "musik", "applaus",
+}
+
+
+def normalise(text):
+    text = text.lower().replace("’", "'")
+    text = re.sub(r"[^0-9a-zà-ÿ' ]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def certainty(segments):
+    """0..1 from the model: how much of that was actually speech."""
+    best = None
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        value = None
+        no_speech = segment.get("no_speech_prob")
+        if isinstance(no_speech, (int, float)):
+            value = 1.0 - float(no_speech)
+        logprob = segment.get("avg_logprob")
+        if isinstance(logprob, (int, float)):
+            # -1.0 is "barely a guess", 0.0 is "certain"; below that it is noise.
+            value = max(value or 0.0, max(0.0, min(1.0, float(logprob) + 1.0)))
+        if value is not None:
+            best = value if best is None else max(best, value)
+    return best
+
+
+def collapse_loops(text):
+    """'you you you you' and repeated sentences, down to one."""
+    words = text.split()
+    if len(words) >= 6:
+        for size in range(1, len(words) // 3 + 1):
+            unit = words[:size]
+            repeats = 0
+            while words[repeats * size:(repeats + 1) * size] == unit:
+                repeats += 1
+            if repeats >= 3 and repeats * size >= len(words) - size:
+                return " ".join(unit)
+    # The last two sentences identical and the one before them too.
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    if len(sentences) >= 3 and len(set(normalise(s) for s in sentences[-3:])) == 1:
+        return " ".join(sentences[:-2])
+    return text
+
+
+def judge(text, segments):
+    text = (text or "").strip()
+    if not text:
+        return ""
+    sure = certainty(segments)
+    if sure is not None and sure < 0.35:
+        return ""                      # the model itself says this was not speech
+    if not re.search(r"[0-9A-Za-zÀ-ÿ]", text):
+        return ""                      # punctuation, musical notes, markup only
+    if (sure is None or sure < 0.8) and re.match(r"^\s*[*\[(].*[*\])]\s*$", text):
+        return ""                      # a sound event: *Pewds*, (coughs), [music]
+    key = normalise(text)
+    if key in HALLUCINATIONS and (sure is None or sure < 0.7):
+        return ""
+    collapsed = collapse_loops(text).strip()
+    # A loop that collapses to a filler ("you you you you" -> "you") is still
+    # not words someone said.
+    if collapsed != text and normalise(collapsed) in HALLUCINATIONS:
+        return ""
+    return collapsed
+
 
 try:
     data = json.load(open(sys.argv[1]))
@@ -596,8 +707,9 @@ except Exception:
     raise SystemExit(1)
 if not isinstance(data, dict):
     raise SystemExit(1)
+text = judge(data.get("text") or "", data.get("segments") or [])
 with open(os.environ["TF_TEXT"], "w") as f:
-    f.write(data.get("text") or "")
+    f.write(text)
 # whisper names the language ("german"); the bar wants the tag ("de").
 name = (data.get("detected_language") or "").strip().lower()
 if name:

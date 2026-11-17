@@ -40,7 +40,9 @@ Environment
 """
 
 import json
+import math
 import os
+import re
 import sys
 import uuid
 from email import message_from_bytes
@@ -104,6 +106,140 @@ def parse_multipart(content_type, body):
     if audio is None or not audio[2]:
         raise ValueError("no file field in the request")
     return fields, audio
+
+
+# ── judging a reply before it becomes someone's text ────────────────────────
+# whisper does not answer "nothing" on silence; it answers something. Room tone
+# becomes "Thank you.", a breath becomes "*Pewds*", a chunk cut mid-word loops
+# ("you you you you"). The app has no filter of its own, so this one sits here
+# and covers both engines: Groq's verbose_json reports the same certainty fields
+# whisper.cpp does (no_speech_prob, avg_logprob per segment).
+#
+# dictate.sh makes the same judgement for the shell's own dictation; the two are
+# deliberately identical in behaviour, and this one only fires on the app's
+# traffic.
+HALLUCINATIONS = {
+    "", ".", "you", "bye", "okay", "thank you", "thanks", "thank you very much",
+    "thank you for watching", "thanks for watching", "thank you so much",
+    "please subscribe", "like and subscribe", "subscribe to my channel",
+    "subtitles by", "transcribed by", "amara.org", "thanks for being here",
+    "thank you for watching the video", "see you next time", "see you later",
+    "vielen dank fürs zuschauen", "danke fürs zuschauen", "untertitel",
+    "untertitel der amara.org-community", "untertitel von stephanie bentley",
+    "das war's", "bis zum nächsten mal", "musik", "applaus",
+}
+
+_WORD = re.compile(r"[0-9A-Za-z\u00c0-\u00ff]")
+
+
+def normalise(text):
+    text = (text or "").lower().replace("\u2019", "'")
+    text = re.sub(r"[^0-9a-z\u00c0-\u00ff' ]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def certainty(segments):
+    """0..1 from the model: how much of that was actually speech."""
+    best = None
+    for segment in segments or []:
+        if not isinstance(segment, dict):
+            continue
+        value = None
+        no_speech = segment.get("no_speech_prob")
+        if isinstance(no_speech, (int, float)):
+            value = 1.0 - float(no_speech)
+        logprob = segment.get("avg_logprob")
+        if isinstance(logprob, (int, float)):
+            value = max(value or 0.0, max(0.0, min(1.0, float(logprob) + 1.0)))
+        if value is not None:
+            best = value if best is None else max(best, value)
+    return best
+
+
+def collapse_loops(text):
+    words = text.split()
+    if len(words) >= 6:
+        for size in range(1, len(words) // 3 + 1):
+            unit = words[:size]
+            repeats = 0
+            while words[repeats * size:(repeats + 1) * size] == unit:
+                repeats += 1
+            if repeats >= 3 and repeats * size >= len(words) - size:
+                return " ".join(unit)
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    if len(sentences) >= 3 and len(set(normalise(s) for s in sentences[-3:])) == 1:
+        return " ".join(sentences[:-2])
+    return text
+
+
+def judge(text, segments):
+    """The text worth typing, which is often none of it."""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    sure = certainty(segments)
+    if sure is not None and sure < 0.35:
+        return ""
+    if not _WORD.search(text):
+        return ""
+    if (sure is None or sure < 0.8) and re.match(r"^\s*[*\[(].*[*\])]\s*$", text):
+        return ""                      # a sound event: *Pewds*, (coughs), [music]
+    if normalise(text) in HALLUCINATIONS and (sure is None or sure < 0.7):
+        return ""
+    collapsed = collapse_loops(text).strip()
+    if collapsed != text and normalise(collapsed) in HALLUCINATIONS:
+        return ""
+    return collapsed
+
+
+def judge_result(result):
+    """The same result with its text judged, and the fields that go with it."""
+    if not isinstance(result, dict):
+        return result
+    before = (result.get("text") or "").strip()
+    after = judge(before, result.get("segments"))
+    if after != before:
+        log("dropped %d chars of %s as noise" % (
+            len(before), "no-speech" if not after else "hallucinated"))
+    result["text"] = after
+    if not after:
+        result["segments"] = []
+    return result
+
+
+def silent_audio(audio):
+    """True for a clip that holds nothing but room tone.
+
+    whisper answers digital silence with a confident " Thank you." (measured:
+    no_speech_prob 1e-10, avg_logprob -0.28), so the reply can never be trusted
+    to tell speech from silence. The samples can. Only 16-bit PCM WAV is
+    inspected; anything else is taken at face value.
+    """
+    data = audio[2] if audio else b""
+    if len(data) < 44 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        return False
+    # find the data chunk, then take the mean square of the samples
+    offset = 12
+    while offset + 8 <= len(data):
+        chunk_id = data[offset:offset + 4]
+        size = int.from_bytes(data[offset + 4:offset + 8], "little")
+        if chunk_id == b"data":
+            body = data[offset + 8:offset + 8 + size]
+            break
+        offset += 8 + size + (size & 1)
+    else:
+        return False
+    samples = memoryview(body)[: len(body) - (len(body) % 2)].cast("h")
+    if not len(samples):
+        return True
+    total = 0
+    for value in samples:
+        total += value * value
+    rms = (total / len(samples)) ** 0.5
+    if rms <= 0:
+        return True
+    level = 20.0 * math.log10(rms / 32768.0)
+    return level < -50.0
 
 
 def language_name(value):
@@ -226,6 +362,10 @@ class Handler(BaseHTTPRequestHandler):
             log("could not read the request (%s); replaying it locally" % error)
             return self.replay_locally(content_type, body)
 
+        if silent_audio(audio):
+            log("silent clip (%.1f kB), answering with nothing" % (len(audio[2]) / 1024.0))
+            return self.send_text(wanted, "")
+
         if not api_key():
             return self.replay_locally(content_type, body, why="no GROQ_API_KEY set")
 
@@ -243,8 +383,13 @@ class Handler(BaseHTTPRequestHandler):
         except (URLError, TimeoutError, ValueError) as error:
             return self.replay_locally(content_type, body, why="Groq unreachable (%s)" % error)
 
-        text = (result.get("text") or "").strip()
-        log("cloud: %.1f kB of audio -> %d chars" % (len(audio[2]) / 1024.0, len(text)))
+        result = judge_result(result)
+        log("cloud: %.1f kB of audio -> %d chars" % (
+            len(audio[2]) / 1024.0, len((result.get("text") or "").strip())))
+        self.send_text(wanted, (result.get("text") or "").strip(), result)
+
+    def send_text(self, wanted, text, result=None):
+        """whisper.cpp's reply shape, for these words (or these no words)."""
         if wanted == "text":
             payload = text.encode("utf-8")
             self.send_response(200)
@@ -253,7 +398,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
             return
-        payload = json.dumps(reply_payload(result, wanted)).encode("utf-8")
+        payload = json.dumps(reply_payload(result or {"text": text}, wanted)).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
@@ -284,6 +429,13 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.dumps({"error": "no transcription engine available"}).encode()
             status = 503
             reply_type = "application/json"
+        # The app trusts whatever comes back, so the local engine's answer is
+        # judged here too: same filter, same rules as the cloud reply.
+        if status == 200 and "json" in (reply_type or ""):
+            try:
+                payload = json.dumps(judge_result(json.loads(payload.decode("utf-8")))).encode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                pass
         self.send_response(status)
         self.send_header("Content-Type", reply_type or "application/json")
         self.send_header("Content-Length", str(len(payload)))

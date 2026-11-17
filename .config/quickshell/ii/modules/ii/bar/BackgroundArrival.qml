@@ -20,7 +20,9 @@ import Quickshell.Hyprland
  * hook that used to un-fullscreen the incumbent). A window that arrives
  * therefore lands BEHIND the fullscreen one, invisible and unfocused -- and
  * this is the only thing that says it happened: one small card, top centre,
- * naming the app and its window, gone again after a few seconds.
+ * naming the app, gone again after a few seconds. The app's icon and its name,
+ * nothing else: the window title under it was one line too many, and it was the
+ * line that pushed the name into an ellipsis.
  *
  * Deliberately NOT the notification popup. That one is a queue with history,
  * sounds and an inbox behind it; this is a glance, and it must never be
@@ -203,8 +205,19 @@ Variants {
         // ── The card ────────────────────────────────────────────────────
         // A single row, pill-shaped, on the popup surface token so it reads as
         // part of the shell's card family rather than as a system banner.
-        // App name over window title: the name is what the user recognises at
-        // a glance, the title is what tells two windows of the same app apart.
+        //
+        // ONE LABEL, THE APP'S NAME (2026-11-17). It used to carry the window
+        // title under the name and shrink to a fixed width, which is how a
+        // "kitty" arrival came up as "kitty / ki..." -- the second line was
+        // information nobody asked for at a glance, and the first one was cut
+        // off to make room for it. What a background arrival has to say is
+        // which app is now open behind the fullscreen thing; the title is what
+        // the app's own tab bar is for.
+        //
+        // The width follows the name, so the pill is short for "kitty" and long
+        // for something like "Visual Studio Code" -- and only a name too long
+        // for the screen it is on gets an ellipsis, at the screen's edge rather
+        // than at an arbitrary fixed width.
         Rectangle {
             id: card
 
@@ -213,10 +226,18 @@ Variants {
                 : null
             readonly property string appName: card.entry?.name ?? tell.arrival?.class ?? ""
 
+            // Everything in the pill that is not the name: the row's left and
+            // right margins, the icon and the gap after it, plus the slack that
+            // keeps the name from touching the rounded end.
+            readonly property real chrome: 11 + 36 + 12 + 20 + 14
+            readonly property real nameWidth: Math.ceil(nameLabel.implicitWidth)
+            // The most the pill may take before it would run off the screen.
+            readonly property real maxWidth: Math.max(120, tell.width - 48)
+
             anchors.top: parent.top
             anchors.topMargin: 16
             anchors.horizontalCenter: parent.horizontalCenter
-            width: Math.min(content.implicitWidth + 30, tell.width - 48)
+            width: Math.min(card.nameWidth + card.chrome, card.maxWidth)
             height: 58
             radius: Appearance.rounding.full
             color: Appearance.colors.colSurfaceContainerHigh
@@ -247,30 +268,17 @@ Variants {
                     }
                 }
 
-                ColumnLayout {
-                    Layout.fillWidth: true
+                StyledText {
+                    id: nameLabel
                     Layout.alignment: Qt.AlignVCenter
-                    spacing: -2
-
-                    StyledText {
-                        Layout.fillWidth: true
-                        // The app name, in the shell's secondary tone: it is
-                        // the label of the card, not its content.
-                        font.pixelSize: Appearance.font.pixelSize.smaller
-                        color: Appearance.colors.colSubtext
-                        elide: Text.ElideRight
-                        text: card.appName
-                    }
-
-                    StyledText {
-                        Layout.fillWidth: true
-                        font.pixelSize: Appearance.font.pixelSize.small
-                        color: Appearance.colors.colOnSurface
-                        elide: Text.ElideRight
-                        text: tell.arrival?.title && tell.arrival.title.length > 0
-                            ? tell.arrival.title
-                            : Translation.tr("Opened in the background")
-                    }
+                    // Not `fillWidth`: a filled child reports the space it was
+                    // given, not the space its words need, and that is what made
+                    // the pill measure itself too narrow to hold the name.
+                    Layout.maximumWidth: Math.max(60, card.maxWidth - card.chrome)
+                    font.pixelSize: Appearance.font.pixelSize.small
+                    color: Appearance.colors.colOnSurface
+                    elide: Text.ElideRight
+                    text: card.appName
                 }
             }
         }

@@ -318,7 +318,11 @@ paste_text() {
     # window that ends first lets the shell announce the user's own picture as
     # "Image copied" again -- a copy nobody made (reported 2026-11-15: a
     # dictation sometimes re-copied the screenshot that was already there).
-    timeout 3 qs -c ii ipc call cliphistService quietFor 4000 >/dev/null 2>&1 || true
+    # 8000, not 4000: the borrowed sentence goes down and is put back a second or
+    # more later, and BOTH changes are announced as "Copied" if the window has
+    # run out by then -- which is how a dictation showed a "Copied" card for
+    # text nobody copied.
+    timeout 3 qs -c ii ipc call cliphistService quietFor 8000 >/dev/null 2>&1 || true
     # --sensitive makes the copy advertise x-kde-passwordManagerHint=secret, which
     # cliphist honours by NOT storing it. Without this a dictation is typed into
     # the cursor and then quietly kept forever in the clipboard history database.
@@ -361,6 +365,15 @@ paste_text() {
     fi
     PASTE_STAGED=1
     paste_shortcut "${2:-}" || { PASTE_FAIL="no Ctrl+V (ydotoold down and wtype missing?)"; restore_clipboard; return 1; }
+    # The chord is out; does the selection still hold the sentence? A competing
+    # owner between the copy and the app's read -- another copy, or a clipboard
+    # manager re-serving an entry -- is the other way a dictation pastes
+    # something else, and it deserves a line in the log when it happens. Only
+    # the fact is logged, never the words.
+    sleep 0.12
+    if [ "$(wl-paste -n -t text/plain 2>/dev/null)" != "$1" ]; then
+        say "clipboard changed under the paste -- another owner took the selection"
+    fi
     return 0
 }
 
@@ -962,6 +975,17 @@ finish_raw() {
         grab_window "$SHOT_PAIR" "$WINDOW_GEO" || rm -f "$SHOT_BEFORE"
     fi
 
+    # ONE delivery at a time. Two dictations in flight -- a quick second hold
+    # while the first is still pasting -- fight over the selection: the second
+    # one's copy can land between the first one's copy and its chord, and the
+    # first then pastes the SECOND sentence. A lock costs nothing and takes that
+    # whole class of "it pasted something else" out.
+    local delivery_lock="$STATE/delivery.lock"
+    if command -v flock >/dev/null 2>&1; then
+        exec 9>"$delivery_lock" || true
+        flock -w 10 9 || say "delivery lock timed out -- pasting anyway"
+    fi
+
     case "$method" in
         paste)
             # A PASTE IS ONE CHORD. In a window with no text box it does nothing
@@ -997,6 +1021,11 @@ finish_raw() {
         wl-copy) printf '%s' "$out" | wl-copy --sensitive -t text/plain ;;
         *)       "$method" "$out" ;;
     esac
+    # When the chord went out. The clipboard may not be put back until the app
+    # has had time to READ the selection (see the restore below).
+    local paste_sent_ms=""
+    case "$method" in paste*) paste_sent_ms="$(date +%s%3N)" ;; esac
+
     # Did it land? A wide band of *new* pixels in the bottom of the window -- the
     # shape of a line of text in a prompt box -- counts as delivered. See
     # paste-landed.py for why that is the shape, and what it ignores.
@@ -1021,12 +1050,34 @@ finish_raw() {
         done
     fi
     rm -f "$SHOT_BEFORE" "$SHOT_PAIR" "$SHOT_AFTER"
-    # NOW the borrowed clipboard goes back -- after the app has had the whole
-    # landed-check window to read the sentence off the selection. Restoring on a
-    # fixed 350ms timer was the other half of "it inputted an earlier copied
-    # thing": a slow reader pasted whatever the clipboard held once it had been
-    # put back.
-    case "$method" in paste*) restore_clipboard ;; esac
+    # NOW the borrowed clipboard goes back -- but only after the app has had a
+    # real chance to READ the selection.
+    #
+    # The chord carries no text: Ctrl+V pastes whatever the selection holds at
+    # the instant the APP reads it, not when the key is pressed. A big Electron
+    # window, an app under load, or a window that only handles the key on its
+    # next frame reads it late -- and restoring the moment the chord went out
+    # handed it the user's PREVIOUS clipboard instead. Reported: "it pastes
+    # something completely different, a random other thing I copied". The
+    # landed-check above usually buys 0.2-0.6s, which is not enough on its own,
+    # and when the screenshots were unavailable it bought nothing at all. So the
+    # sentence stays put for a minimum dwell measured from the chord itself,
+    # whatever the landed check concluded.
+    case "$method" in
+        paste*)
+            local dwell_ms=1500 elapsed_ms=0 pad
+            if [ -n "$paste_sent_ms" ]; then
+                elapsed_ms=$(( $(date +%s%3N) - paste_sent_ms ))
+            fi
+            if [ "$elapsed_ms" -lt "$dwell_ms" ]; then
+                pad="$(awk -v d="$dwell_ms" -v e="$elapsed_ms" \
+                    'BEGIN { printf "%.2f", (d - e) / 1000 }')"
+                sleep "$pad"
+                say "clipboard kept ${dwell_ms}ms so the app could read the sentence (waited ${pad}s more)"
+            fi
+            restore_clipboard
+            ;;
+    esac
     if [ "$landed" = "1" ]; then
         say "delivery landed in the focused window"
     else

@@ -54,11 +54,11 @@ ShellRoot {
     // the only chance to rescue one that never reached a text box.
     TranscriptCard {}
 
-    // No dictation tell of ours anywhere any more (2026-11-17): neither the
-    // bar's own view nor the drop-down this used to add for fullscreen apps.
-    // WhisperFlow draws the recording -- its own pill, bottom centre, and it
-    // reaches over a fullscreen window too -- from dictate-hud.py's feed of the
-    // dictation daemon's meter. One display for one microphone.
+    // The fullscreen dictation drop-down stays gone (2026-11-17): the recording
+    // is shown in the bar's own island again -- see NowBar's dictation tab,
+    // which now draws a card in the transcript card's colours rather than bare
+    // bars -- and WhisperFlow's HUD is no longer driven by this shell. Over a
+    // fullscreen window the bar is away, so nothing is shown there for now.
 
     // Stuff for every panel family
 

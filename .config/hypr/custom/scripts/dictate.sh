@@ -83,8 +83,11 @@ MIN_SECONDS="${MIN_SECONDS:-0.4}"
 MIC="${MIC:-}"
 DICTATE_PORT="${DICTATE_PORT:-8917}"
 # Where the audio is SENT (see ii-dictate.conf): the local server above is the
-# safety net, the bridge is where the words are actually made.
-TRANSCRIBE_PORT="${DICTATE_TRANSCRIBE_PORT:-$DICTATE_PORT}"
+# safety net, the bridge is where the words are actually made. NOT resolved here:
+# the config file that sets DICTATE_TRANSCRIBE_PORT is sourced further down, so a
+# value read at this point would silently be the LOCAL port again -- which is
+# exactly how dictation kept going local after the cloud setup. Resolved at the
+# request instead, below.
 TYPE_CMD="${TYPE_CMD:-auto}"
 KEEP_AUDIO="${KEEP_AUDIO:-0}"
 SAVE_HISTORY="${SAVE_HISTORY:-0}"
@@ -600,7 +603,7 @@ transcribe() { # transcribe <wav> -> prints the text
     # response_format=text has the words and nothing else.
     if curl -s --max-time 300 -F "file=@$wav" -F response_format=verbose_json \
             -F temperature=0 -F "language=$LANGUAGE" \
-            "http://127.0.0.1:${TRANSCRIBE_PORT}/inference" \
+            "http://127.0.0.1:${DICTATE_TRANSCRIBE_PORT:-${DICTATE_PORT:-8917}}/inference" \
             -o "$reply" 2>/dev/null && [ -s "$reply" ]; then
         if TF_TEXT="$out" TF_LANG="$LANG_FILE" LANG_CODES="$LANG_CODES" \
                 python3 - "$reply" <<'PY'

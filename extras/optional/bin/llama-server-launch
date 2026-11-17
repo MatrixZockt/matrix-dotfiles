@@ -111,7 +111,7 @@ fi
 
 # ── The served model NAME ───────────────────────────────────────────────────
 # Without this, the only id the server advertises is the absolute path of the
-# .gguf (`~/Models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf`), in /v1/models
+# .gguf (`/home/matrix/Models/Qwen3-8B/Qwen3-8B-Q4_K_M.gguf`), in /v1/models
 # and in every response body. Clients that build a model picker out of
 # /v1/models -- Claude Desktop's gateway screen does exactly that -- cannot use
 # a filesystem path as a model name and report "Gateway returned no usable
@@ -139,6 +139,22 @@ args=(--model "$model" --alias "$MODEL_ALIAS"
       --n-gpu-layers "$ngl"
       --parallel "$parallel"
       --cache-type-k q4_0 --cache-type-v q4_0
+      # THE KV CACHE LIVES IN SYSTEM RAM, NOT VRAM (2026-11-17).
+      #
+      # 8 GB of VRAM has to hold this model AND a speech model now: dictation
+      # moved from whisper `small` to `large-v3-turbo` (see
+      # ~/.config/ii-dictate.conf), which needs ~900 MiB for model + compute
+      # buffers and could not allocate them next to 6.1 GB of llama-server --
+      # measured, cudaMalloc failed with 846 MiB free, and the speech server
+      # refused to start at all.
+      #
+      # Moving the model or halving the context would both cost real quality, so
+      # the KV cache (q4_0, 32k = ~1.2 GB) is the thing that moves: the WEIGHTS
+      # stay on the GPU, the context length is unchanged, and prompt processing
+      # pays a PCIe round trip per token instead. Measured after this change:
+      # llama-server 4.9 GB + whisper-turbo 0.9 GB + desktop coexist with ~1 GB
+      # spare, and a dictation request answers in ~0.35 s.
+      -nkvo
       --batch-size 4096 --ubatch-size 512
       --slots --metrics)
 

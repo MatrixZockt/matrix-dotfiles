@@ -203,6 +203,23 @@ Scope {
             property real grabX: 0
             property real grabY: 0
 
+            // Is the pointer on the card at all? One answer for the whole frame,
+            // and the label and the unpin button both live off it: they are
+            // decoration on a picture whose whole point is the picture, so they
+            // belong to the pointer, not to the card's permanent face.
+            //
+            // A HoverHandler rather than a MouseArea, and not for style. It is
+            // true whenever a pointer is inside this item's bounds (Qt: "true
+            // whenever any pointing device cursor is within the bounds of the
+            // parent Item"), so it keeps answering over the drag area, the text
+            // header and the unpin button alike -- the three MouseAreas that a
+            // plain `containsMouse` would have to be stitched together from, and
+            // each of which reports false the moment the pointer is over one of
+            // the others. It also takes no clicks away from any of them.
+            readonly property bool hovering: frameHover.hovered || menu.visible
+
+            HoverHandler { id: frameHover }
+
             function dragStart(mouseX, mouseY) {
                 pictureFrame.grabX = mouseX;
                 pictureFrame.grabY = mouseY;
@@ -436,11 +453,16 @@ Scope {
                     }
                     width: liveLabelRow.implicitWidth + 14
                     height: 20
-                    radius: height / 2
-                    color: Qt.rgba(0, 0, 0, 0.55)
+                                          radius: height / 2
+                      color: Qt.rgba(0, 0, 0, 0.55)
+                      // Only while the pointer is here. A permanent "Desktop 2"
+                      // over a mirror of desktop 2 is a label that says nothing
+                      // new and sits on top of the thing it is describing.
+                      opacity: pictureFrame.hovering ? 1 : 0
+                      Behavior on opacity { NumberAnimation { duration: 140 } }
 
-                    RowLayout {
-                        id: liveLabelRow
+                      RowLayout {
+                          id: liveLabelRow
                         anchors.centerIn: parent
                         spacing: 4
 
@@ -685,9 +707,9 @@ Scope {
             }
 
             // The quick way out: a small unpin button in the top-right corner, on
-            // the picture itself. Always there while the picture is pinned (that
-            // is the point of "quick"), translucent enough not to fight the
-            // screenshot, and ringed on hover so it reads as a button.
+            // the picture itself. Shown while the pointer is on the picture, so
+            // it is quick without being permanent, and ringed on hover so it
+            // reads as a button.
             Item {
                 id: unpinButton
                 anchors.top: pictureFrame.top
@@ -696,6 +718,10 @@ Scope {
                 anchors.rightMargin: 8
                 width: 24
                 height: 24
+                // The way out appears when the pointer arrives, like the label:
+                // a close button parked on every pinned picture at all times is
+                // a permanent dark disc on top of the thing being looked at.
+                visible: pictureFrame.hovering
 
                 Rectangle {
                     anchors.fill: parent

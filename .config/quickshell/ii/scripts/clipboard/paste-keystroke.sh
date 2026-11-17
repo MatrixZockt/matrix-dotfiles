@@ -62,6 +62,25 @@ FOCUS_DEADLINE_MS=600
 mkdir -p "$STATE_DIR" 2>/dev/null || true
 now() { date +%s%3N; }
 
+# Focus a window by address, on either kind of Hyprland.
+#
+# This desktop runs the Lua config: `hyprctl dispatch` wraps whatever it is given
+# in `return hl.dispatch(...)`, so the argument has to be a DISPATCHER object and
+# the stock `focuswindow address:0x…` is a Lua syntax error that answers
+# "error: … ')' expected near 'address'" and does nothing. Measured here: the
+# plain form silently left the focus where it was, which is how a "restore" can
+# look implemented and paste into the wrong window anyway. So try the dispatcher
+# this config itself uses (see cover.lua focusAddr), then the stock command, and
+# let the caller decide whether it worked by asking Hyprland who is focused.
+focus_address() {
+    local target="$1"
+    hyprctl dispatch "hl.dsp.focus({ window = hl.get_window(\"address:$target\") })" >/dev/null 2>&1
+    sleep 0.05
+    [ "$(active_window | cut -d' ' -f1)" = "$target" ] && return 0
+    hyprctl dispatch focuswindow "address:$target" >/dev/null 2>&1
+    return 0
+}
+
 # "0x55d3… com.example.App" for whatever window Hyprland considers active.
 active_window() {
     hyprctl activewindow -j 2>/dev/null | python3 -c '
@@ -111,13 +130,19 @@ restored="none"
 if [ -n "$owner_addr" ]; then
     current="$(active_window)"
     if [ "${current%% *}" != "$owner_addr" ]; then
-        hyprctl dispatch focuswindow "address:$owner_addr" >/dev/null 2>&1 || true
+        focus_address "$owner_addr"
         deadline=$((start_ms + FOCUS_DEADLINE_MS))
         while [ "$(now)" -lt "$deadline" ]; do
             [ "$(active_window | cut -d' ' -f1)" = "$owner_addr" ] && break
             sleep 0.02
         done
-        restored="asked"
+        # Reported, because a restore that did not take is the difference between
+        # "pasted into the app" and "pasted into whatever the pointer was on".
+        if [ "$(active_window | cut -d' ' -f1)" = "$owner_addr" ]; then
+            restored="yes"
+        else
+            restored="failed"
+        fi
     else
         restored="already"
     fi

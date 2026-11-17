@@ -156,6 +156,10 @@ def call_groq(fields, audio):
             "Authorization": "Bearer " + api_key(),
             "Content-Type": "multipart/form-data; boundary=" + boundary,
             "Accept": "application/json",
+            # Cloudflare in front of the API bans urllib's default signature
+            # outright (error 1010), which is not an auth failure but reads like
+            # one. A plain product string is allowed and identifies this thing.
+            "User-Agent": "groq-whisper-bridge/1.0",
         },
         method="POST",
     )

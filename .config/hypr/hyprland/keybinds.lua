@@ -384,7 +384,11 @@ hl.bind("SUPER + W", hl.dsp.exec_cmd(browser), { description = "App: Browser" })
 hl.bind("SUPER + C", hl.dsp.exec_cmd(codeEditor), { description = "App: Code editor" })
 hl.bind("CTRL + SUPER + SHIFT + ALT + W", hl.dsp.exec_cmd(officeSoftware), { description = "App: Office software" })
 hl.bind("SUPER + X", hl.dsp.exec_cmd(textEditor), { description = "App: Text editor" })
-hl.bind("CTRL + SUPER + V", hl.dsp.exec_cmd(volumeMixer), { description = "App: Volume mixer" })
+-- Not `volumeMixer` directly: custom/scripts/volume-mixer.sh drops the chord
+-- when SUPER is held, or was a moment ago, which is exactly the state dictation
+-- pastes its sentence in. A Ctrl+V delivered then reads as this shortcut, and
+-- pavucontrol appeared over the text being dictated, every few sentences.
+hl.bind("CTRL + SUPER + V", hl.dsp.exec_cmd("~/.config/hypr/custom/scripts/volume-mixer.sh"), { description = "App: Volume mixer" })
 hl.bind("SUPER + I", hl.dsp.exec_cmd(settingsApp), { description = "App: Settings app" })
 hl.bind("CTRL + SHIFT + Escape", hl.dsp.exec_cmd(taskManager), { description = "App: Task manager" })
 

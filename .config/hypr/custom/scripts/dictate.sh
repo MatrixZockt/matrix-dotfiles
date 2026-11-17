@@ -1065,7 +1065,7 @@ finish_raw() {
     # whatever the landed check concluded.
     case "$method" in
         paste*)
-            local dwell_ms=1500 elapsed_ms=0 pad
+            local dwell_ms=1000 elapsed_ms=0 pad
             if [ -n "$paste_sent_ms" ]; then
                 elapsed_ms=$(( $(date +%s%3N) - paste_sent_ms ))
             fi

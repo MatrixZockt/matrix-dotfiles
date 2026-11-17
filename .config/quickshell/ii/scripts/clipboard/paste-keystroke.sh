@@ -105,6 +105,33 @@ if [ "${1:-}" = "remember" ]; then
     exit 0
 fi
 
+# FOCUS-FOLLOWS-MOUSE IS SWITCHED OFF FOR THIS PASTE.
+#
+# `input:follow_mouse = 1` on this desktop means ANY pointer motion re-focuses
+# whatever window is under the cursor. So the popup closing, the remembered
+# window taking the keyboard back, and the chord going out are three separate
+# moments -- and a hand that moves the mouse in between (which it always does:
+# the click on an entry is followed by moving away) hands the keyboard to the
+# window under the cursor again, tens of milliseconds before Ctrl+V is sent.
+# That is exactly "the clipboard value goes into the window I was hovering, not
+# the one I selected", with the script's own log happily saying the focus was
+# restored, because it was -- and then it was stolen again.
+#
+# `hyprctl keyword` does not work on this build ("keyword can't work with
+# non-legacy parsers"), the option goes through the Lua config instead. The old
+# value is put back no matter how this script ends, and never left at 0.
+follow_mouse="$(hyprctl getoption input:follow_mouse 2>/dev/null | sed -n 's/^int: *//p' | head -1)"
+restore_follow_mouse() {
+    if [ -n "${follow_mouse:-}" ] && [ "${follow_mouse:-1}" != "0" ]; then
+        hyprctl eval "hl.config({ input = { follow_mouse = $follow_mouse } })" >/dev/null 2>&1
+    fi
+    return 0
+}
+trap restore_follow_mouse EXIT INT TERM
+if [ -n "${follow_mouse:-}" ] && [ "${follow_mouse:-0}" != "0" ]; then
+    hyprctl eval 'hl.config({ input = { follow_mouse = 0 } })' >/dev/null 2>&1
+fi
+
 start_ms=$(now)
 
 # ── 1. the popup's surface has to be gone ───────────────────────────────────
@@ -183,12 +210,22 @@ fi
 # event handling, and is far below the delay a person would notice.
 sleep 0.12
 
+# Last check before the key: is the remembered window still the focused one?
+# With follow_mouse held off it should be; if something else managed to take it
+# anyway (a window opening, a workspace switch), take it back now.
+if [ -n "$owner_addr" ]; then
+    focus_address "$owner_addr"
+    sleep 0.05
+fi
+
 # One line per paste, for the next time this misbehaves: which window the popup
 # came from, whether the keyboard had to be taken back, both handover timings,
-# and what the caret helper answered. The pasted text is never logged.
-printf '%s owner=%s class=%s restored=%s layer=%sms owner_wait=%sms focus=%sms caret=%s\n' \
+# what the caret helper answered, and whether the pointer was free to steal the
+# focus at that moment. The pasted text is never logged.
+follow_now="$(hyprctl getoption input:follow_mouse 2>/dev/null | sed -n 's/^int: *//p' | head -1)"
+printf '%s owner=%s class=%s restored=%s layer=%sms owner_wait=%sms focus=%sms caret=%s follow=%s\n' \
     "$(date +%H:%M:%S)" "${owner_addr:-none}" "${focus_class:-none}" "$restored" \
-    "$layer_ms" "$owner_ms" "$focus_ms" "$caret" \
+    "$layer_ms" "$owner_ms" "$focus_ms" "$caret" "${follow_now:-?}" \
     >>"$PASTE_LOG" 2>/dev/null || true
 
 # PASTE_DRY_RUN=1 stops before the keystroke: the targeting, the handover and
@@ -197,4 +234,12 @@ if [ "${PASTE_DRY_RUN:-0}" = "1" ]; then
     exit 0
 fi
 
-exec ydotool key -d 1 29:1 47:1 47:0 29:0
+ydotool key -d 1 29:1 47:1 47:0 29:0
+status=$?
+# The key is delivered by the compositor to whoever holds the keyboard at that
+# instant, which just happened; a moment is enough for the app to take the
+# selection, and only then does pointer-follows-focus come back.
+sleep 0.12
+restore_follow_mouse
+trap - EXIT
+exit $status

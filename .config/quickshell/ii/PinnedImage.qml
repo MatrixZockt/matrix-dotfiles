@@ -453,16 +453,17 @@ Scope {
                     }
                     width: liveLabelRow.implicitWidth + 14
                     height: 20
-                                          radius: height / 2
-                      color: Qt.rgba(0, 0, 0, 0.55)
-                      // Only while the pointer is here. A permanent "Desktop 2"
-                      // over a mirror of desktop 2 is a label that says nothing
-                      // new and sits on top of the thing it is describing.
-                      opacity: pictureFrame.hovering ? 1 : 0
-                      Behavior on opacity { NumberAnimation { duration: 140 } }
+                    radius: height / 2
+                    color: Qt.rgba(0, 0, 0, 0.55)
+                    // Only while the pointer is here. A permanent "Desktop 2" over
+                    // a mirror of desktop 2 is a label that says nothing new, on
+                    // top of the very thing it is describing.
+                    opacity: pictureFrame.hovering ? 1 : 0
 
-                      RowLayout {
-                          id: liveLabelRow
+                    Behavior on opacity { NumberAnimation { duration: 140 } }
+
+                    RowLayout {
+                        id: liveLabelRow
                         anchors.centerIn: parent
                         spacing: 4
 

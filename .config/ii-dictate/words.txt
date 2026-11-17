@@ -1,0 +1,85 @@
+# Words whisper should expect to hear. One term per line; `#` starts a comment.
+#
+# This list is the whole of the vocabulary biasing: dictate-server.sh reads it
+# when it starts and passes it to whisper.cpp as the decoder's initial prompt,
+# so both users of that server -- the hold-SUPER dictation and the WhisperFlow
+# app -- get exactly the same words and not one millisecond of extra work. The
+# decoder reads it as text it has "just written", which is why a name here is
+# spelled correctly instead of phonetically.
+#
+# Edits are picked up on their own within a few seconds (dictate-vocab-reload
+# restarts the warm server; the model reloads in about a second). Keep it under
+# roughly a hundred terms: whisper only keeps about half of its text context for
+# the prompt, and a long list starts to displace the transcript itself.
+
+# --- this desktop ---
+Hyprland
+hyprctl
+Quickshell
+QML
+Wayland
+XWayland
+Kitty
+Brave
+Electron
+Waybar
+swaync
+hyprlock
+hypridle
+hyprpaper
+fuzzel
+wofi
+cliphist
+wl-copy
+wl-paste
+ydotool
+wtype
+grim
+slurp
+pipewire
+wireplumber
+systemd
+
+# --- tools and engines ---
+whisper.cpp
+WhisperFlow
+llama.cpp
+llama-server
+Qwen
+GGUF
+CUDA
+NVIDIA
+Vulkan
+GGML
+
+# --- work ---
+Grafizum
+MatrixZockt
+GitHub
+GitLab
+Codebuff
+pull request
+merge request
+commit
+branch
+deploy
+deployment
+pipeline
+repository
+dotfiles
+API
+JSON
+YAML
+SQL
+Docker
+Kubernetes
+
+# --- German terms that get mangled ---
+Zwischenablage
+Tastenkürzel
+Konfiguration
+Terminal
+Repository
+Bildschirm
+Netzwerk
+Sicherung

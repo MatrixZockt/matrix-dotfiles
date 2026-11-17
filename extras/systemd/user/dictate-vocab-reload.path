@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch the dictation vocabulary file
+
+[Path]
+PathChanged=%h/.config/ii-dictate/words.txt
+PathModified=%h/.config/ii-dictate/words.txt
+Unit=dictate-vocab-reload.service
+
+[Install]
+WantedBy=default.target

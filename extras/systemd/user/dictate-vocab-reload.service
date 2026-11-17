@@ -1,0 +1,9 @@
+[Unit]
+Description=Restart the warm dictation server so a words.txt edit takes effect
+Documentation=file://%h/.config/ii-dictate/words.txt
+
+[Service]
+Type=oneshot
+# Debounce: an editor saving three times in a second should cost one model
+# reload, not three. By the time this fires the file has stopped changing.
+ExecStart=/bin/sh -c 'sleep 3; /usr/bin/systemctl --user restart dictate-server.service'

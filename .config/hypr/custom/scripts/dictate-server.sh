@@ -39,6 +39,34 @@ CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/ii-dictate.conf"
 [ -r "$CONFIG" ] && . "$CONFIG"
 mkdir -p "$STATE"
 
+vocab_args() {
+    # THE VOCABULARY PROMPT.
+    #
+    # whisper's decoder can be handed a piece of text it imagines it has just
+    # written, and it then spells what it hears the way that text spells it. One
+    # comma-separated list of the names and jargon this desktop actually talks
+    # about buys correct "Grafizum", "Quickshell" and "hyprctl" for free -- the
+    # cost is a few context tokens and no measurable time, because it rides along
+    # with the request the server was going to make anyway.
+    #
+    # It lives HERE rather than in each client on purpose: this one process
+    # answers both the hold-SUPER dictation and the WhisperFlow app, so both get
+    # the same words from one file and neither client needs to know the feature
+    # exists. A client that sends its own `prompt` form field (WhisperFlow does,
+    # when it re-decodes a clip to steer away from music) overrides it for that
+    # one request, which is the right precedence.
+    #
+    # `--carry-initial-prompt` keeps it applied when a long recording is decoded
+    # in more than one window; without it only the first window would see it.
+    local file="${XDG_CONFIG_HOME:-$HOME/.config}/ii-dictate/words.txt"
+    [ -r "$file" ] || return 0
+    local words
+    words="$(sed -e 's/#.*//' "$file" | sed '/^[[:space:]]*$/d' |
+        head -100 | paste -sd, - | sed -e 's/,/, /g' -e 's/[[:space:]]\{2,\}/ /g')"
+    [ -n "$words" ] || return 0
+    printf -- '--prompt\0%s\0--carry-initial-prompt\0' "$words"
+}
+
 server_bin() {
     # The CUDA build first: it is the one that makes small.en usable at
     # dictation speed. The CPU build stays as the fallback for a machine
@@ -71,8 +99,12 @@ start() {
     bin="$(server_bin)" || { echo "no whisper-server build in $DATA/whisper.cpp" >&2; return 1; }
     model="$DATA/models/$MODEL"
     [ -f "$model" ] || { echo "no model at $model" >&2; return 1; }
+    local -a vocab=()
+    # -d '' because the words list is passed NUL-separated: terms may contain
+    # spaces ("pull request") and must survive as ONE argument.
+    mapfile -d '' -t vocab < <(vocab_args)
     setsid "$bin" -m "$model" -l "$LANGUAGE" --host 127.0.0.1 \
-        --port "$DICTATE_PORT" -mc 0 --convert >>"$LOGFILE" 2>&1 &
+        --port "$DICTATE_PORT" -mc 0 --convert "${vocab[@]}" >>"$LOGFILE" 2>&1 &
     echo $! > "$PIDFILE"
 }
 
@@ -91,8 +123,10 @@ run() {
     # Own pidfile while we are the server, so a hand `stop` still means stop.
     echo $$ > "$PIDFILE"
     trap 'rm -f "$PIDFILE"' EXIT
+    local -a vocab=()
+    mapfile -d '' -t vocab < <(vocab_args)
     exec "$bin" -m "$model" -l "$LANGUAGE" --host 127.0.0.1 \
-        --port "$DICTATE_PORT" -mc 0 --convert
+        --port "$DICTATE_PORT" -mc 0 --convert "${vocab[@]}"
 }
 
 case "${1:-start}" in

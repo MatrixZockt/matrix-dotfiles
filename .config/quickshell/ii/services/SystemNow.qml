@@ -105,6 +105,24 @@ Singleton {
     // fresh interpreter costs ~30 ms of start-up and four of those a second
     // would be a seventh of a core for a gauge. -1 until it has a baseline.
     property real intelGpuPct: -1
+    // ── The same engine, minus the desktop drawing itself ────────────────
+    //
+    // intelGpuPct above is the whole chip and it is honest, but it is also a
+    // number that can never be low: this panel runs at 120 Hz, so Hyprland
+    // re-draws the screen up to 120 times a second just keeping it on the wall.
+    // Measured on this laptop, with nothing animating and no app open: ~48% of
+    // the render engine for the compositor alone, and ~57% for the chip. Drawn
+    // on a gauge that reads "GPU", that is a nearly-90% figure on a machine the
+    // task manager calls idle, and both of those numbers look broken to whoever
+    // is reading them -- reported 2026-11-17.
+    //
+    // So the gauge shows the fraction the APPS asked for: everything except the
+    // compositor and the shell, which gpu-busy.py names by `comm` and leaves out
+    // of this figure. Same measurement, same engine, one question asked instead
+    // of another: "is something using the graphics card" rather than "how often
+    // is the screen being repainted". The whole-chip figure stays here for
+    // anything that wants to describe the engine itself.
+    property real intelAppsPct: -1
     // The two halves of the capacity fraction, exposed so a view can write
     // "7%" as "3.8 W of 55 W" instead of leaving the reader to wonder what the
     // percentage is a percentage OF. -1 when the driver did not report it.
@@ -220,13 +238,18 @@ Singleton {
     // One policy in one place, because four surfaces draw it: the island's
     // tile and graphs, the bar pocket, the task manager card and the bar's
     // popup all read these three properties.
-    readonly property real gpuMetricPct: Math.max(root.gpuClockPct, root.intelGpuPct)
+    // The iGPU half of the gauge: the app figure once there is one, and the
+    // whole chip until then (or on a machine whose script has not been updated).
+    readonly property real intelDisplayPct: root.intelAppsPct >= 0
+        ? root.intelAppsPct
+        : root.intelGpuPct
+    readonly property real gpuMetricPct: Math.max(root.gpuClockPct, root.intelDisplayPct)
     readonly property var gpuMetricHistory: root.gpuHistory
     // Which chip the number belongs to -- and therefore what the caption says.
     // Ties go to the discrete card; when the iGPU is higher the number is the
     // iGPU's and is labelled as such, so "74%" always comes with the chip that
     // produced it instead of quietly meaning whichever one happened to win.
-    readonly property bool gpuMetricDiscrete: root.gpuClockPct >= root.intelGpuPct
+    readonly property bool gpuMetricDiscrete: root.gpuClockPct >= root.intelDisplayPct
     readonly property string gpuMetricName: root.gpuMetricDiscrete ? root.gpuName : root.integratedGpuName
     // The other chip's inventory name, for the caption when the iGPU wins. The
     // inventory ranks the discrete card first on this laptop (`rankGpus`), so
@@ -365,12 +388,17 @@ fi
         command: ["python3", "-u", Quickshell.shellPath("scripts/system/gpu-busy.py"), "--loop", "1"]
         stdout: SplitParser {
             onRead: line => {
-                const v = parseFloat(String(line ?? "").trim());
+                // "<apps> <whole chip>", in that order -- see intelAppsPct.
+                const parts = String(line ?? "").trim().split(/\s+/);
+                const apps = parseFloat(parts[0]);
+                const whole = parseFloat(parts[1]);
                 // -1 is the script's "no baseline yet", and it must not blank a
                 // reading that was already earned: the first line after a shell
                 // restart would otherwise read as an idle GPU.
-                if (!isNaN(v) && v >= 0)
-                    root.intelGpuPct = Math.min(100, v) / 100;
+                if (!isNaN(whole) && whole >= 0)
+                    root.intelGpuPct = Math.min(100, whole) / 100;
+                if (!isNaN(apps) && apps >= 0)
+                    root.intelAppsPct = Math.min(100, apps) / 100;
             }
         }
     }
@@ -694,6 +722,7 @@ echo "v|$t|$w|$lim|$c|$cc|$mm|$gt|$mu|$mt|$mx|$cavg|$cpeak|$gov|$epp|$pw|$util"
         function values(): string {
             return `cpu=${root.pct(root.cpuPct)} ram=${root.pct(root.ramPct)} gpu=${root.pct(root.gpuMetricPct)} temp=${root.tempText(root.tempC)}`
                 + ` gpuDiscrete=${root.pct(root.gpuClockPct)} gpuIntegrated=${root.pct(root.intelGpuPct)}`
+                + ` gpuApps=${root.pct(root.intelAppsPct)}`
                 + ` clock=${root.cpuClockText()} policy=${root.cpuPolicyText()}`
                 + ` draw=${root.gpuPowerDrawW < 0 ? "--" : root.gpuPowerDrawW.toFixed(1)}W`
                 + ` limit=${root.gpuPowerLimitW < 0 ? "--" : Math.round(root.gpuPowerLimitW)}W`

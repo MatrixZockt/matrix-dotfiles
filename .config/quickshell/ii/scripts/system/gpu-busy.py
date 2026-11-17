@@ -38,7 +38,24 @@ STATE AND FIRST CALL
     (unknown) rather than 0: a reading the caller has not earned is worse than
     no reading.
 
-Prints one number: the percentage, or -1.
+THE DESKTOP'S OWN DRAWING IS NOT THE GPU BEING "USED"
+    The whole-chip figure is honest and it is almost never low: this panel runs
+    at 120 Hz, so the compositor re-draws the screen up to 120 times a second
+    just to keep it on the wall, and measured 48% of the render engine for
+    Hyprland alone on a desktop with nothing animating. A gauge that adds that
+    tax to the apps' work reads ~60-90% while the user is doing nothing, next to
+    a task manager that says 0% for every program -- two numbers, neither of
+    them wrong, and the gauge is the one that looks broken.
+
+    So the same walk produces two figures: the whole chip's render-engine
+    fraction, and the fraction used by everything that is not the desktop's own
+    chrome -- the compositor (Hyprland) and the shell (qs). The second is what
+    the gauge shows: work a program asked the GPU to do, which is the question
+    "is the graphics card working" actually means. The first is still printed,
+    second on the line, and still means "how busy is the engine".
+
+Prints two numbers: the application percentage and the whole-chip percentage,
+or -1 when there is no baseline yet.
 """
 
 import json
@@ -48,6 +65,15 @@ import time
 
 MAX_GAP_DEFAULT = 10.0
 RESCAN_DEFAULT = 10.0
+
+# Processes whose rendering IS the desktop: the compositor draws every window
+# and the shell draws the bar, the popups and the wallpaper. Their engine time
+# is the fixed cost of having a screen, not evidence that the GPU is in use, so
+# it is counted in the whole-chip figure and left out of the application one.
+# Matched on `comm`, which is what the kernel calls the process -- an app that
+# happens to be called "qs" is a smaller problem than a gauge that never goes
+# below 50%.
+DESKTOP_COMMS = {"Hyprland", "qs", "hyprland"}
 
 
 def engine_in(fdinfo):
@@ -99,6 +125,15 @@ def engine_for_pid(proc, fds):
     return best
 
 
+def comm(pid):
+    """The kernel's name for this process, or "" if it is already gone."""
+    try:
+        with open(f"/proc/{pid}/comm") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
 def discover():
     """Full walk: every PID that reports render-engine time, with its fds."""
     found = {}
@@ -137,7 +172,7 @@ def arg_value(name, default):
 
 
 def sample(max_gap, rescan):
-    """One reading, as an int percentage, or -1."""
+    """One reading, as (application %, whole chip %), or (-1, -1)."""
     now = time.time()
 
     previous = None
@@ -164,26 +199,40 @@ def sample(max_gap, rescan):
     if not rediscover and not any(engines.values()):
         rediscover = True
 
-    total = sum(engines.values())
-
+    # Kept per PID, not as one total: the split between "an app drew this" and
+    # "the desktop drew itself" is only available before the sum.
+    previous_engines = previous.get("engines")
     try:
         with open(state_path(), "w") as fh:
-            json.dump({"t": now, "ns": total, "clients": cached,
-                       "scanned": scanned_at}, fh)
+            json.dump({"t": now, "engines": {str(k): v for k, v in engines.items()},
+                       "clients": cached, "scanned": scanned_at}, fh)
     except OSError:
         pass
 
+    if not isinstance(previous_engines, dict):
+        return -1, -1
+
     try:
         dt = now - float(previous["t"])
-        before = int(previous["ns"])
     except (KeyError, TypeError, ValueError):
-        return -1
+        return -1, -1
+    if dt <= 0 or dt > max_gap:
+        return -1, -1
 
-    if dt <= 0 or dt > max_gap or total < before:
-        return -1
+    used = 0
+    used_by_apps = 0
+    for pid, total_ns in engines.items():
+        before = previous_engines.get(str(pid))
+        if not isinstance(before, int) or total_ns < before:
+            continue                      # new client, or its counter reset
+        delta = total_ns - before
+        used += delta
+        if comm(pid) not in DESKTOP_COMMS:
+            used_by_apps += delta
 
-    pct = (total - before) / (dt * 1e9) * 100.0
-    return int(round(max(0.0, min(100.0, pct))))
+    scale = 100.0 / (dt * 1e9)
+    clamp = lambda v: int(round(max(0.0, min(100.0, v * scale))))
+    return clamp(used_by_apps), clamp(used)
 
 
 def main():
@@ -196,10 +245,12 @@ def main():
     loop = arg_value("--loop", 0)
 
     if loop <= 0:
-        print(sample(max_gap, rescan))
+        apps, whole = sample(max_gap, rescan)
+        print(f"{apps} {whole}")
         return
     while True:
-        print(sample(max_gap, rescan), flush=True)
+        apps, whole = sample(max_gap, rescan)
+        print(f"{apps} {whole}", flush=True)
         time.sleep(loop)
 
 

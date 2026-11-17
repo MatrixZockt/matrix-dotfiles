@@ -1,0 +1,64 @@
+#!/bin/sh
+# Put a Groq API key into the bridge without it ever being printed.
+#
+# Two ways in, and neither shows the key on screen or in a chat log:
+#   groq-whisper-setkey                          # asks, input is not echoed
+#   bw get password GROQ_TRANSCRIBE_TOKEN | groq-whisper-setkey   # from a vault
+#
+# It writes ~/.config/groq-whisper/groq.env (0600, outside the dotfiles
+# repository), restarts groq-whisper-bridge.service, and reports the bridge's
+# own answer -- cloud: true means the key was accepted by the bridge, and the
+# next dictation is the real test of whether Groq accepts it.
+set -eu
+
+ENV_FILE="${GROQ_ENV_FILE:-$HOME/.config/groq-whisper/groq.env}"
+
+if [ -t 0 ]; then
+    printf 'Paste the Groq API key (input hidden): '
+    stty -echo
+    trap 'stty echo' EXIT INT TERM
+    IFS= read -r key
+    stty echo
+    trap - EXIT INT TERM
+    printf '\n'
+else
+    IFS= read -r key || true
+fi
+
+key="$(printf '%s' "${key:-}" | tr -d '\r\n')"
+case "$key" in
+    gsk_*|[A-Za-z0-9_-]*) ;;
+    *) ;;
+esac
+if [ -z "$key" ]; then
+    echo "groq-whisper-setkey: nothing to set; the bridge keeps using the local engine" >&2
+    exit 1
+fi
+if [ "${#key}" -lt 20 ]; then
+    echo "groq-whisper-setkey: that does not look like an API key (${#key} characters)" >&2
+    exit 1
+fi
+
+mkdir -p "$(dirname "$ENV_FILE")"
+umask 077
+# Keep the file's explanation, replace only the assignment. Written through a
+# temporary file so a failure cannot leave the bridge with half a key.
+tmp="$ENV_FILE.tmp.$$"
+if [ -f "$ENV_FILE" ]; then
+    grep -v '^GROQ_API_KEY=' "$ENV_FILE" > "$tmp" || true
+else
+    : > "$tmp"
+fi
+printf 'GROQ_API_KEY=%s\n' "$key" >> "$tmp"
+mv "$tmp" "$ENV_FILE"
+chmod 600 "$ENV_FILE"
+unset key
+
+systemctl --user restart groq-whisper-bridge.service 2>/dev/null || true
+sleep 1
+if command -v curl >/dev/null 2>&1; then
+    printf 'bridge: '
+    curl -s --max-time 3 http://127.0.0.1:8918/health || printf 'not answering'
+    printf '\n'
+fi
+echo "set in $ENV_FILE; dictate once and check: journalctl --user -u groq-whisper-bridge -n 5 -o cat"

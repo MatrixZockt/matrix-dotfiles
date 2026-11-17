@@ -1,44 +1,44 @@
 #!/usr/bin/env bash
-# Send Ctrl+V to the focused window -- once a window actually HAS the keyboard,
-# and once that window's text field has the CARET again.
+# Send Ctrl+V into the window the popup was opened FROM -- once that window is
+# focused again and its text field has the caret.
 #
 # This is the second half of the clipboard popup's paste. The first half is
 # Cliphist.paste(), which decodes the chosen entry back onto the clipboard; the
 # keystroke that actually pastes it is sent here, and it is sent from a script
 # rather than a one-liner inside the QML because the whole difficulty is WHEN
-# it is sent -- timing that is worth being able to run and watch by hand.
+# and WHERE it is sent -- timing and targeting worth being able to run and watch
+# by hand.
 #
-# WHY THE WAIT IS REQUIRED (the bug this replaces):
+# Two problems, three jobs.
 #
-#   The popup holds the keyboard EXCLUSIVELY while it is open
-#   (WlrKeyboardFocus.Exclusive in ClipboardListWindow.qml -- so the arrows and
-#   RETURN work without a click first). A synthesised Ctrl+V goes to whatever
-#   holds the keyboard at that instant, so a paste fired while the popup was
-#   still up landed in the popup's OWN search field, and the window the user
-#   wanted to paste into got nothing. Retrying after the popup happened to have
-#   closed sometimes landed, which is exactly the reported "it pastes on the
-#   twentieth try".
+# 1. THE POPUP HOLDS THE KEYBOARD WHILE IT IS OPEN. It has to
+#    (WlrKeyboardFocus.Exclusive in ClipboardListWindow.qml, so the arrows and
+#    RETURN work without a click first), and a synthesised Ctrl+V goes to
+#    whatever holds the keyboard at that instant -- so a paste fired while the
+#    popup was still up landed in the popup's own search field. What has to be
+#    gone is the popup's LAYER SURFACE: `hyprctl layers` lists it as
+#    `namespace: quickshell:clipboard` while mapped and not at all once closed
+#    (measured: 1 line open, 0 lines closed). So this waits for that, not for a
+#    fixed sleep, and not on `hyprctl activewindow`, which reports the window
+#    underneath for the whole time the popup is up and cannot tell the two
+#    states apart.
 #
-#   What has to be gone is the popup's layer surface: `hyprctl layers` lists it
-#   as `namespace: quickshell:clipboard` while it is mapped and does not list it
-#   once it is closed (measured: 1 line open, 0 lines closed). So this waits for
-#   THAT -- not for a fixed sleep, and not on `hyprctl activewindow`, which
-#   keeps reporting the window underneath for the whole time the popup is up
-#   and so cannot tell the two states apart.
+# 2. FOCUS FOLLOWS THE MOUSE HERE (`input:follow_mouse = 1`). When the popup
+#    unmaps the keyboard does not go back to the window it came from -- it goes
+#    to whatever window the POINTER happens to be over. Reported as: the value
+#    only lands if the cursor is over the app you meant, and the input box you
+#    had selected stops being selected the moment the popup opens. So the popup
+#    records which window it was opened from (`paste-keystroke.sh remember`,
+#    called when it opens) and this focuses THAT address again, waits until
+#    Hyprland agrees it is active, and only then sends the key.
 #
-# WHY THE CARET HAS TO BE PUT BACK (the second half of the same report: "the
-# paste is not where I clicked"):
-#
-#   Taking the keyboard away and handing it back does not restore WHERE the text
-#   field's caret was. A window can be perfectly focused while no input box is
-#   selected -- GTK and Electron both drop the widget's focus on keyboard leave,
-#   and a chat app you had clicked into comes back with the window active and the
-#   message box unfocused. Ctrl+V then goes to a window with nowhere to put the
-#   text, and the sentence is lost with no error anywhere. There is no Wayland
-#   call for "where is the text field", so this asks the accessibility tree --
-#   the same helper the SUPER dictation uses before it types, because it is the
-#   same problem. Apps that publish no tree answer "no-a11y" and keep the old
-#   behaviour.
+# 3. A FOCUSED WINDOW IS NOT A CARET. Handing the keyboard back does not restore
+#    which input box was selected: a chat app comes back with the window active
+#    and the message box unfocused, and Ctrl+V into that is silently dropped.
+#    There is no Wayland call for "where is the text field", so this asks the
+#    accessibility tree -- the same helper SUPER dictation uses before it types,
+#    because it is the same problem. Apps that publish no tree answer "no-a11y"
+#    and keep whatever caret they had.
 #
 # The keystroke itself is ydotool -- a real Ctrl+V at the kernel input layer,
 # the command the shell's own stash branch has always used -- rather than
@@ -46,22 +46,47 @@
 # reaches the client (verified against a live terminal, where nothing arrived).
 set -u
 
-# Never hang: if the popup is somehow still mapped after this, paste anyway
-# rather than silently dropping the user's Enter.
-LAYER_GONE_DEADLINE_MS=2000
-# How long to wait for an application window to hold the keyboard again. One
-# frame is enough when nothing is busy; the ceiling is what a person would not
-# notice on a loaded machine.
-FOCUS_DEADLINE_MS=600
-
 STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/ii-clipboard"
+OWNER_FILE="$STATE_DIR/owner"
 PASTE_LOG="$STATE_DIR/paste.log"
 FOCUS_HELPER="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/custom/scripts/dictate-focus.py"
 
-mkdir -p "$STATE_DIR" 2>/dev/null || true
+# Never hang: if the popup is somehow still mapped after this, paste anyway
+# rather than silently dropping the user's Enter.
+LAYER_GONE_DEADLINE_MS=2000
+# How long to wait for the remembered window (or any application window) to
+# hold the keyboard again. One frame is enough when nothing is busy; the ceiling
+# is what a person would not notice on a loaded machine.
+FOCUS_DEADLINE_MS=600
 
-start_ms=$(date +%s%3N)
+mkdir -p "$STATE_DIR" 2>/dev/null || true
 now() { date +%s%3N; }
+
+# "0x55d3… com.example.App" for whatever window Hyprland considers active.
+active_window() {
+    hyprctl activewindow -j 2>/dev/null | python3 -c '
+import json, sys
+try:
+    window = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+address = window.get("address") or ""
+if address in ("", "0x0"):
+    sys.exit(0)
+print(address, window.get("class") or "")
+' 2>/dev/null
+}
+
+# ── the "remember" half: called by the popup when it opens ──────────────────
+if [ "${1:-}" = "remember" ]; then
+    target="$(active_window)"
+    if [ -n "$target" ]; then
+        printf '%s\n' "$target" >"$OWNER_FILE"
+    fi
+    exit 0
+fi
+
+start_ms=$(now)
 
 # ── 1. the popup's surface has to be gone ───────────────────────────────────
 while :; do
@@ -75,18 +100,37 @@ while :; do
 done
 layer_ms=$(($(now) - start_ms))
 
-# ── 2. an application has to hold the keyboard again ────────────────────────
+# ── 2. the window the popup was opened from gets the keyboard back ──────────
+owner_addr=""
+owner_class=""
+if [ -r "$OWNER_FILE" ]; then
+    read -r owner_addr owner_class <"$OWNER_FILE" || true
+fi
+
+restored="none"
+if [ -n "$owner_addr" ]; then
+    current="$(active_window)"
+    if [ "${current%% *}" != "$owner_addr" ]; then
+        hyprctl dispatch focuswindow "address:$owner_addr" >/dev/null 2>&1 || true
+        deadline=$((start_ms + FOCUS_DEADLINE_MS))
+        while [ "$(now)" -lt "$deadline" ]; do
+            [ "$(active_window | cut -d' ' -f1)" = "$owner_addr" ] && break
+            sleep 0.02
+        done
+        restored="asked"
+    else
+        restored="already"
+    fi
+fi
+owner_ms=$(($(now) - start_ms - layer_ms))
+
+# ── 3. some application has to hold the keyboard ────────────────────────────
 # The popup unmapping and the keyboard being handed back are two events, and a
-# keystroke that falls between them goes to nothing at all. Ask Hyprland who is
-# focused until the answer is a real window (empty means the transition is still
-# in progress; a quickshell surface is not a paste target).
-focus_ms=0
+# keystroke that falls between them goes to nothing at all.
 focus_class=""
+focus_ms=0
 while :; do
-    read -r focus_class <<EOF
-$(hyprctl activewindow -j 2>/dev/null \
-    | sed -n 's/.*"class": *"\([^"]*\)".*/\1/p' | head -1)
-EOF
+    focus_class="$(active_window | cut -d' ' -f2-)"
     case "$focus_class" in
         ""|quickshell*|qs-*) ;;
         *) break ;;
@@ -95,20 +139,17 @@ EOF
         break
     fi
     sleep 0.02
-    focus_ms=$(($(now) - start_ms - layer_ms))
+    focus_ms=$(($(now) - start_ms - layer_ms - owner_ms))
 done
 
-# ── 3. put the caret back where the user clicked ────────────────────────────
+# ── 4. put the caret back where the user clicked ────────────────────────────
 # "already" means the app kept its caret; "focused" means one was found and
 # given the focus; "no-entry"/"no-a11y" mean this app does not expose its
-# widgets and there is nothing more to do than send the keys.
+# widgets, and the keys go wherever the app last had the caret.
 caret="skipped"
 if [ -r "$FOCUS_HELPER" ]; then
     caret="$(timeout 2s python3 "$FOCUS_HELPER" 2>/dev/null)" || caret="error"
-    case "$caret" in
-        focused) sleep 0.15 ;;   # let the toolkit move the caret before the key
-        *);;
-    esac
+    [ "$caret" = "focused" ] && sleep 0.15   # let the toolkit move the caret
 fi
 
 # Let the client notice it has been refocused. A window that has just been handed
@@ -117,15 +158,16 @@ fi
 # event handling, and is far below the delay a person would notice.
 sleep 0.12
 
-# One line per paste, for the next time this misbehaves: which window got the
-# keys, how long the two handovers took, and what the caret helper answered.
-# The pasted text is never logged.
-printf '%s class=%s layer=%sms focus=%sms caret=%s\n' \
-    "$(date +%H:%M:%S)" "${focus_class:-none}" "$layer_ms" "$focus_ms" "$caret" \
+# One line per paste, for the next time this misbehaves: which window the popup
+# came from, whether the keyboard had to be taken back, both handover timings,
+# and what the caret helper answered. The pasted text is never logged.
+printf '%s owner=%s class=%s restored=%s layer=%sms owner_wait=%sms focus=%sms caret=%s\n' \
+    "$(date +%H:%M:%S)" "${owner_addr:-none}" "${focus_class:-none}" "$restored" \
+    "$layer_ms" "$owner_ms" "$focus_ms" "$caret" \
     >>"$PASTE_LOG" 2>/dev/null || true
 
-# PASTE_DRY_RUN=1 stops before the keystroke: the handover and the caret work
-# can then be exercised without typing into whatever happens to be focused.
+# PASTE_DRY_RUN=1 stops before the keystroke: the targeting, the handover and
+# the caret work can then be exercised without typing into whatever is focused.
 if [ "${PASTE_DRY_RUN:-0}" = "1" ]; then
     exit 0
 fi

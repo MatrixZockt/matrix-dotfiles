@@ -180,6 +180,15 @@ Singleton {
         root.pendingPaste = true;
     }
 
+    // Remember WHICH window the popup was opened from, while it is still the
+    // focused one. `input:follow_mouse = 1` on this desktop means the keyboard
+    // does not go back to the window the popup came from when it closes -- it
+    // goes to whatever window the pointer is over, and the paste lands there.
+    // The script records the address here and focuses it again before typing.
+    function rememberPasteTarget() {
+        Quickshell.execDetached(["bash", root.pasteKeystrokeScript, "remember"]);
+    }
+
     // Send the Ctrl+V for a paste() that has already been decided. Idempotent:
     // the popup's unmap and the fallback timer both call it and only the first
     // one does anything.

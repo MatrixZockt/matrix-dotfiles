@@ -43,6 +43,23 @@ import Quickshell.Wayland
  * Sections: Pinned first (pins are content-matched, see Cliphist), then
  * Recent. Every row can be pinned and deleted from its own hover/selection
  * buttons, and the header has a two-step "clear everything".
+ *
+ * Two panes. The left one is the list, the right one is the selected entry in
+ * full -- the whole text, the picture large, a file's name/type/size (and for a
+ * video its duration and a frame), because a single elided line is enough to
+ * recognise a paste you remember and useless for finding one you do not
+ * (ClipboardPreviewPane.qml).
+ *
+ * Kind filters. A chip row under the search field cuts the list down to Text,
+ * Links, Images, Files or Pinned, each with its own count, so "that screenshot"
+ * is a click or a keypress away instead of twenty rows of scrolling:
+ *
+ *     Ctrl+1..6 pick a kind      (the chip you are already on goes back to All)
+ *
+ * The kinds come from the entries themselves -- cliphist stores no type
+ * metadata -- see entryFilterKind(). "Files" is where a video or an audio copy
+ * lives: those are stored as a `file://` URI pointing at the file, never as
+ * data.
  */
 Scope {
     id: root
@@ -237,12 +254,118 @@ Scope {
     // clicking it again is what pastes it (2026-10-28).
     property string expandedEntry: ""
 
+    // ── Kind filter ────────────────────────────────────────────────────────
+    // "All" is the old view. Every other key cuts the list down to one kind,
+    // which is the only way to find "that screenshot" in a store that keeps
+    // 2000 entries and shows 20.
+    //
+    // What a kind IS comes from the entry's own content, because cliphist keeps
+    // no type metadata: an image is a `[[ binary data … png 1064x591 ]]` line, a
+    // file is a `file://` line, a link is a bare http(s) URL, everything else is
+    // text. "Files" is the honest home for a video or an audio clip: those are
+    // never stored as data, only as a URI pointing at the file on disk, so the
+    // pane says which it is from the file's own extension.
+    property string filter: "all"
+
+    readonly property var filterDefs: [
+        { key: "all", label: Translation.tr("All"), glyph: "apps" },
+        { key: "text", label: Translation.tr("Text"), glyph: "text_snippet" },
+        { key: "links", label: Translation.tr("Links"), glyph: "link" },
+        { key: "images", label: Translation.tr("Images"), glyph: "image" },
+        { key: "files", label: Translation.tr("Files"), glyph: "folder" },
+        { key: "pinned", label: Translation.tr("Pinned"), glyph: "push_pin" }
+    ]
+
+    readonly property string filterLabel: {
+        for (const def of root.filterDefs)
+            if (def.key === root.filter) return def.label;
+        return Translation.tr("All");
+    }
+
+    function entryFilterKind(entry) {
+        if (Cliphist.entryIsImage(entry))
+            return "images";
+        if (Cliphist.entryIsFileUri(entry))
+            return "files";
+        if (/^https?:\/\/\S+$/.test(Cliphist.entryContent(entry)))
+            return "links";
+        return "text";
+    }
+
+    function matchesFilter(entry) {
+        if (root.filter === "all")
+            return true;
+        if (root.filter === "pinned")
+            return Cliphist.isPinned(entry);
+        return root.entryFilterKind(entry) === root.filter;
+    }
+
+    // How many there are of a kind, counted over the whole shown history so the
+    // number is worth reading before you click it.
+    function filterCount(key) {
+        if (key === "all")
+            return Cliphist.shownEntries.length;
+        if (key === "pinned")
+            return Cliphist.shownEntries.filter(entry => Cliphist.isPinned(entry)).length;
+        return Cliphist.shownEntries.filter(entry => root.entryFilterKind(entry) === key).length;
+    }
+
+    // Picking a kind is a new result set, so the keyboard cursor and the opened
+    // row both go back to the top. (The scroll reset happens inside the list:
+    // `listView` lives in the delegate's scope and cannot be reached from here.)
+    function setFilter(key) {
+        if (root.filter === key)
+            return;
+        root.filter = key;
+        root.cursor = 0;
+        root.expandedEntry = "";
+    }
+
     // What kind of thing an entry is, which decides its icon, its hint line
     // and whether it gets a thumbnail. Cheap string tests on the content --
     // cliphist stores no type metadata, so this is the only signal available.
+    // The `file://` lines of a file copy: one URI per line, one line per file.
+    function fileUrisOf(entry) {
+        return Cliphist.entryContent(entry).split("\n")
+            .map(line => line.trim())
+            .filter(line => line.startsWith("file://"));
+    }
+
+    function fileNameOf(uri) {
+        const raw = String(uri ?? "").replace(/^file:\/\//, "");
+        try {
+            const parts = decodeURIComponent(raw).split("/");
+            return parts[parts.length - 1] || raw;
+        } catch (error) {
+            const parts = raw.split("/");
+            return parts[parts.length - 1] || raw;
+        }
+    }
+
+    // What is inside the file, from the name alone. A copied video is only ever
+    // a URI pointing at a file -- cliphist stores no video data -- so this is
+    // the honest way to call one "video".
+    function fileSubKindOf(uri) {
+        const name = root.fileNameOf(uri).toLowerCase();
+        const ext = name.indexOf(".") === -1 ? "" : name.split(".").pop();
+        if (["mp4", "mkv", "webm", "mov", "avi", "m4v", "flv", "wmv", "mpg", "mpeg"].indexOf(ext) !== -1)
+            return "video";
+        if (["mp3", "flac", "wav", "ogg", "m4a", "opus", "aac"].indexOf(ext) !== -1)
+            return "audio";
+        if (["png", "jpg", "jpeg", "webp", "gif", "bmp", "svg", "avif", "heic"].indexOf(ext) !== -1)
+            return "image";
+        if (ext === "pdf")
+            return "pdf";
+        if (["zip", "tar", "gz", "xz", "7z", "rar", "zst"].indexOf(ext) !== -1)
+            return "archive";
+        return "file";
+    }
+
     function entryKind(entry) {
         if (Cliphist.entryIsImage(entry))
             return "image";
+        if (Cliphist.entryIsFileUri(entry))
+            return "file";
         const body = Cliphist.entryContent(entry);
         if (/^https?:\/\/\S+$/.test(body))
             return "link";
@@ -261,6 +384,11 @@ Scope {
         "link": Translation.tr("link"),
         "command": Translation.tr("shell command"),
         "image": Translation.tr("image"),
+        "file": Translation.tr("file"),
+        "video": Translation.tr("video"),
+        "audio": Translation.tr("audio"),
+        "pdf": Translation.tr("pdf"),
+        "archive": Translation.tr("archive"),
         "text": Translation.tr("text")
     })
 
@@ -293,6 +421,13 @@ Scope {
             if (meta.size) bits.push(meta.size);
             return bits.length > 0 ? Translation.tr("image") + " · " + bits.join(" · ") : Translation.tr("image");
         }
+        if (kind === "file") {
+            const uris = root.fileUrisOf(entry);
+            if (uris.length === 0)
+                return Translation.tr("file");
+            const what = root.kindHints[root.fileSubKindOf(uris[0])] ?? Translation.tr("file");
+            return uris.length > 1 ? uris.length + " " + Translation.tr("files") + " · " + what : what;
+        }
         return root.kindHints[kind] ?? "";
     }
 
@@ -302,11 +437,26 @@ Scope {
         // Searching: one flat ranked list, no pinned section -- when you type
         // you are looking for a thing, not organising.
         if (root.searching) {
-            const hits = Cliphist.fuzzyQuery(root.searchText.trim()).slice(0, root.maxEntries);
+            const hits = Cliphist.fuzzyQuery(root.searchText.trim())
+                .filter(entry => root.matchesFilter(entry))
+                .slice(0, root.maxEntries);
             if (hits.length > 0)
                 rows.push({ kind: "header", label: Translation.tr("Results") });
             for (let i = 0; i < hits.length; i++)
                 rows.push({ kind: "entry", entry: hits[i] });
+            return rows;
+        }
+        // One kind picked: a single flat section, newest first. Pinned entries
+        // stay on top because the order they come in is pins-first -- pinning
+        // something says you want it, whatever kind it is.
+        if (root.filter !== "all") {
+            const listed = Cliphist.pinnedEntriesWithPinnedFirst()
+                .filter(entry => root.matchesFilter(entry))
+                .slice(0, root.maxEntries);
+            if (listed.length > 0)
+                rows.push({ kind: "header", label: root.filterLabel });
+            for (let i = 0; i < listed.length; i++)
+                rows.push({ kind: "entry", entry: listed[i] });
             return rows;
         }
         const all = Cliphist.pinnedEntriesWithPinnedFirst();
@@ -326,6 +476,15 @@ Scope {
     }
 
     readonly property var listRows: buildRows()
+
+    // How many entries are listed right now -- the "N of M" in the header, so a
+    // filter that is hiding most of the history says so.
+    readonly property int listedCount: {
+        let count = 0;
+        for (const row of root.listRows)
+            if (row.kind === "entry") count += 1;
+        return count;
+    }
 
     // Which rows of `listRows` are entries -- what the cursor walks over.
     readonly property var entryRowIndices: {
@@ -389,6 +548,11 @@ Scope {
 
     function toggle() {
         if (!root.open) {
+            // Which window owns this paste, captured BEFORE the popup takes the
+            // keyboard: see Cliphist.rememberPasteTarget and
+            // scripts/clipboard/paste-keystroke.sh (follow_mouse sends the keys
+            // to whatever the pointer is over otherwise).
+            Cliphist.rememberPasteTarget()
             root.cursorKnown = false;
             cursorProbe.running = true;
             cursorProbeTimeout.restart();
@@ -447,7 +611,11 @@ Scope {
             // 440 wide (was 380): the rows carry a thumbnail, a line of text
             // and the two actions, and at 380 an image row's dimensions and
             // the entry were always elided. "slightly bigger" (2026-10-28).
-            readonly property real cardW: Math.max(300, Math.min(440, screenW - root.edgeMargin * 2))
+            // 760 with a 272px preview pane: the list keeps the 440 it had and
+            // the rest is the preview, so the card grows sideways instead of
+            // making the rows taller. It still shrinks on a narrow screen (the
+            // pane keeps its width and the list takes what is left).
+            readonly property real cardW: Math.max(300, Math.min(760, screenW - root.edgeMargin * 2))
             // Height is decided together with the position (see below) so the
             // two cannot chase each other: the card is never taller than the
             // room on whichever side of the pointer it opens towards.
@@ -456,7 +624,9 @@ Scope {
             // 400 (was 360): with 46px rows and the wider card the list was
             // showing barely six entries before scrolling. "slightly bigger"
             // (2026-10-28).
-            readonly property real maxPopupHeight: Math.min(400, screenH - root.edgeMargin * 2)
+            // 460 (was 400): the preview pane needs room for a picture and a
+            // few lines of it, and the list gets the same rows either way.
+            readonly property real maxPopupHeight: Math.min(460, screenH - root.edgeMargin * 2)
 
             // Pointer position relative to this monitor.
             readonly property real localX: root.cursorX - (modelData?.x ?? 0)
@@ -728,9 +898,16 @@ Scope {
 
                         StyledText {
                             Layout.alignment: Qt.AlignVCenter
-                            text: root.searching
-                                ? Cliphist.fuzzyQuery(root.searchText.trim()).length + " " + Translation.tr("results")
-                                : Cliphist.shownEntries.length + " " + Translation.tr("entries")
+                            text: {
+                                const total = Cliphist.shownEntries.length;
+                                const listed = root.listedCount;
+                                if (root.searching)
+                                    return listed + " " + Translation.tr("of") + " " + total;
+                                if (root.filter !== "all")
+                                    return listed + " " + Translation.tr("of") + " " + total
+                                        + " · " + root.filterLabel;
+                                return total + " " + Translation.tr("entries");
+                            }
                             font.pixelSize: Appearance.font.pixelSize.smaller
                             color: Appearance.colors.colSubtext
                         }
@@ -832,9 +1009,17 @@ Scope {
                                         // point of having a selection.
                                         root.pasteSelected();
                                         event.accepted = true;
-                                    } else if (event.key === Qt.Key_Delete) {
-                                        root.deleteSelected();
-                                        event.accepted = true;
+                                                                          } else if (event.key === Qt.Key_Delete) {
+                                          root.deleteSelected();
+                                          event.accepted = true;
+                                      } else if ((event.modifiers & Qt.ControlModifier) !== 0
+                                          && event.key >= Qt.Key_1 && event.key <= Qt.Key_6) {
+                                          // Ctrl+1..6 pick a kind, in the order the
+                                          // chips are drawn.
+                                          const picked = event.key - Qt.Key_1;
+                                          if (picked < root.filterDefs.length)
+                                              root.setFilter(root.filterDefs[picked].key);
+                                          event.accepted = true;
                                     } else if (event.key === Qt.Key_Escape) {
                                         if (root.searchText.length > 0)
                                             searchInput.clear();
@@ -867,6 +1052,80 @@ Scope {
                         }
                     }
 
+                    // ── Kind filter ───────────────────────────────────────
+                    // One chip per kind, each with the number of entries it
+                    // would show, so the choice is made with the counts in
+                    // view rather than by opening four lists. Clicking the chip
+                    // that is already active goes back to All; Ctrl+1..6 pick
+                    // one from the keyboard.
+                    RowLayout {
+                        id: filterRow
+                        Layout.fillWidth: true
+                        spacing: 4
+
+                        Repeater {
+                            model: root.filterDefs
+
+                            delegate: Rectangle {
+                                id: chip
+                                required property var modelData
+                                required property int index
+                                readonly property bool active: root.filter === modelData.key
+                                implicitWidth: chipContent.implicitWidth + 16
+                                implicitHeight: 24
+                                radius: Appearance.rounding.full
+                                color: chip.active
+                                    ? Appearance.colors.colPrimary
+                                    : (chipMouse.containsMouse ? root.cardSelectionHover : root.cardInset)
+                                Behavior on color {
+                                    animation: Appearance.animation.elementMoveFast.colorAnimation.createObject(chip)
+                                }
+
+                                RowLayout {
+                                    id: chipContent
+                                    anchors.centerIn: parent
+                                    spacing: 4
+
+                                    MaterialSymbol {
+                                        text: chip.modelData.glyph
+                                        iconSize: 12
+                                        color: chip.active
+                                            ? Appearance.colors.colOnPrimary
+                                            : Appearance.colors.colSubtext
+                                    }
+                                    StyledText {
+                                        text: chip.modelData.label
+                                        font.pixelSize: Appearance.font.pixelSize.smaller
+                                        color: chip.active
+                                            ? Appearance.colors.colOnPrimary
+                                            : Appearance.colors.colOnLayer1
+                                    }
+                                    StyledText {
+                                        text: root.filterCount(chip.modelData.key)
+                                        font.pixelSize: Appearance.font.pixelSize.smaller
+                                        color: chip.active
+                                            ? ColorUtils.transparentize(Appearance.colors.colOnPrimary, 0.25)
+                                            : ColorUtils.transparentize(Appearance.colors.colSubtext, 0.1)
+                                    }
+                                }
+
+                                MouseArea {
+                                    id: chipMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.setFilter(chip.active ? "all" : chip.modelData.key)
+                                }
+
+                                StyledToolTip {
+                                    text: chip.modelData.label + " · Ctrl+" + (chip.index + 1)
+                                }
+                            }
+                        }
+
+                        Item { Layout.fillWidth: true }
+                    }
+
                     Rectangle {
                         Layout.fillWidth: true
                         implicitHeight: 1
@@ -874,114 +1133,165 @@ Scope {
                     }
 
                     // ── Empty states ─────────────────────────────────────
-                    ColumnLayout {
-                        visible: listView.count === 0
-                        Layout.alignment: Qt.AlignHCenter
-                        Layout.fillWidth: true
-                        Layout.minimumHeight: 120
-                        spacing: 8
+                                          RowLayout {
+                          id: listRow
+                          Layout.fillWidth: true
+                          Layout.fillHeight: true
+                          // Same bound as the list below, and for the same
+                          // reason: a RowLayout's implicit height is the tallest
+                          // child, so without a maximum it asked for every row at
+                          // once and pushed the preview pane's actions out of the
+                          // card (measured: the card is 460 tall, the left
+                          // column asked for 1092).
+                          Layout.maximumHeight: Math.max(120, clipboardWindow.maxPopupHeight - 140)
+                          spacing: 10
 
-                        MaterialSymbol {
+                        ColumnLayout {
+                            id: listColumn
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            spacing: 6
+                        ColumnLayout {
+                            visible: listView.count === 0
                             Layout.alignment: Qt.AlignHCenter
-                            text: root.searching ? "search_off" : "content_paste_off"
-                            iconSize: 28
-                            color: Appearance.colors.colSubtext
-                        }
-                        StyledText {
-                            Layout.alignment: Qt.AlignHCenter
-                            text: root.searching
-                                ? Translation.tr("No matches")
-                                : Translation.tr("Clipboard is empty")
-                            font.pixelSize: Appearance.font.pixelSize.small
-                            color: Appearance.colors.colSubtext
-                        }
-                        StyledText {
-                            visible: !root.searching
-                            Layout.alignment: Qt.AlignHCenter
-                            Layout.maximumWidth: 320
-                            horizontalAlignment: Text.AlignHCenter
-                            wrapMode: Text.WordWrap
-                            text: Translation.tr("Copy something and it will show up here")
-                            font.pixelSize: Appearance.font.pixelSize.smaller
-                            color: ColorUtils.transparentize(Appearance.colors.colSubtext, 0.3)
-                        }
-                    }
+                            Layout.fillWidth: true
+                            Layout.minimumHeight: 120
+                            spacing: 8
 
-                    // ── The list ─────────────────────────────────────────
-                    StyledListView {
-                        id: listView
-                        visible: listView.count > 0
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        Layout.minimumHeight: 54
-                        Layout.preferredHeight: Math.min(listView.contentHeight, clipboardWindow.maxPopupHeight)
-                        spacing: 2
-                        clip: true
-                        model: root.listRows
-
-                        // Keep the keyboard selection on screen. This lives HERE
-                        // rather than in root.moveCursor because `listView` is
-                        // declared inside the Variants delegate, and a delegate
-                        // is its own id scope -- a function on root cannot see
-                        // it. Reacting to the cursor from in here can.
-                        Connections {
-                            target: root
-                            function onCursorChanged() {
-                                if (listView && root.selectedRowIndex >= 0)
-                                    listView.positionViewAtIndex(root.selectedRowIndex, ListView.Contain);
+                            MaterialSymbol {
+                                Layout.alignment: Qt.AlignHCenter
+                                                                  text: root.searching ? "search_off"
+                                      : (root.filter !== "all" ? "filter_alt_off" : "content_paste_off")
+                                iconSize: 28
+                                color: Appearance.colors.colSubtext
+                            }
+                            StyledText {
+                                Layout.alignment: Qt.AlignHCenter
+                                                                  text: root.searching
+                                      ? Translation.tr("No matches")
+                                      : (root.filter !== "all"
+                                          ? Translation.tr("Nothing of this kind")
+                                          : Translation.tr("Clipboard is empty"))
+                                font.pixelSize: Appearance.font.pixelSize.small
+                                color: Appearance.colors.colSubtext
+                            }
+                            StyledText {
+                                                                  visible: !root.searching && root.filter === "all"
+                                Layout.alignment: Qt.AlignHCenter
+                                Layout.maximumWidth: 320
+                                horizontalAlignment: Text.AlignHCenter
+                                wrapMode: Text.WordWrap
+                                text: Translation.tr("Copy something and it will show up here")
+                                font.pixelSize: Appearance.font.pixelSize.smaller
+                                color: ColorUtils.transparentize(Appearance.colors.colSubtext, 0.3)
                             }
                         }
 
-                        delegate: Loader {
-                            id: sectionLoader
-                            required property var modelData
-                            // Qt 6 only exposes `index` to a delegate when it
-                            // is DECLARED. Without this it is undefined, and the
-                            // `rowIndex` below then assigned undefined to a
-                            // required int on every single row -- logged
-                            // repeatedly and leaving the rows without the index
-                            // the keyboard selection is matched by.
-                            required property int index
-                            width: listView.width
-                            sourceComponent: modelData.kind === "header" ? sectionHeader : entryRow
-                            property var rowData: modelData
+                        // ── The list ─────────────────────────────────────────
+                        StyledListView {
+                            id: listView
+                            visible: listView.count > 0
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            Layout.minimumHeight: 54
+                                                          // The card is capped at maxPopupHeight, so the list has to
+                              // leave room for the header, the search field, the filter
+                              // chips, the divider, the card's margins and the layout's
+                              // own spacing (measured 139px in total). Asking for the
+                              // full maxPopupHeight pushed the preview pane's Paste and
+                              // Open buttons off the bottom of a 460px card and they
+                              // were clipped away with it.
+                              Layout.preferredHeight: Math.min(listView.contentHeight,
+                                  Math.max(120, clipboardWindow.maxPopupHeight - 140))
+                            spacing: 2
+                            clip: true
+                            model: root.listRows
 
-                            Component {
-                                id: sectionHeader
-                                Item {
-                                    implicitHeight: 24
-                                    width: listView.width
-
-                                    StyledText {
-                                        anchors.left: parent.left
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        text: sectionLoader.rowData.label
-                                        font.pixelSize: Appearance.font.pixelSize.smaller
-                                        font.weight: Font.Medium
-                                        color: Appearance.colors.colSubtext
-                                    }
-                                    // The pin glyph on the right of the title
-                                    // reads as "these rows are the pinned ones"
-                                    // rather than decorating the label.
-                                    MaterialSymbol {
-                                        visible: sectionLoader.rowData.label === Translation.tr("Pinned")
-                                        anchors.right: parent.right
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        text: "push_pin"
-                                        iconSize: 13
-                                        color: Appearance.colors.colPrimary
-                                    }
+                            // Keep the keyboard selection on screen. This lives HERE
+                            // rather than in root.moveCursor because `listView` is
+                            // declared inside the Variants delegate, and a delegate
+                            // is its own id scope -- a function on root cannot see
+                            // it. Reacting to the cursor from in here can.
+                            Connections {
+                                target: root
+                                function onCursorChanged() {
+                                    if (listView && root.selectedRowIndex >= 0)
+                                        listView.positionViewAtIndex(root.selectedRowIndex, ListView.Contain);
+                                }
+                                // A new kind is a new list, so it starts at the
+                                // top. Only reachable from in here: `listView`
+                                // belongs to the delegate's id scope.
+                                function onFilterChanged() {
+                                    if (listView)
+                                        listView.positionViewAtBeginning();
                                 }
                             }
 
-                            Component {
-                                id: entryRow
-                                ClipboardEntryItem {
-                                    entry: sectionLoader.rowData.entry
-                                    rowIndex: sectionLoader.index
-                                    selected: root.selectedRowIndex === sectionLoader.index
+                            delegate: Loader {
+                                id: sectionLoader
+                                required property var modelData
+                                // Qt 6 only exposes `index` to a delegate when it
+                                // is DECLARED. Without this it is undefined, and the
+                                // `rowIndex` below then assigned undefined to a
+                                // required int on every single row -- logged
+                                // repeatedly and leaving the rows without the index
+                                // the keyboard selection is matched by.
+                                required property int index
+                                width: listView.width
+                                sourceComponent: modelData.kind === "header" ? sectionHeader : entryRow
+                                property var rowData: modelData
+
+                                Component {
+                                    id: sectionHeader
+                                    Item {
+                                        implicitHeight: 24
+                                        width: listView.width
+
+                                        StyledText {
+                                            anchors.left: parent.left
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            text: sectionLoader.rowData.label
+                                            font.pixelSize: Appearance.font.pixelSize.smaller
+                                            font.weight: Font.Medium
+                                            color: Appearance.colors.colSubtext
+                                        }
+                                        // The pin glyph on the right of the title
+                                        // reads as "these rows are the pinned ones"
+                                        // rather than decorating the label.
+                                        MaterialSymbol {
+                                            visible: sectionLoader.rowData.label === Translation.tr("Pinned")
+                                            anchors.right: parent.right
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            text: "push_pin"
+                                            iconSize: 13
+                                            color: Appearance.colors.colPrimary
+                                        }
+                                    }
+                                }
+
+                                Component {
+                                    id: entryRow
+                                    ClipboardEntryItem {
+                                        entry: sectionLoader.rowData.entry
+                                        rowIndex: sectionLoader.index
+                                        selected: root.selectedRowIndex === sectionLoader.index
+                                    }
                                 }
                             }
+                        }
+                        }
+
+                        ClipboardPreviewPane {
+                            Layout.preferredWidth: 272
+                            Layout.fillHeight: true
+                            entry: root.selectedEntry === null ? "" : String(root.selectedEntry)
+                            onPasteRequested: {
+                                if (root.selectedEntry === null)
+                                    return;
+                                Cliphist.paste(root.selectedEntry);
+                                root.close();
+                            }
+                            onOpenRequested: path => Quickshell.execDetached(["xdg-open", path])
                         }
                     }
                 }
@@ -1150,6 +1460,16 @@ Scope {
             root.togglePinSelected();
             return before === null ? "nothing selected" : "toggled pin";
         }
+        // Diagnostic / test hook: pick a kind without owning the pointer, and
+        // report the counts that follow. Same path the chips and Ctrl+1..6 use.
+        function filter(key: string): string {
+            const wanted = String(key ?? "all");
+            if (!root.filterDefs.some(def => def.key === wanted))
+                return "unknown kind " + wanted;
+            root.setFilter(wanted);
+            const counts = root.filterDefs.map(def => def.key + "=" + root.filterCount(def.key)).join(" ");
+            return `filter=${root.filter} listed=${root.listedCount} rows=${root.listRows.length} ${counts}`;
+        }
         // Diagnostic: open the row whose entry contains `query` -- the state a
         // CLICK produces -- without owning the pointer. Moving the pointer
         // from a script never generates real motion here, so the hover/click
@@ -1213,6 +1533,16 @@ Scope {
                 if (meta.size) bits.push(meta.size);
                 return bits.join(" · ");
             }
+            // A file copy is a list of URIs: show the NAME. A row that read
+            // "file:///home/matrix/.cache/illogical-Impulse/rec…" said nothing
+            // a person needed and elided away the only part that did.
+            if (kind === "file") {
+                const uris = root.fileUrisOf(entry);
+                if (uris.length === 0)
+                    return root.entryBody(entry).replace(/\s+/g, " ").trim();
+                const name = root.fileNameOf(uris[0]);
+                return uris.length > 1 ? name + "  +" + (uris.length - 1) : name;
+            }
             return root.entryBody(entry).replace(/\s+/g, " ").trim();
         }
 
@@ -1223,6 +1553,16 @@ Scope {
             if (kind === "link") return "link";
             if (kind === "command") return "chevron_right";
             if (kind === "image") return "image";
+            if (kind === "file") {
+                const uris = root.fileUrisOf(entry);
+                const sub = uris.length > 0 ? root.fileSubKindOf(uris[0]) : "file";
+                if (sub === "video") return "movie";
+                if (sub === "audio") return "music_note";
+                if (sub === "pdf") return "picture_as_pdf";
+                if (sub === "archive") return "folder_zip";
+                if (sub === "image") return "image";
+                return "draft";
+            }
             return "text_snippet";
         }
 

@@ -1265,6 +1265,13 @@ Item {
             implicitHeight: root.height
             on: root.mode === root.modeDictation
 
+            // The live colour is WhisperFlow's own processing blue (the
+            // `PROCESS_RGB` its pill draws with), not the theme's primary: on
+            // this wallpaper the primary comes out white, which is exactly why
+            // the meter read as a line of white dots instead of as something
+            // happening. One fixed hue instead of a theme that may be greyscale.
+            readonly property color liveAccent: "#73b8ff"
+
             // Travelling wave, so a quiet room still looks like listening: at
             // the levels a still room produces every bar would otherwise be the
             // same three pixels.
@@ -1293,33 +1300,59 @@ Item {
                 // The transcript card's own surface, not the island's: that is
                 // the colour this is meant to be, and it is why the card reads
                 // as a thing rather than a line.
+                // The surface alone, no outline: the rounded border this
+                // started with was the "border at the top" to be gone.
                 color: Appearance.colors.colBackgroundSurfaceContainer
-                border.width: 1
-                // The card's accent rule, softened: the accent is what says
-                // "live" in this shell, and the bars carry the rest of it.
-                border.color: ColorUtils.transparentize(Appearance.colors.colPrimary, 0.72)
 
                 Row {
                     id: dictationRow
                     anchors.centerIn: parent
                     spacing: 9
 
-                    MaterialSymbol {
+                    Item {
                         anchors.verticalCenter: parent.verticalCenter
-                        text: Dictation.busy ? "graphic_eq" : "mic"
-                        iconSize: 16
-                        fill: 1
-                        color: Appearance.colors.colPrimary
+                        implicitWidth: 17
+                        implicitHeight: 17
+
+                        MaterialSymbol {
+                            anchors.centerIn: parent
+                            visible: !Dictation.busy
+                            text: "mic"
+                            iconSize: 16
+                            fill: 1
+                            color: dictationView.liveAccent
+                        }
+
+                        // The loading animation: a spinner, because by this
+                        // point the microphone is closed and a meter would be a
+                        // lie. The mark turns while the text is being made.
+                        MaterialSymbol {
+                            id: dictationSpinner
+                            anchors.centerIn: parent
+                            visible: Dictation.busy
+                            text: "progress_activity"
+                            iconSize: 16
+                            color: dictationView.liveAccent
+
+                            RotationAnimation on rotation {
+                                running: Dictation.busy
+                                from: 0
+                                to: 360
+                                duration: 900
+                                loops: Animation.Infinite
+                                direction: RotationAnimation.Clockwise
+                            }
+                        }
                     }
 
                     Row {
                         anchors.verticalCenter: parent.verticalCenter
-                        spacing: 2.5
+                        spacing: 3.5
                         Repeater {
                             model: 7
                             Rectangle {
-                                width: 3.5
-                                radius: 1.75
+                                width: 3
+                                radius: 1.5
                                 anchors.verticalCenter: parent.verticalCenter
                                 // The formula lives HERE, in the binding, and
                                 // not in a helper function called from it. A
@@ -1332,10 +1365,18 @@ Item {
                                 // every bar follows the voice.
                                 height: {
                                     const wobble = 0.5 + 0.5 * Math.sin((dictationView.wave + index * 0.14) * Math.PI * 2);
-                                    const base = 0.12 + 0.88 * Dictation.level;
-                                    return 4 + 14 * Math.min(1, base * (0.82 + 0.18 * wobble));
+                                    // Transcribing closes the microphone, so the
+                                    // level is flat 0 by definition and the bars
+                                    // used to freeze into a row of dots. The wave
+                                    // alone drives them here, so the card keeps
+                                    // moving exactly as the repo's did while it
+                                    // waited for the text.
+                                    const base = Dictation.busy
+                                        ? 0.35 + 0.6 * wobble
+                                        : 0.12 + 0.88 * Dictation.level;
+                                    return 4 + 14 * Math.min(1, base * (0.65 + 0.35 * wobble));
                                 }
-                                color: Appearance.colors.colPrimary
+                                color: dictationView.liveAccent
                                 // No Behavior here. A 70ms height animation on
                                 // top of a level that the daemon already
                                 // smooths (and that arrives every 50ms) left the
@@ -1370,14 +1411,14 @@ Item {
                         implicitWidth: dictationLangText.implicitWidth + 10
                         implicitHeight: 16
                         radius: 5
-                        color: ColorUtils.transparentize(Appearance.colors.colPrimary, 0.84)
+                        color: ColorUtils.transparentize(dictationView.liveAccent, 0.84)
 
                         StyledText {
                             id: dictationLangText
                             anchors.centerIn: parent
                             font.pixelSize: Appearance.font.pixelSize.smaller
                             font.weight: 600
-                            color: Appearance.colors.colPrimary
+                            color: dictationView.liveAccent
                             text: Dictation.languageLabel
                         }
                     }

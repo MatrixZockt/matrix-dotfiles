@@ -21,6 +21,10 @@ Singleton {
     id: root
 
     readonly property string statusPath: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/ii-dictate/status.json"
+    /// Who transcribed the last request: the bridge writes this per request
+    /// (extras/bin/groq-whisper-bridge), and the daemon deletes it when a hold
+    /// begins, so it always describes the dictation on screen.
+    readonly property string enginePath: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/ii-dictate/engine.json"
 
     /// "idle" | "recording" | "transcribing"
     property string state: "idle"
@@ -39,6 +43,16 @@ Singleton {
     readonly property string languageLabel: language.length === 2
         ? language.toUpperCase()
         : language
+
+    /// "cloud" (Groq), "local" (this machine) or "" (nothing yet).
+    property string engine: ""
+    /// Why the cloud was skipped: "offline" | "quota" | "key" | "error".
+    property string fallbackReason: ""
+    /// True while a dictation is transcribed HERE instead of on the server --
+    /// the bar labels that "Private", because that is what it is: the words
+    /// never left the machine. It is deliberately not a permanent badge for
+    /// "the internet is down": it appears with the dictation that fell back.
+    readonly property bool privateFallback: engine === "local"
 
     readonly property bool listening: state === "recording"
     /// Anything worth showing in the bar.
@@ -62,6 +76,16 @@ Singleton {
         onTextChanged: root.ingest(text())
     }
 
+    FileView {
+        id: engineFile
+        path: root.enginePath
+        watchChanges: false
+        printErrors: false
+
+        onLoaded: root.ingestEngine(text())
+        onTextChanged: root.ingestEngine(text())
+    }
+
     // Fast while something is happening, slow the rest of the time: 20 reads a
     // second forever would be a small cost that never stops, and there is
     // nothing to see when the state is idle anyway. 250ms is still fast enough
@@ -71,7 +95,27 @@ Singleton {
         interval: root.showing ? 50 : 150
         repeat: true
         running: true
-        onTriggered: statusFile.reload()
+        onTriggered: {
+            statusFile.reload();
+            engineFile.reload();
+        }
+    }
+
+    // A note left by the bridge. Stale by design: a stamp older than the last
+    // dictation's lease is forgotten, so a machine that fell back once does not
+    // keep saying "Private" afterwards.
+    function ingestEngine(raw) {
+        if (!raw)
+            return;
+        try {
+            const data = JSON.parse(raw);
+            const fresh = Math.abs(Date.now() / 1000 - (data.ts ?? 0)) < 15
+                && (data.engine === "cloud" || data.engine === "local");
+            engine = fresh ? data.engine : "";
+            fallbackReason = fresh ? String(data.reason ?? "") : "";
+        } catch (e) {
+            // Half-written: the next sample is whole.
+        }
     }
 
     function ingest(raw) {

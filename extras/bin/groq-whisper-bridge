@@ -44,6 +44,7 @@ import math
 import os
 import re
 import sys
+import time
 import uuid
 from email import message_from_bytes
 from email.policy import default as email_policy
@@ -205,6 +206,29 @@ def judge_result(result):
     if not after:
         result["segments"] = []
     return result
+
+
+def mark_engine(engine, reason=""):
+    """Leave a note for the bar: who transcribed this one, and why not the cloud.
+
+    The fallback is silent by nature -- the words still arrive, they just came
+    from this machine instead of Groq -- and the user asked to be told only when
+    it really happens: offline, quota spent, key rejected, Groq down. So the
+    bridge writes what it did per request, the bar reads it while a dictation is
+    on screen, and the daemon deletes the note when the next hold begins: a
+    label that outlives its dictation would describe the wrong one.
+    """
+    state = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    directory = os.path.join(state, "ii-dictate")
+    path = os.path.join(directory, "engine.json")
+    try:
+        os.makedirs(directory, exist_ok=True)
+        temp = path + ".tmp.%d" % os.getpid()
+        with open(temp, "w") as handle:
+            json.dump({"engine": engine, "reason": reason, "ts": time.time()}, handle)
+        os.replace(temp, path)
+    except OSError:
+        pass
 
 
 def silent_audio(audio):
@@ -384,6 +408,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.replay_locally(content_type, body, why="Groq unreachable (%s)" % error)
 
         result = judge_result(result)
+        mark_engine("cloud")
         log("cloud: %.1f kB of audio -> %d chars" % (
             len(audio[2]) / 1024.0, len((result.get("text") or "").strip())))
         self.send_text(wanted, (result.get("text") or "").strip(), result)
@@ -409,6 +434,16 @@ class Handler(BaseHTTPRequestHandler):
     def replay_locally(self, content_type, body, why=""):
         if why:
             log(why + " -- using the local engine for this one")
+        low = (why or "").lower()
+        if "no groq_api_key" in low:
+            reason = "key"
+        elif "429" in low or "rate limit" in low or "quota" in low:
+            reason = "quota"
+        elif "unreachable" in low or "timed out" in low or "name or service" in low:
+            reason = "offline"
+        else:
+            reason = "error"
+        mark_engine("local", reason)
         request = Request(
             FALLBACK + self.path,
             data=body,

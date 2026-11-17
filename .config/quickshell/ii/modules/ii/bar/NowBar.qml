@@ -1422,6 +1422,32 @@ Item {
                             text: Dictation.languageLabel
                         }
                     }
+
+                    // "Private": this dictation is being transcribed on THIS
+                    // machine, not on the server -- no internet, the free tier
+                    // spent, or the key refused. Shown only while such a
+                    // dictation is on screen, and only when it really happened:
+                    // a badge for "the internet is down" would be a permanent
+                    // complaint instead of a fact about this take.
+                    Row {
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 4
+                        visible: Dictation.privateFallback
+
+                        MaterialSymbol {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "wifi_off"
+                            iconSize: 13
+                            color: Appearance.colors.colOnSurfaceVariant
+                        }
+
+                        StyledText {
+                            anchors.verticalCenter: parent.verticalCenter
+                            font.pixelSize: Appearance.font.pixelSize.smaller
+                            color: Appearance.colors.colOnSurfaceVariant
+                            text: "Private"
+                        }
+                    }
                 }
             }
 

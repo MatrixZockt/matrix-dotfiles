@@ -289,6 +289,14 @@ def clear_language():
         os.unlink(LANG_FILE)
     except OSError:
         pass
+    # Same rule for the engine note: "private, because offline" belongs to the
+    # dictation it happened in. The bridge writes it per request (engine.json),
+    # so the next hold starts with a blank sheet and the bar's label cannot
+    # describe the previous take.
+    try:
+        os.unlink(os.path.join(STATE, "engine.json"))
+    except OSError:
+        pass
 
 
 def _write_locked(now):

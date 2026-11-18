@@ -242,14 +242,41 @@ for arg in "$@"; do
     esac
 done
 
+# The notification icon for anything ABOUT the machine lagging.
+#
+# An absolute PATH, not a name: the shell draws an app icon with its icon
+# resolver, which does not search ~/.local/share/icons for a bare name --
+# measured 2026-11-18 -- so `-i hyprland` fell back to the generic broken-app
+# picture the owner reported, while the same file by path draws the Hyprland
+# mark. The file is extras/icons/hicolor/512x512/apps/hyprland.svg in the
+# dotfiles repo, installed to the path below; the old "speed" here was a
+# Material symbol name, which is not in any icon theme at all.
+HYPR_ICON="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/512x512/apps/hyprland.svg"
+
 log() { printf '[power-failsafe] %s\n' "$*" >&2; }
 
 notify() {
     # $1 = -i <icon>, $2 = title, $3 = body (getopt-free: the only caller is
     # this script, so a tiny shift-based parse is enough).
-    command -v notify-send >/dev/null 2>&1 || return 0
-    local icon="applications-engineering"
+    #
+    # THROUGH D-BUS, and notify-send only as a fallback. notify-send is broken
+    # on this machine -- `notify-send: symbol lookup error: undefined symbol:
+    # notify_notification_get_activation_app_launch_context`, measured
+    # 2026-11-18 -- so every alert this daemon has ever sent through it died
+    # on the spot, and a lag notice only ever reached the screen through the
+    # shell's own card. The extra 2>/dev/null kept it invisible in the
+    # journal. The shell's notification server is the same destination either
+    # way; this just stops asking a broken client to reach it.
+    local icon="$HYPR_ICON"
     if [ "$1" = "-i" ]; then icon=$2; shift 2; fi
+    if command -v gdbus >/dev/null 2>&1; then
+        gdbus call --session --dest org.freedesktop.Notifications \
+            --object-path /org/freedesktop/Notifications \
+            --method org.freedesktop.Notifications.Notify \
+            "power-failsafe" 0 "$icon" "$1" "$2" "[]" "{}" 9000 \
+            >/dev/null 2>&1 && return 0
+    fi
+    command -v notify-send >/dev/null 2>&1 || return 0
     notify-send -u critical -a "power-failsafe" -i "$icon" "$1" "$2" 2>/dev/null || true
 }
 
@@ -475,7 +502,7 @@ apply_performance() {
         local top
         top=$(top_offenders 5)
         log "alarm only, no hardware change (set FAILSAFE_ESCALATE=1 to escalate). top: ${top:-unknown}"
-        notify -i "speed" "CPU pegged and lagging" \
+        notify -i "$HYPR_ICON" "CPU pegged and lagging" \
             "${busy}% busy -- ${lag}. Top: ${top:-unknown}"
         blink fire "CPU pegged — ${busy}% busy, ${lag}"
         # Remember we reported it so the same spike does not re-notify every
@@ -810,7 +837,7 @@ while true; do
             # machine alone, so nothing here can modeset the screen.
             if [ "$LANE" != "cpu" ]; then
                 log "lag ${WHY} — a ${LANE} stall, not a CPU one: reporting only, profile and refresh left alone"
-                notify -i "speed" "Stalling, but not the CPU" \
+                notify -i "$HYPR_ICON" "Stalling, but not the CPU" \
                     "${WHY}. Nothing was changed — a CPU profile cannot fix ${LANE} reclaim."
                 last_action=$(date +%s)
                 hist=""

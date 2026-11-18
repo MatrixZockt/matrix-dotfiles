@@ -58,7 +58,12 @@ Singleton {
     // stays for at least this long. It only ever EXTENDS a state the daemon
     // really reported: the daemon ending the dictation still ends it, a beat
     // later, and the timer is cancelled the moment anything else happens.
-    readonly property int minBusyMs: 900
+    //
+    // 350, not the 900 this used to be. 900 was chosen when the whole delivery
+    // sat on the critical path and the pill genuinely had a second to cover;
+    // now that the parts, the caret probe and every post-paste check are off
+    // that path, 900 ms turned a ~400 ms dictation into a visible stall.
+    readonly property int minBusyMs: 350
 
     FileView {
         id: statusFile

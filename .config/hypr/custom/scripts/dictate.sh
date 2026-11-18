@@ -328,7 +328,14 @@ paste_text() {
     # -t text/plain is not decoration: without it wl-copy sniffs the data and
     # can advertise application/octet-stream, and the next dictation then saw a
     # "non-text" clipboard and gave up on pasting.
-    printf '%s' "$1" | wl-copy --sensitive -t text/plain 2>/dev/null \
+    # `9>&-` is not decoration: wl-copy does not exit, it forks a process that
+    # keeps owning the selection, and that process inherits every fd of this
+    # shell -- including the delivery lock (fd 9). Measured 2026-11-18: a
+    # wl-copy left over from one dictation held the lock, so the NEXT one sat
+    # out its full 10s flock timeout before pasting ("delivery lock timed out"
+    # in the log). Closing 9 for the child keeps the lock scoped to the
+    # delivery it was taken for.
+    printf '%s' "$1" | wl-copy --sensitive -t text/plain 9>&- 2>/dev/null \
         || { PASTE_FAIL="wl-copy refused the text"; restore_clipboard; return 1; }
     sleep 0.05
     # READ IT BACK BEFORE PRESSING ANYTHING.
@@ -581,14 +588,19 @@ transcribe() { # transcribe <wav> -> prints the text
     # evidence of anything here; the recording itself is, so it is measured
     # before a single byte is sent. -50 dB mean sits well under a soft whisper
     # and well over room tone (this machine's silent take measured -91 dB).
-    if [ -s "$wav" ]; then
-        local level
+    # The level is handed over by the caller that already knows it (II_AUDIO_DB,
+    # measured in dictate-daemon.py from the bytes it captured); the ffmpeg pass
+    # below is only for a caller that hands in a bare file. Measuring it with
+    # ffmpeg cost 74-266ms per dictation -- on the release path, for a number
+    # the daemon has had since the first block arrived.
+    local level="${II_AUDIO_DB:-}"
+    if [ -z "$level" ] && [ -s "$wav" ]; then
         level="$(ffmpeg -hide_banner -nostats -i "$wav" -af volumedetect -f null - 2>&1 \
             | sed -n 's/.*mean_volume: \([-0-9.]*\) dB.*/\1/p' | head -1)"
-        if [ -n "$level" ] && awk -v l="$level" 'BEGIN { exit !(l + 0 < -50) }'; then
-            say "input is silent (${level} dB), nothing to transcribe"
-            return 0
-        fi
+    fi
+    if [ -n "$level" ] && awk -v l="$level" 'BEGIN { exit !(l + 0 < -50) }'; then
+        say "input is silent (${level} dB), nothing to transcribe"
+        return 0
     fi
     # Warm server first: it already holds the model, so the words come back in
     # ~0.2s instead of the second or two a fresh whisper-cli spends loading the
@@ -793,8 +805,14 @@ finish_raw() {
     fi
 
     if [ -s "$raw" ]; then
-        ffmpeg -hide_banner -loglevel error -y -f s16le -ar 16000 -ac 1 \
-            -i "$raw" "$wav" >>"$LOG" 2>&1
+        case "$raw" in
+            *.wav) # The daemon hands over a finished WAV -- header plus the same
+                   # PCM -- so there is nothing to wrap and no ffmpeg start
+                   # (~70-90ms) between the release and the words.
+                   wav="$raw" ;;
+            *) ffmpeg -hide_banner -loglevel error -y -f s16le -ar 16000 -ac 1 \
+                   -i "$raw" "$wav" >>"$LOG" 2>&1 ;;
+        esac
     fi
     if [ ! -s "$wav" ] && [ -z "$pre" ]; then
         say "could not wrap the audio"
@@ -808,7 +826,12 @@ finish_raw() {
     # appends a second zero -- giving 0,000, i.e. every dictation shorter than a
     # second was measured as empty and dropped as "too short" while the audio
     # was perfectly fine. Two decimals of an English decimal, on purpose.
-    if [ -s "$wav" ]; then
+    if [ -n "${II_AUDIO_SECONDS:-}" ]; then
+        # Same story as the level: the daemon counted the samples (len/32000),
+        # and ffprobe spent ~70ms of the release re-reading the file to find out.
+        elapsed="$(LC_ALL=C printf '%.2f' "$II_AUDIO_SECONDS" 2>/dev/null || echo 0)"
+        say "recorded ${elapsed}s (tail)"
+    elif [ -s "$wav" ]; then
         dur="$(LC_ALL=C ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$wav" 2>/dev/null)"
         elapsed="$(LC_ALL=C printf '%.2f' "${dur:-0}" 2>/dev/null || echo 0)"
         say "recorded ${elapsed}s (tail)"
@@ -836,6 +859,20 @@ finish_raw() {
     if [ -n "$WINDOW_GEO" ]; then
         grab_window "$SHOT_BEFORE" "$WINDOW_GEO" &
         shot_pid=$!
+    fi
+
+    # The caret probe, started HERE instead of after the words come back. It
+    # walks the accessibility tree -- 140-180ms measured on this machine, up to
+    # its 2s cap on a big app -- and nothing it looks at changes while whisper is
+    # decoding, so that wait was pure addition to the release. Its answer is only
+    # needed one line before the text is typed.
+    FOCUS_HINT_FILE=""
+    local focus_pid=""
+    if [ "${TYPE_CMD:-auto}" != "wl-copy" ]; then
+        FOCUS_HINT_FILE="$(mktemp "$STATE/focus.XXXXXX")" && {
+            ( timeout 2s python3 "$(dirname "$0")/dictate-focus.py" >"$FOCUS_HINT_FILE" 2>/dev/null ) &
+            focus_pid=$!
+        }
     fi
 
     if [ "$short_tail" = "0" ] && [ -s "$wav" ]; then
@@ -894,17 +931,23 @@ finish_raw() {
     # accessibility tree, which does expose widgets, and give the app's main
     # input the caret when it does not have it. Apps that publish no tree say so
     # and leave the old behaviour alone; never let this block a dictation.
-    local focus_hint
-    focus_hint="$(timeout 2s python3 "$(dirname "$0")/dictate-focus.py" 2>/dev/null)"
-    case "$focus_hint" in
-        focused)
-            say "focus: gave the app's input box the caret"
-            sleep 0.15          # let the toolkit move the caret before typing
-            ;;
-        already)   say "focus: input box already selected" ;;
-        no-entry)  say "focus: the app exposes no input box" ;;
-        *)         say "focus: the app publishes no accessibility tree" ;;
-    esac
+    local focus_hint=""
+    if [ -n "$focus_pid" ]; then
+        wait "$focus_pid" 2>/dev/null
+        focus_hint="$(cat "$FOCUS_HINT_FILE" 2>/dev/null)"
+        rm -f "$FOCUS_HINT_FILE"
+    fi
+    if [ -n "$focus_pid" ]; then
+        case "$focus_hint" in
+            focused)
+                say "focus: gave the app's input box the caret"
+                sleep 0.15      # let the toolkit move the caret before typing
+                ;;
+            already)   say "focus: input box already selected" ;;
+            no-entry)  say "focus: the app exposes no input box" ;;
+            *)         say "focus: the app publishes no accessibility tree" ;;
+        esac
+    fi
     if [ "$method" = "auto" ]; then
         if command -v wl-copy >/dev/null && command -v wtype >/dev/null; then
             method=paste
@@ -1016,13 +1059,31 @@ finish_raw() {
             fi ;;
         wtype)   printf '%s' "$out" | wtype - ;;
         ydotool) ydotool type -- "$out" ;;
-        wl-copy) printf '%s' "$out" | wl-copy --sensitive -t text/plain ;;
+        wl-copy) printf '%s' "$out" | wl-copy --sensitive -t text/plain 9>&- ;;
         *)       "$method" "$out" ;;
     esac
     # When the chord went out. The clipboard may not be put back until the app
     # has had time to READ the selection (see the restore below).
     local paste_sent_ms=""
     case "$method" in paste*) paste_sent_ms="$(date +%s%3N)" ;; esac
+    say "delivered with $method"
+
+    # ── THE WORDS ARE AT THE CARET. EVERYTHING BELOW IS HOUSEKEEPING ─────────
+    #
+    # Three screenshots to judge whether the app took the sentence, the second
+    # the clipboard has to stay put, the history write -- none of it is time the
+    # user is waiting for anything, because the text is already in front of
+    # them. Running it inline kept the pill on "Transcribing…" for another
+    # 1-1.6 s AFTER the sentence appeared (dictate.log, 2026-11-18: "tail
+    # transcribed in 960 ms" followed by ~1.6 s of checks), and that afterglow
+    # is what made a fully local dictation feel slower than the old cloud one.
+    # Detached, this script returns as soon as the text is delivered, which is
+    # what clears the pill. The block below keeps the indentation it had as
+    # inline code on purpose: it is a move, not a rewrite.
+    (
+        # The delivery lock (fd 9) is this delivery's. A subshell that outlives
+        # the script must not keep holding it, or the next dictation waits.
+        exec 9>&- 2>/dev/null || true
 
     # Did it land? A wide band of *new* pixels in the bottom of the window -- the
     # shape of a line of text in a prompt box -- counts as delivered. See
@@ -1090,7 +1151,6 @@ finish_raw() {
     case "$method" in
         paste*|wl-copy*) ( sleep 0.9; forget_cliphist "$out" ) >/dev/null 2>&1 & ;;
     esac
-    say "delivered with $method"
     # The audio kept beside the transcript is the WHOLE dictation: with chunking
     # on, `$wav` is only the tail, and a history clip of the last few seconds is
     # not what the transcript above it says.
@@ -1103,6 +1163,11 @@ finish_raw() {
     save_history "$text" "$hist_wav"
     rm -f "$STATE/history.wav"
     if [ "$KEEP_AUDIO" = "1" ]; then rm -f "$raw" "$full"; else rm -f "$wav" "$raw" "$full"; fi
+    ) >/dev/null 2>&1 &
+    # The lock was taken for the copy + chord + nothing else; the next dictation
+    # must not inherit a wait from this one's housekeeping.
+    exec 9>&- 2>/dev/null || true
+    return 0
 }
 
 stop_recording() {
@@ -1162,12 +1227,17 @@ case "${1:-}" in
         # NAME, and `chunk.wav.12345` made it fail with "invalid argument" and
         # write nothing -- silently, since the failure went to the log. mktemp
         # gives a unique name (concurrent dictations) with the right extension.
-        tmp="$(mktemp "$STATE/chunk-XXXXXX.wav")" || exit 1
-        ffmpeg -hide_banner -loglevel error -y -f s16le -ar 16000 -ac 1 \
-            -i "$2" "$tmp" >>"$LOG" 2>&1
+        case "$2" in
+            *.wav) tmp="$2" ;;   # already a WAV: the daemon writes the header
+            *)
+                tmp="$(mktemp "$STATE/chunk-XXXXXX.wav")" || exit 1
+                ffmpeg -hide_banner -loglevel error -y -f s16le -ar 16000 -ac 1 \
+                    -i "$2" "$tmp" >>"$LOG" 2>&1
+                ;;
+        esac
         rc=0
         if [ -s "$tmp" ]; then transcribe "$tmp"; rc=$?; fi
-        rm -f "$tmp"
+        [ "$tmp" = "$2" ] || rm -f "$tmp"
         # The EXIT CODE is the daemon's signal, and it has to mean "no words
         # came back" rather than "there were no words to come back": a piece cut
         # between two sentences can legitimately transcribe to nothing, and

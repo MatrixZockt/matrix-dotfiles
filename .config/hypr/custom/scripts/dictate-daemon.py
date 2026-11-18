@@ -45,6 +45,7 @@ No dependencies: /sysfs device discovery by hand, raw evdev reads, and the
 existing dictate.sh for the whisper/typing half.
 """
 
+import array
 import json
 import math
 import os
@@ -157,6 +158,46 @@ SOURCE = resolve_source(MIC)
 MOUSE_BUTTONS = set(range(0x110, 0x118))   # BTN_LEFT .. BTN_TASK
 EV_SYN, EV_KEY, EV_REL = 0, 1, 2
 REL_WHEEL, REL_HWHEEL = 8, 6
+
+
+def wav_container(pcm, rate=16000):
+    """A valid 16-bit mono WAV around raw PCM: 44 bytes of header.
+
+    ffmpeg can also do this, and did, at ~70-90ms a go -- on the release path,
+    between letting go of the key and the words. The header is trivial and the
+    daemon already has the bytes, so it is built here instead; whisper.cpp
+    decodes the same audio either way.
+    """
+    size = len(pcm)
+    header = (b"RIFF" + struct.pack("<I", 36 + size) + b"WAVEfmt "
+              + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+              + b"data" + struct.pack("<I", size))
+    return header + pcm
+
+
+def pcm_db(pcm):
+    """Mean level in dBFS, from the capture itself.
+
+    This is the number the silence gate compares against -50 dB (dictate.sh used
+    `ffmpeg -af volumedetect` for it, measured here at 74-266ms per dictation).
+    Sampled every 16th sample rather than every one: a mean level does not need
+    every sample, and a full Python loop over a 4-minute dictation would cost
+    more than the ffmpeg call it replaces.
+    """
+    count = len(pcm) // 2
+    if count == 0:
+        return None
+    step = 16 if count > 32000 else 1
+    values = array.array("h", pcm[:count * 2])[::step]
+    if not values:
+        return None
+    total = 0.0
+    for value in values:
+        total += value * value
+    mean_square = total / len(values)
+    if mean_square <= 0:
+        return -120.0
+    return 20.0 * math.log10(math.sqrt(mean_square) / 32768.0)
 
 
 def say(*parts):
@@ -406,6 +447,16 @@ class Recorder(threading.Thread):
         self.jobs = queue.Queue()
         self.parts = []
         self.parts_lock = threading.Lock()
+        # END OF THE AUDIO A CHUNK HAS ACTUALLY RETURNED, in bytes. It is what
+        # the tail starts at, and it only moves when a chunk's words are in:
+        # a piece that was cut but whose request never ran is handed back to the
+        # tail instead (see stop()), which is what lets the release stop waiting
+        # for work nobody needs any more.
+        self.done_at = 0
+        # Set on release. The worker finishes the request it is inside -- the
+        # server is one model, so a second request would only queue behind it --
+        # and then drops everything still waiting in the queue.
+        self.stopping = False
         # False the moment any chunk fails to come back: a missing piece would
         # silently delete a sentence, so the release falls back to transcribing
         # the WHOLE capture instead. Slower, never wrong.
@@ -494,32 +545,50 @@ class Recorder(threading.Thread):
             self._cut()
 
     def _cut(self):
+        start = self.cut_at
         blob = bytes(self.buf[self.cut_at:self.total])
         self.cut_at = self.total
         self.cut_loud = False
         self.quiet_run = 0
-        path = os.path.join(STATE, "chunk-%d-%03d.pcm" % (
+        path = os.path.join(STATE, "chunk-%d-%03d.wav" % (
             int(time.time() * 1000), threading.get_ident() % 1000))
         try:
             with open(path, "wb") as f:
-                f.write(blob)
+                f.write(wav_container(blob))
         except OSError as exc:
             self.chunks_ok = False
             say("chunk write failed:", exc)
             return
-        self.jobs.put(path)
+        # The level travels with the piece so dictate.sh does not have to spawn
+        # ffmpeg to measure the same audio again (see pcm_db).
+        self.jobs.put((path, start, self.total, pcm_db(blob)))
 
     def _work(self):
         """Transcribe queued chunks, in order, until stop() sends None."""
         while True:
-            path = self.jobs.get()
-            if path is None:
+            job = self.jobs.get()
+            if job is None:
                 return
+            path, _start, end, level = job
+            # The key is already up: this piece never started, so its audio is
+            # being sent as part of the tail instead (stop() measured the tail
+            # from the last chunk that really came back). Transcribing it now
+            # would only add its ~1 s to the wait after the release.
+            if self.stopping:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+                continue
             t0 = time.time()
             text = ""
             try:
+                env = dict(os.environ)
+                if level is not None:
+                    env["II_AUDIO_DB"] = "%.1f" % level
                 done = subprocess.run(["bash", DICTATE, "chunk", path],
-                                      capture_output=True, text=True, timeout=120)
+                                      capture_output=True, text=True, timeout=120,
+                                      env=env)
                 if done.returncode == 0:
                     text = done.stdout.strip()
                 else:
@@ -533,10 +602,12 @@ class Recorder(threading.Thread):
             if text:
                 with self.parts_lock:
                     self.parts.append(text)
+            # Consumed either way: empty words still mean the audio is done with.
+            self.done_at = end
             # The text itself is never written to the log: transcripts are not
             # saved anywhere on this machine, including the runtime log.
             say("chunk %.1fs transcribed in %d ms: %d char(s)" % (
-                os.path.getsize(path) / 32000.0 if os.path.exists(path) else 0,
+                max(0, (os.path.getsize(path) - 44)) / 32000.0 if os.path.exists(path) else 0,
                 (time.time() - t0) * 1000, len(text)))
             try:
                 os.unlink(path)
@@ -565,17 +636,23 @@ class Recorder(threading.Thread):
                     pass
         # Everything below the last cut is the tail, whether or not it was
         # worth a chunk of its own.
+        # Anything still queued is dropped and folded back into the tail.
+        self.stopping = True
         self.jobs.put(None)
         try:
             self.worker.join(timeout=30)
         except Exception:
             pass
-        tail = bytes(self.buf[self.cut_at:self.total])
+        tail = bytes(self.buf[self.done_at:self.total])
         full = bytes(self.buf)
         with self.parts_lock:
             parts = list(self.parts)
         if not self.chunks_ok:
+            # A piece that failed took its words with it, and the only copy of
+            # them is the audio: re-send the whole capture. This used to return
+            # the tail alone and silently lose everything before the first cut.
             parts = []
+            tail = full
         # One line of numbers about the meter this hold produced, so a report of
         # "the bars never move" can be answered with data instead of a guess.
         # No words are logged anywhere.
@@ -608,7 +685,7 @@ def finish(raw_bytes, parts=None, full_bytes=None):
     # then deleted the first one's audio mid-read -- whisper got an empty file
     # and the dictation vanished with "recorded 0.000s" in the log.
     stamp = "%d-%03d" % (int(time.time() * 1000), threading.get_ident() % 1000)
-    raw_path = os.path.join(STATE, "capture-%s.pcm" % stamp)
+    raw_path = os.path.join(STATE, "capture-%s.wav" % stamp)
     prefix_path = os.path.join(STATE, "parts-%s.txt" % stamp)
     full_path = os.path.join(STATE, "full-%s.pcm" % stamp)
     try:
@@ -618,7 +695,7 @@ def finish(raw_bytes, parts=None, full_bytes=None):
             say("too short (%.2fs), dropped" % (len(raw_bytes) / 32000.0))
             return
         with open(raw_path, "wb") as f:
-            f.write(raw_bytes)
+            f.write(wav_container(raw_bytes))
         args = ["bash", DICTATE, "finish", raw_path]
         if parts:
             # One line per completed chunk; dictate.sh joins them ahead of the
@@ -635,7 +712,16 @@ def finish(raw_bytes, parts=None, full_bytes=None):
         # No status write here: the task was begun on the release and the
         # heartbeat keeps its timestamp fresh for as long as it runs (see the
         # note above set_task). Writing once and walking away was the old bug.
-        proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Duration and level travel WITH the call: the shell used ffprobe and an
+        # ffmpeg volumedetect pass for both, ~140-330ms of the wait after the
+        # key came up, and this process already knows both numbers.
+        env = dict(os.environ)
+        env["II_AUDIO_SECONDS"] = "%.3f" % (len(raw_bytes) / 32000.0)
+        level = pcm_db(raw_bytes)
+        if level is not None:
+            env["II_AUDIO_DB"] = "%.1f" % level
+        proc = subprocess.Popen(args, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, env=env)
         deadline = time.time() + 120
         while proc.poll() is None:
             if time.time() > deadline:

@@ -1,34 +1,39 @@
 # Words whisper should expect to hear. One term per line; `#` starts a comment.
 #
-# This list is the whole of the vocabulary biasing: dictate-server.sh reads it
-# when it starts and passes it to whisper.cpp as the decoder's initial prompt,
-# so both users of that server -- the hold-SUPER dictation and the WhisperFlow
-# app -- get exactly the same words and not one millisecond of extra work. The
-# decoder reads it as text it has "just written", which is why a name here is
-# spelled correctly instead of phonetically.
+# HOW THIS LIST IS USED, and why it is ordered the way it is.
 #
-# Edits are picked up on their own within a few seconds (dictate-vocab-reload
-# restarts the warm server; the model reloads in about a second). Keep it under
-# roughly a hundred terms: whisper only keeps about half of its text context for
-# the prompt, and a long list starts to displace the transcript itself.
+# dictate.sh sends these words WITH EVERY REQUEST as whisper's initial prompt
+# (dictate_prompt), so editing this file takes effect on the next hold of SUPER:
+# nothing is restarted, nothing needs reloading, and a dictation is never lost
+# to a server coming back up. Before that, an edit restarted the whole server
+# and the next dictation paid for it -- once with 39 seconds.
+#
+# The decoder reads the list as text it has "just written", which is why a name
+# here is spelled correctly instead of phonetically -- but only the last half of
+# its text context is available for a prompt (~224 tokens, and this list runs
+# ~2.7 characters per token), and past that it drops from the FRONT. Two rules
+# follow:
+#
+#   * keep the whole list under ~560 characters (dictate.sh stops adding terms
+#     past that, so a runaway list silently loses its tail);
+#   * put what hurts most LAST -- the end of the list is both what survives any
+#     truncation and what sits closest to the audio.
+#
+# For a name that comes out wrong regardless, use ~/.config/ii-dictate/fixes.txt
+# instead: that is applied to the finished sentence and cannot be ignored.
 
 # --- this desktop ---
 Hyprland
 hyprctl
 Quickshell
-QML
 Wayland
 XWayland
 Kitty
 Brave
 Electron
-Waybar
-swaync
 hyprlock
 hypridle
-hyprpaper
 fuzzel
-wofi
 cliphist
 wl-copy
 wl-paste
@@ -40,15 +45,11 @@ pipewire
 wireplumber
 systemd
 
-# --- tools and engines ---
-Claude
-ChatGPT
-Higgsfield
+# --- engines and formats ---
 whisper.cpp
 WhisperFlow
 llama.cpp
 llama-server
-Qwen
 GGUF
 CUDA
 NVIDIA
@@ -56,17 +57,11 @@ Vulkan
 GGML
 
 # --- work ---
-Grafizum
-MatrixZockt
 GitHub
 GitLab
-Codebuff
 pull request
 merge request
-commit
-branch
 deploy
-deployment
 pipeline
 repository
 dotfiles
@@ -75,14 +70,20 @@ JSON
 YAML
 SQL
 Docker
-Kubernetes
 
 # --- German terms that get mangled ---
 Zwischenablage
 Tastenkürzel
 Konfiguration
 Terminal
-Repository
 Bildschirm
 Netzwerk
 Sicherung
+
+# --- the names that actually come out wrong: last on purpose ---
+Grafizum
+MatrixZockt
+Codebuff
+Claude
+ChatGPT
+Higgsfield

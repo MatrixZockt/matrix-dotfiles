@@ -598,20 +598,82 @@ spell_fix() {
     local text line heard want
     text="$(cat)"
     [ -r "$file" ] && [ -n "$text" ] || { printf '%s' "$text"; return 0; }
+    # ONE sed for the whole file, not one per entry. Every pair used to be its
+    # own sed on the sentence: 35 fork+exec pairs, measured ~120ms of a wait
+    # that is meant to be instant. As many -e expressions as there are pairs,
+    # one process.
+    local -a rules=()
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in ''|'#'*) continue ;; esac
         case "$line" in *=*) ;; *) continue ;; esac
-        heard="$(printf '%s' "${line%%=>*}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-        want="$(printf '%s' "${line#*=>}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+        heard="${line%%=>*}"
+        want="${line#*=>}"
+        heard="${heard#"${heard%%[![:space:]]*}"}"
+        heard="${heard%"${heard##*[![:space:]]}"}"
+        want="${want#"${want%%[![:space:]]*}"}"
+        want="${want%"${want##*[![:space:]]}"}"
         [ -n "$heard" ] || continue
         # `&` and `\` are sed replacement syntax, not text here.
-        want="$(printf '%s' "$want" | sed -e 's/[\\&]/\\&/g')"
+        want="${want//\\/\\\\}"
+        want="${want//\&/\\&}"
         # Whole words only: a fix for "claude" must not fire inside "claudette",
         # and one for "chat gpt" must not fire mid-word.
-        text="$(printf '%s' "$text" \
-            | sed -E "s/(^|[^[:alnum:]_])(${heard})($|[^[:alnum:]_])/\1${want}\3/gI")"
+        rules+=(-e "s/(^|[^[:alnum:]_])(${heard})($|[^[:alnum:]_])/\1${want}\3/gI")
     done < "$file"
-    printf '%s' "$text"
+    [ "${#rules[@]}" -gt 0 ] || { printf '%s' "$text"; return 0; }
+    printf '%s' "$text" | sed -E "${rules[@]}"
+}
+
+# ── The vocabulary, per request ──────────────────────────────────────────
+#
+# The warm server is started with words.txt as its prompt, but a prompt that
+# lives in the SERVER cannot follow an edit: changing a word used to restart the
+# whole server (dictate-vocab-reload), and that restart was the worst latency
+# this feature ever had -- the restart at 09:57:00 made the dictation three
+# seconds later miss the server, fall back to whisper-cli, and take 39s.
+#
+# So the list is sent WITH the request. An edit is live on the next hold of
+# SUPER, no restart, no warm-up, no lost dictation; the server's own copy stays
+# for anything else that talks to it (WhisperFlow).
+#
+# CUT AT 560 CHARS, because whisper keeps only half of the model's text context
+# for a prompt (448/2 = 224 tokens here, and this list measures ~2.7 chars per
+# token): past that the decoder drops from the FRONT, which is why the last
+# lines of the file are the ones that matter -- see the note in words.txt.
+dictate_prompt() {
+    local file="${XDG_CONFIG_HOME:-$HOME/.config}/ii-dictate/words.txt"
+    [ -r "$file" ] || return 0
+    # No sed per line: this runs on the release path, and 60 fork+exec pairs
+    # for whitespace trimming measured ~250ms of the wait after the key.
+    # Bash can trim a string itself.
+    local out="" line
+    while IFS= read -r line; do
+        case "$line" in ''|'#'*) continue ;; esac
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [ -n "$line" ] || continue
+        if [ -z "$out" ]; then
+            out="$line"
+        elif [ $(( ${#out} + ${#line} + 2 )) -le 560 ]; then
+            out="$out, $line"
+        fi
+    done < "$file"
+    printf '%s' "$out"
+}
+
+# Is the server accepting connections at all? Cheap, bounded, no model work.
+server_listening() {
+    curl -s --max-time 0.4 -o /dev/null "http://127.0.0.1:${DICTATE_PORT:-8917}/" 2>/dev/null
+}
+
+# One request to the warm server. 0 = a non-empty reply is sitting in $2.
+ask_server() { # ask_server <wav> <reply-file> <prompt>
+    local -a prompt_arg=()
+    [ -n "${3:-}" ] && prompt_arg=(-F "prompt=$3")
+    curl -s --max-time 300 -F "file=@$1" -F response_format=verbose_json \
+        -F temperature=0 -F "language=$LANGUAGE" "${prompt_arg[@]}" \
+        "http://127.0.0.1:${DICTATE_PORT:-8917}/inference" -o "$2" 2>/dev/null \
+        && [ -s "$2" ]
 }
 
 transcribe() { # transcribe <wav> -> prints the text
@@ -659,10 +721,32 @@ transcribe() { # transcribe <wav> -> prints the text
     # verbose_json, not text: the same response also carries the language it
     # decided the audio was in, which is what the bar shows while it works.
     # response_format=text has the words and nothing else.
-    if curl -s --max-time 300 -F "file=@$wav" -F response_format=verbose_json \
-            -F temperature=0 -F "language=$LANGUAGE" \
-            "http://127.0.0.1:${DICTATE_PORT:-8917}/inference" \
-            -o "$reply" 2>/dev/null && [ -s "$reply" ]; then
+    #
+    # AND THE SERVER MAY BE STARTING, NOT GONE. This is the whole of the
+    # "sometimes it takes ages" report: on 2026-11-18 at 09:57:01 a dictation
+    # landed on a server restart, the request got a connection error, and the
+    # code below jumped straight to whisper-cli -- which loads the model from
+    # disk and initialises CUDA, and took 39s for 2.6s of audio. A warm server
+    # answers in 0.3-0.9s, and one that is coming up is listening within ~4s, so
+    # the cold path must never win by default. Waiting is always the better
+    # trade; the fallback is kept for a server that is really not coming back.
+    local prompt got=0
+    prompt="$(dictate_prompt)"
+    if ask_server "$wav" "$reply" "$prompt"; then
+        got=1
+    elif ! server_listening; then
+        say "the warm server is not answering -- waiting for it instead of loading the model cold"
+        local waited=0
+        while [ "$waited" -lt 50 ] && ! server_listening; do
+            sleep 0.5
+            waited=$(( waited + 1 ))
+        done
+        if [ "$waited" -lt 50 ]; then
+            say "server answered after $(( waited * 500 )) ms -- asking it again"
+            ask_server "$wav" "$reply" "$prompt" && got=1
+        fi
+    fi
+    if [ "$got" = "1" ]; then
         if TF_TEXT="$out" TF_LANG="$LANG_FILE" LANG_CODES="$LANG_CODES" \
                 python3 - "$reply" <<'PY'
 import json, os, re, sys, time

@@ -58,6 +58,16 @@ vocab_args() {
     #
     # `--carry-initial-prompt` keeps it applied when a long recording is decoded
     # in more than one window; without it only the first window would see it.
+    #
+    # NOTE, 2026-11-18: dictate.sh now SENDS this same list with every request
+    # (dictate_prompt), so the hold-SUPER dictation follows an edit to words.txt
+    # without any restart -- this copy is what a request that brings no prompt
+    # of its own gets (WhisperFlow), and it is read at server start.
+    #
+    # And `-mc` must not be 0: with no text context whisper drops the initial
+    # prompt entirely ("initial prompt is too long (...), will use only the last
+    # 1 tokens"), which is why the vocabulary did nothing for a long time. 448 is
+    # the model's own context; half of it is what a prompt is allowed to use.
     local file="${XDG_CONFIG_HOME:-$HOME/.config}/ii-dictate/words.txt"
     [ -r "$file" ] || return 0
     local words
@@ -76,6 +86,41 @@ server_bin() {
     [ -x "$cuda" ] && { printf '%s' "$cuda"; return 0; }
     [ -x "$cpu" ] && { printf '%s' "$cpu"; return 0; }
     return 1
+}
+
+# ── The first request after a start is not free ──────────────────────────
+#
+# Measured 2026-11-18 on this machine: the first inference on a freshly started
+# server spent 7.2s of wall clock for 1.5s of logged work -- CUDA module load,
+# ggml graph allocation, the first kernel launches. Everything after it is
+# 0.3-0.9s. The person who pays that 7s is whoever dictates first, which is
+# indistinguishable from "dictation is sometimes broken".
+#
+# So the server warms ITSELF: a detached process waits for the port, sends one
+# throwaway second of silence, and exits. A cgroup stop still takes it down with
+# the server, and a failed warm-up costs nothing (the dictation that follows just
+# pays the cold first request as before).
+warmup_wav() {
+    local f="$STATE/warmup.wav"
+    [ -s "$f" ] && { printf '%s' "$f"; return 0; }
+    command -v ffmpeg >/dev/null 2>&1 || return 1
+    ffmpeg -hide_banner -loglevel error -y -f lavfi -i anullsrc=r=16000:cl=mono \
+        -t 1 -c:a pcm_s16le "$f" >/dev/null 2>&1 || return 1
+    [ -s "$f" ] && printf '%s' "$f"
+}
+
+warm_in_background() {
+    local wav
+    wav="$(warmup_wav)" || return 0
+    ( i=0
+      while [ "$i" -lt 150 ]; do
+          curl -s --max-time 0.4 -o /dev/null "http://127.0.0.1:${DICTATE_PORT}/" 2>/dev/null && break
+          sleep 0.2
+          i=$(( i + 1 ))
+      done
+      curl -s --max-time 120 -o /dev/null -F "file=@$wav" -F response_format=json \
+          "http://127.0.0.1:${DICTATE_PORT}/inference" 2>/dev/null
+    ) >/dev/null 2>&1 &
 }
 
 listening() {
@@ -103,8 +148,9 @@ start() {
     # -d '' because the words list is passed NUL-separated: terms may contain
     # spaces ("pull request") and must survive as ONE argument.
     mapfile -d '' -t vocab < <(vocab_args)
+    warm_in_background
     setsid "$bin" -m "$model" -l "$LANGUAGE" --host 127.0.0.1 \
-        --port "$DICTATE_PORT" -mc 0 --convert "${vocab[@]}" >>"$LOGFILE" 2>&1 &
+        --port "$DICTATE_PORT" -mc 448 --convert "${vocab[@]}" >>"$LOGFILE" 2>&1 &
     echo $! > "$PIDFILE"
 }
 
@@ -125,8 +171,9 @@ run() {
     trap 'rm -f "$PIDFILE"' EXIT
     local -a vocab=()
     mapfile -d '' -t vocab < <(vocab_args)
+    warm_in_background
     exec "$bin" -m "$model" -l "$LANGUAGE" --host 127.0.0.1 \
-        --port "$DICTATE_PORT" -mc 0 --convert "${vocab[@]}"
+        --port "$DICTATE_PORT" -mc 448 --convert "${vocab[@]}"
 }
 
 case "${1:-start}" in

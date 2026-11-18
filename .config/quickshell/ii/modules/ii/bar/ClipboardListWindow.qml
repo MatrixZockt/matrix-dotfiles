@@ -98,6 +98,10 @@ Scope {
     // was 380x0 and drew nothing. Reading the real item catches that class of
     // bug instead of repeating its assumption.
     property var cardRef: null
+    // The preview pane, for the same reason as cardRef: its height REQUEST is
+    // what decides how tall the card gets for a long entry, and "the box did
+    // not grow" can only be answered by seeing the number it asked for.
+    property var paneRef: null
 
     // ── Image previews ────────────────────────────────────────────────────
     // Decoded in one batch when the card opens, and again when the history
@@ -588,12 +592,15 @@ Scope {
             Component.onCompleted: {
                 root.panelRef = clipboardWindow;
                 root.cardRef = popupCard;
+                root.paneRef = previewPane;
             }
             Component.onDestruction: {
                 if (root.panelRef === clipboardWindow)
                     root.panelRef = null;
                 if (root.cardRef === popupCard)
                     root.cardRef = null;
+                if (root.paneRef === previewPane)
+                    root.paneRef = null;
             }
 
             screen: modelData
@@ -626,7 +633,19 @@ Scope {
             // (2026-10-28).
             // 460 (was 400): the preview pane needs room for a picture and a
             // few lines of it, and the list gets the same rows either way.
-            readonly property real maxPopupHeight: Math.min(460, screenH - root.edgeMargin * 2)
+            // NO 460 CAP ANY MORE. The preview pane asks for the height its
+            // entry needs (ClipboardPreviewPane.desiredHeight), and a long
+            // paste -- the case this pane exists for -- needs more than 460.
+            // The card grows to the entry and is still clamped to the screen
+            // below, so the only thing that can be too tall for it is an entry
+            // taller than the display, and that one scrolls.
+            readonly property real maxPopupHeight: Math.max(460, screenH - root.edgeMargin * 2)
+            // What the LIST is allowed to be, kept at its old height (460 - 140
+            // = 320). Only the preview may grow the card: without this, twenty
+            // rows would make every open a screen-tall card regardless of the
+            // entry in the preview.
+            readonly property real maxListHeight: Math.max(120,
+                Math.min(320, screenH - root.edgeMargin * 2 - 140))
 
             // Pointer position relative to this monitor.
             readonly property real localX: root.cursorX - (modelData?.x ?? 0)
@@ -1143,7 +1162,11 @@ Scope {
                           // once and pushed the preview pane's actions out of the
                           // card (measured: the card is 460 tall, the left
                           // column asked for 1092).
-                          Layout.maximumHeight: Math.max(120, clipboardWindow.maxPopupHeight - 140)
+                          //
+                          // The maximum is the CARD's, not the list's: this row
+                          // also holds the preview pane, and the pane is what is
+                          // allowed to make the card tall (see maxListHeight).
+                          Layout.maximumHeight: clipboardWindow.maxPopupHeight
                           spacing: 10
 
                         ColumnLayout {
@@ -1202,7 +1225,7 @@ Scope {
                               // Open buttons off the bottom of a 460px card and they
                               // were clipped away with it.
                               Layout.preferredHeight: Math.min(listView.contentHeight,
-                                  Math.max(120, clipboardWindow.maxPopupHeight - 140))
+                                  clipboardWindow.maxListHeight)
                             spacing: 2
                             clip: true
                             model: root.listRows
@@ -1282,6 +1305,7 @@ Scope {
                         }
 
                         ClipboardPreviewPane {
+                            id: previewPane
                             Layout.preferredWidth: 272
                             Layout.fillHeight: true
                             entry: root.selectedEntry === null ? "" : String(root.selectedEntry)
@@ -1435,6 +1459,11 @@ Scope {
                 + ` above=${w.placeAbove}`
                 + ` pointer=${Math.round(root.cursorX)},${Math.round(root.cursorY)}`
                 + ` visible=${w.visible}`
+                + ` natural=${Math.round(c.naturalHeight)}`
+                + ` paneWant=${Math.round(root.paneRef?.desiredHeight ?? -1)}`
+                + ` paneH=${Math.round(root.paneRef?.height ?? -1)}`
+                + ` paneBody=${Math.round(root.paneRef?.bodyDesiredHeight ?? -1)}`
+                + ` chars=${root.paneRef?.bodyChars ?? -1}`
                 + (c.width > 1 && c.height > 1 ? " HAS-AREA" : " NO-AREA!")
                 + (w.anchoredX + w.cardW <= w.screenW && w.anchoredY + w.cardH <= w.screenH
                     && w.anchoredX >= 0 && w.anchoredY >= 0

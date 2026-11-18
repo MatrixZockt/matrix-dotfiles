@@ -45,7 +45,52 @@ Rectangle {
         return isNaN(id) ? -1 : id;
     }
 
-    readonly property string body: Cliphist.entryContent(pane.entry)
+    // ── The FULL value, decoded ───────────────────────────────────────────
+    //
+    // `cliphist list` is a PREVIEW list: every entry comes back cut to about a
+    // hundred characters and ending in "…". The popup was treating that as the
+    // entry itself, so this pane -- the one place meant to show a paste in full
+    // -- could only ever show its first line, no matter what the box did. (A
+    // paste measured here: `list` gave 109 bytes, `decode` gave 6010.)
+    //
+    // So the selected entry is decoded (`cliphist decode <id>`), which returns
+    // the real content. Only for entries that are not pictures: an image
+    // decodes to PNG bytes, and Cliphist.imagePreviewFile already turns that
+    // into the picture drawn below.
+    property string decodedBody: ""
+    readonly property string listBody: Cliphist.entryContent(pane.entry)
+    readonly property string body: {
+        if (pane.entry === "")
+            return "";
+        if (!pane.isImage && pane.decodedBody !== "")
+            return pane.decodedBody;
+        return pane.listBody;
+    }
+    // One decode per selection, never per repaint, and started from a 0ms timer
+    // for the same reason as the file probe: `command` is a binding, and
+    // starting the process in the same statement runs the PREVIOUS entry's id.
+    function loadFullEntry() {
+        pane.decodedBody = "";
+        if (pane.entryId < 0 || pane.isImage)
+            return;
+        decodeTimer.restart();
+    }
+    Timer {
+        id: decodeTimer
+        interval: 0
+        repeat: false
+        onTriggered: {
+            decodeProc.running = false;
+            decodeProc.running = true;
+        }
+    }
+    Process {
+        id: decodeProc
+        command: ["cliphist", "decode", String(pane.entryId)]
+        stdout: StdioCollector {
+            onStreamFinished: pane.decodedBody = String(text ?? "")
+        }
+    }
 
     readonly property bool isImage: Cliphist.entryIsImage(pane.entry)
 
@@ -145,15 +190,20 @@ Rectangle {
         return { size: m[1], dims: `${m[3]}×${m[4]}` };
     }
 
-    // Text is capped for display: re-rendering a 200 KB paste into a wrapped
-    // Text item is a visible stall, and nobody reads that far in a preview.
-    readonly property int textLimit: 6000
+    // THE WHOLE ENTRY, never a cut-down version of it.
+    //
+    // This used to stop at 6000 characters and say "truncated for the preview",
+    // which defeats the one job this pane has: a paste you cannot identify from
+    // its first line is exactly the one you open the pane for. The box grows to
+    // the height the entry needs instead (see desiredHeight below and the card
+    // height in ClipboardListWindow), and anything taller than the screen --
+    // which is the only thing that can still be too big -- scrolls in the
+    // Flickable it is drawn in.
     readonly property string textBody: {
         if (pane.kind === "image" || pane.fileUris.length > 0)
             return "";
-        return pane.body.length > pane.textLimit ? pane.body.slice(0, pane.textLimit) : pane.body;
+        return pane.body;
     }
-    readonly property bool textTruncated: pane.body.length > pane.textLimit
 
     // ── File facts, from the file itself ──────────────────────────────────
     // Asked for whenever the selection changes, not on every repaint: one
@@ -274,10 +324,74 @@ Rectangle {
     // change handler that reads them can still see the OLD entry's values
     // (measured: a 36-character file entry reported an empty path, so the probe
     // returned early every time and no poster was ever written).
-    onEntryChanged: Qt.callLater(pane.runProbe)
+    onEntryChanged: {
+        Qt.callLater(pane.runProbe);
+        Qt.callLater(pane.loadFullEntry);
+    }
     // The entry the popup opens with is already selected, so there is no change
     // to react to: the first selection has to be probed here.
-    Component.onCompleted: Qt.callLater(pane.runProbe)
+    Component.onCompleted: {
+        Qt.callLater(pane.runProbe);
+        Qt.callLater(pane.loadFullEntry);
+    }
+    // A file copy that was cut in the list line only knows its real path once
+    // the decode lands, so the probe has to run again for it.
+    onDecodedBodyChanged: Qt.callLater(pane.runProbe)
+
+    // ── How tall the box wants to be ──────────────────────────────────────
+    //
+    // The card asks this pane how much room its entry needs and grows to it
+    // (bounded by the screen). Without that request a long paste was drawn
+    // inside a 460px card no matter what, which is why the pane had to scroll
+    // -- and why it used to cut the text at 6000 characters instead.
+    //
+    // The text height comes from an invisible copy of the same Text at the same
+    // width and font, so what is measured is exactly what is drawn. The image
+    // height comes from the dimensions cliphist wrote into the entry, scaled to
+    // the pane's inner width, so a picture is asked for its true aspect ratio
+    // rather than a guess. Both are pure functions of the entry and the pane's
+    // width -- never of the card's height -- so this cannot size what sizes it.
+    readonly property real innerWidth: Math.max(120, pane.width - 20)
+    // The pane's own furniture: the 10px inset top and bottom, the kind row,
+    // the gap to the body and the action row.
+    readonly property real chromeHeight: 84
+    readonly property real bodyDesiredHeight: {
+        if (pane.entry === "")
+            return 0;
+        if (pane.kind === "image") {
+            const m = /(\d+)x(\d+)/.exec(pane.entry);
+            if (m) {
+                const w = Number(m[1]);
+                const h = Number(m[2]);
+                if (w > 0 && h > 0)
+                    return Math.max(100, pane.innerWidth * h / w);
+            }
+            return 200;
+        }
+        if (pane.kind === "video" && posterPreview.status === Image.Ready && posterPreview.implicitHeight > 0)
+            return Math.max(100, pane.innerWidth * posterPreview.implicitHeight / posterPreview.implicitWidth);
+        if (pane.fileUris.length > 0)
+            return 150;
+        return Math.max(60, textSizer.implicitHeight);
+    }
+    readonly property real desiredHeight: pane.chromeHeight + pane.bodyDesiredHeight
+    // Read by the popup's geometry diagnostic: how much text the box was
+    // actually given. `cliphist list` cut it to ~100 characters, so this
+    // number is also the check that the decode above happened.
+    readonly property int bodyChars: pane.textBody.length
+    // Asked of the Layout the pane sits in: this is the whole mechanism.
+    Layout.preferredHeight: pane.desiredHeight
+
+    // Measured, never drawn (it is hidden), at the exact width and font of the
+    // real body text.
+    StyledText {
+        id: textSizer
+        visible: false
+        width: pane.innerWidth
+        text: pane.textBody
+        wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+        font.pixelSize: Appearance.font.pixelSize.smaller
+    }
 
     // A faint inset of its own, so the preview reads as a separate half of the
     // card instead of as text floating over the list's right edge.
@@ -499,13 +613,6 @@ Rectangle {
                         font.pixelSize: Appearance.font.pixelSize.smaller
                         color: Appearance.colors.colOnLayer1
                         linkColor: Appearance.colors.colPrimary
-                    }
-                    StyledText {
-                        Layout.fillWidth: true
-                        visible: pane.textTruncated
-                        text: "… " + Translation.tr("truncated for the preview")
-                        font.pixelSize: Appearance.font.pixelSize.smaller
-                        color: ColorUtils.transparentize(Appearance.colors.colSubtext, 0.25)
                     }
                 }
             }

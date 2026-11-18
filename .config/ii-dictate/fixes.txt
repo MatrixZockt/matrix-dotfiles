@@ -1,0 +1,48 @@
+# Names whisper gets wrong, and how they are spelled.
+#
+#   <what whisper writes> => <what was meant>
+#
+# dictation applies these to the finished sentence (dictate.sh, spell_fix): the
+# prompt in words.txt only nudges the decoder and loses to clear audio, so a
+# name that matters is promised here instead. One pair per line, `#` starts a
+# comment, matching is whole-word and case-insensitive, and an edit takes
+# effect on the next dictation -- nothing needs restarting.
+#
+# Keep the left side in the lower-case form a transcriber would produce; the
+# right side is typed exactly as written, capitals included.
+
+# --- the names that started this file ---
+a pig's field => Higgsfield
+pigs field => Higgsfield
+pig's field => Higgsfield
+higgs field => Higgsfield
+higgs-field => Higgsfield
+higgsfield => Higgsfield
+
+chat gpt => ChatGPT
+chat gbt => ChatGPT
+chatgbt => ChatGPT
+chat gpd => ChatGPT
+chat gtp => ChatGPT
+chat jipiti => ChatGPT
+chatgpt => ChatGPT
+
+claude => Claude
+claud => Claude
+clod => Claude
+
+# --- the rest of the tools this desktop talks about ---
+whisper flow => WhisperFlow
+whisperflow => WhisperFlow
+quickshell => Quickshell
+quick shell => Quickshell
+hyprland => Hyprland
+hypr land => Hyprland
+hyprctl => hyprctl
+llama server => llama-server
+llama cpp => llama.cpp
+whisper cpp => whisper.cpp
+grafizum => Grafizum
+grafi zoom => Grafizum
+codebuff => Codebuff
+code buff => Codebuff

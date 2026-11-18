@@ -579,6 +579,41 @@ clean_transcript() {
         | sed -e 's/  */ /g' -e 's/^ *//' -e 's/ *$//'
 }
 
+# ── The names whisper spells its own way ─────────────────────────────────
+#
+# words.txt is a HINT, not a command. The decoder follows the prompt when the
+# audio is ambiguous and ignores it when it is not -- which is why "Higgsfield"
+# came back as "a pig's field" and "ChatGPT" as "chat gbt" no matter how often
+# they were added to the list. A prompt cannot promise a spelling; this can.
+#
+# fixes.txt holds `<what whisper writes> => <what was meant>` pairs, applied to
+# the finished sentence: one sed per entry over a few dozen characters, no
+# model, no GPU, no extra request, and deterministic. The audio is untouched,
+# so a wrong entry costs a wrong word and never a lost sentence.
+#
+# Read on every dictation, not at startup: an edit takes effect on the next
+# hold of SUPER, with no restart of the daemon or the whisper server.
+spell_fix() {
+    local file="${XDG_CONFIG_HOME:-$HOME/.config}/ii-dictate/fixes.txt"
+    local text line heard want
+    text="$(cat)"
+    [ -r "$file" ] && [ -n "$text" ] || { printf '%s' "$text"; return 0; }
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ''|'#'*) continue ;; esac
+        case "$line" in *=*) ;; *) continue ;; esac
+        heard="$(printf '%s' "${line%%=>*}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+        want="$(printf '%s' "${line#*=>}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+        [ -n "$heard" ] || continue
+        # `&` and `\` are sed replacement syntax, not text here.
+        want="$(printf '%s' "$want" | sed -e 's/[\\&]/\\&/g')"
+        # Whole words only: a fix for "claude" must not fire inside "claudette",
+        # and one for "chat gpt" must not fire mid-word.
+        text="$(printf '%s' "$text" \
+            | sed -E "s/(^|[^[:alnum:]_])(${heard})($|[^[:alnum:]_])/\1${want}\3/gI")"
+    done < "$file"
+    printf '%s' "$text"
+}
+
 transcribe() { # transcribe <wav> -> prints the text
     local wav="$1" model="$DATA/models/$MODEL"
     # Silence is the other half of the bad-text problem, and the model cannot
@@ -748,7 +783,7 @@ if name:
     os.replace(tmp, path)
 PY
         then
-            clean_transcript < "$out"
+            clean_transcript < "$out" | spell_fix
             rm -f "$out" "$reply"
             return 0
         fi
@@ -775,7 +810,7 @@ PY
     # "Thanks for being here.", borrowed from whatever it had decoded before.
     "$DATA/whisper.cpp/build/bin/whisper-cli" \
         -m "$model" -f "$wav" -nt -np -t "$THREADS" -mc 0 "${lang_args[@]}" 2>>"$LOG" \
-        | clean_transcript
+        | clean_transcript | spell_fix
 }
 
 # Everything after the microphone: wrap, measure, transcribe, type. Shared by

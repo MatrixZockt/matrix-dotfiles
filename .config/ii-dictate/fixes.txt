@@ -34,6 +34,10 @@ clod => Claude
 # --- the rest of the tools this desktop talks about ---
 whisper flow => WhisperFlow
 whisperflow => WhisperFlow
+github => GitHub
+gitlab => GitLab
+matrix zockt => MatrixZockt
+matrixzockt => MatrixZockt
 quickshell => Quickshell
 quick shell => Quickshell
 hyprland => Hyprland

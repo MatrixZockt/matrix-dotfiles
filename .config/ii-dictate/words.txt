@@ -19,8 +19,11 @@
 #   * put what hurts most LAST -- the end of the list is both what survives any
 #     truncation and what sits closest to the audio.
 #
-# For a name that comes out wrong regardless, use ~/.config/ii-dictate/fixes.txt
-# instead: that is applied to the finished sentence and cannot be ignored.
+# A term here is ALSO corrected after the fact: dictate-vocab.py matches the
+# finished sentence by sound, so "Higsfield" or "Hicks field" still becomes
+# Higgsfield even when the decoder ignored the prompt. Spelling variants nobody
+# would guess, and ordinary words that must be swapped, go in fixes.txt -- that
+# is applied first and cannot be ignored.
 
 # --- this desktop ---
 Hyprland

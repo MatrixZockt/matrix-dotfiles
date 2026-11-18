@@ -584,44 +584,40 @@ clean_transcript() {
 # words.txt is a HINT, not a command. The decoder follows the prompt when the
 # audio is ambiguous and ignores it when it is not -- which is why "Higgsfield"
 # came back as "a pig's field" and "ChatGPT" as "chat gbt" no matter how often
-# they were added to the list. A prompt cannot promise a spelling; this can.
+# they were added to the list. Measured 2026-11-18: the prompt really was being
+# applied (whisper's timings show the prompt work, and no truncation warning)
+# and the names still came out wrong. A prompt cannot promise a spelling.
 #
-# fixes.txt holds `<what whisper writes> => <what was meant>` pairs, applied to
-# the finished sentence: one sed per entry over a few dozen characters, no
-# model, no GPU, no extra request, and deterministic. The audio is untouched,
-# so a wrong entry costs a wrong word and never a lost sentence.
+# So the finished sentence is corrected instead -- one pass, no model, no GPU,
+# no extra request, audio untouched, and a term that does not match is left
+# exactly as it was written. dictate-vocab.py reads BOTH files:
 #
-# Read on every dictation, not at startup: an edit takes effect on the next
-# hold of SUPER, with no restart of the daemon or the whisper server.
+#   fixes.txt   `<what whisper writes> => <what was meant>`, applied first and
+#               taken literally, so it can correct an ordinary word too;
+#   words.txt   every term in the list, matched by SOUND, which is what makes a
+#               name added there work without also guessing its manglings in
+#               fixes.txt ("Higsfield", "Higgs Field", "Hicks field" ->
+#               "Higgsfield").
+#
+# Whole words, any case, and the file is read on every dictation: an edit takes
+# effect on the next hold of SUPER, with no restart of anything.
+#
+# Applied ONCE to the joined sentence (see finish_raw), not per chunk: fewer
+# processes on a long dictation, and a two-word term split across a chunk seam
+# is still seen.
 spell_fix() {
-    local file="${XDG_CONFIG_HOME:-$HOME/.config}/ii-dictate/fixes.txt"
-    local text line heard want
+    local text fixed fixer
     text="$(cat)"
-    [ -r "$file" ] && [ -n "$text" ] || { printf '%s' "$text"; return 0; }
-    # ONE sed for the whole file, not one per entry. Every pair used to be its
-    # own sed on the sentence: 35 fork+exec pairs, measured ~120ms of a wait
-    # that is meant to be instant. As many -e expressions as there are pairs,
-    # one process.
-    local -a rules=()
-    while IFS= read -r line || [ -n "$line" ]; do
-        case "$line" in ''|'#'*) continue ;; esac
-        case "$line" in *=*) ;; *) continue ;; esac
-        heard="${line%%=>*}"
-        want="${line#*=>}"
-        heard="${heard#"${heard%%[![:space:]]*}"}"
-        heard="${heard%"${heard##*[![:space:]]}"}"
-        want="${want#"${want%%[![:space:]]*}"}"
-        want="${want%"${want##*[![:space:]]}"}"
-        [ -n "$heard" ] || continue
-        # `&` and `\` are sed replacement syntax, not text here.
-        want="${want//\\/\\\\}"
-        want="${want//\&/\\&}"
-        # Whole words only: a fix for "claude" must not fire inside "claudette",
-        # and one for "chat gpt" must not fire mid-word.
-        rules+=(-e "s/(^|[^[:alnum:]_])(${heard})($|[^[:alnum:]_])/\1${want}\3/gI")
-    done < "$file"
-    [ "${#rules[@]}" -gt 0 ] || { printf '%s' "$text"; return 0; }
-    printf '%s' "$text" | sed -E "${rules[@]}"
+    [ -n "${text//[[:space:]]/}" ] || { printf '%s' "$text"; return 0; }
+    fixer="$(dirname "$0")/dictate-vocab.py"
+    [ -r "$fixer" ] || { printf '%s' "$text"; return 0; }
+    fixed="$(printf '%s' "$text" | python3 "$fixer" 2>>"$LOG")"
+    # A corrector that fails, or comes back with nothing, must never cost a
+    # sentence: the words whisper found are typed instead. (The old sed version
+    # could do exactly that -- one malformed line in fixes.txt aborted the
+    # whole program and produced empty text.)
+    [ -n "${fixed//[[:space:]]/}" ] || fixed="$text"
+    printf '%s' "$fixed"
 }
 
 # ── The vocabulary, per request ──────────────────────────────────────────
@@ -646,18 +642,30 @@ dictate_prompt() {
     # No sed per line: this runs on the release path, and 60 fork+exec pairs
     # for whitespace trimming measured ~250ms of the wait after the key.
     # Bash can trim a string itself.
-    local out="" line
+    local line out="" used=0 add i
+    local -a lines=()
     while IFS= read -r line; do
         case "$line" in ''|'#'*) continue ;; esac
         line="${line#"${line%%[![:space:]]*}"}"
         line="${line%"${line##*[![:space:]]}"}"
         [ -n "$line" ] || continue
-        if [ -z "$out" ]; then
-            out="$line"
-        elif [ $(( ${#out} + ${#line} + 2 )) -le 560 ]; then
-            out="$out, $line"
-        fi
+        lines+=("$line")
     done < "$file"
+    [ "${#lines[@]}" -gt 0 ] || return 0
+    # BUILT FROM THE END. Whisper keeps the LAST tokens of a prompt and drops
+    # the front, so the end of this file is the part that must always survive
+    # the budget -- and the file's own note says the names that get mangled go
+    # last. Filling forwards dropped exactly those names as soon as the list
+    # grew past the cap, which is why adding a word could silently do nothing.
+    i=$(( ${#lines[@]} - 1 ))
+    while [ "$i" -ge 0 ]; do
+        add=${#lines[$i]}
+        [ -n "$out" ] && add=$(( add + 2 ))
+        [ $(( used + add )) -gt 560 ] && break
+        used=$(( used + add ))
+        out="${lines[$i]}${out:+, $out}"
+        i=$(( i - 1 ))
+    done
     printf '%s' "$out"
 }
 
@@ -670,8 +678,11 @@ server_listening() {
 ask_server() { # ask_server <wav> <reply-file> <prompt>
     local -a prompt_arg=()
     [ -n "${3:-}" ] && prompt_arg=(-F "prompt=$3")
+    # carry_initial_prompt=true, so a server started without the flag still
+    # carries the list into every window instead of only the first.
     curl -s --max-time 300 -F "file=@$1" -F response_format=verbose_json \
-        -F temperature=0 -F "language=$LANGUAGE" "${prompt_arg[@]}" \
+        -F temperature=0 -F "language=$LANGUAGE" \
+        -F carry_initial_prompt=true "${prompt_arg[@]}" \
         "http://127.0.0.1:${DICTATE_PORT:-8917}/inference" -o "$2" 2>/dev/null \
         && [ -s "$2" ]
 }
@@ -867,7 +878,9 @@ if name:
     os.replace(tmp, path)
 PY
         then
-            clean_transcript < "$out" | spell_fix
+            # The words are corrected once, on the joined sentence (finish_raw):
+            # a chunk on its own must not be rewritten before it is joined.
+            clean_transcript < "$out"
             rm -f "$out" "$reply"
             return 0
         fi
@@ -892,9 +905,9 @@ PY
     # standalone recording, and a context window is what lets whisper continue a
     # sentence it never heard -- measured here, an empty hold came back as
     # "Thanks for being here.", borrowed from whatever it had decoded before.
-    "$DATA/whisper.cpp/build/bin/whisper-cli" \
+            "$DATA/whisper.cpp/build/bin/whisper-cli" \
         -m "$model" -f "$wav" -nt -np -t "$THREADS" -mc 0 "${lang_args[@]}" 2>>"$LOG" \
-        | clean_transcript | spell_fix
+        | clean_transcript
 }
 
 # Everything after the microphone: wrap, measure, transcribe, type. Shared by
@@ -1015,6 +1028,13 @@ finish_raw() {
         text="$pre $text"
     elif [ -n "$pre" ]; then
         text="$pre"
+    fi
+
+    # The names, once, over the whole sentence: the chunks were left as whisper
+    # wrote them so a term that landed on a chunk boundary is still corrected
+    # here (see spell_fix).
+    if [ -n "$text" ]; then
+        text="$(printf '%s' "$text" | spell_fix)"
     fi
 
     # Nothing came back. Two very different cases wear the same face here, and
@@ -1327,7 +1347,10 @@ case "${1:-}" in
         ;;
     transcribe)
         [ -n "${2:-}" ] || { echo "usage: dictate.sh transcribe FILE.wav" >&2; exit 2; }
-        transcribe "$2"
+        # The test path shows what a dictation would actually type, so the
+        # vocabulary correction is part of it.
+        transcribe "$2" | spell_fix
+        echo
         ;;
     paste) # manual: deliver TEXT the way a finished dictation would, for testing
            # the delivery path without speaking into the microphone.

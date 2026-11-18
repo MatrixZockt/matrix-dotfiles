@@ -4156,11 +4156,19 @@ Item {
         if (!root.clipboard.every(c => root.dirName(c.path) === d)) return false;
         return root.cancelCut();
     }
-    function copySelection(cut) {
-        if (root.selection.length === 0) { root.toast(Translation.tr("Nothing selected"), ""); return; }
-        root.clipboard = root.selection.map(p => ({ path: p, cut: !!cut }));
+    // `paths` is for menus: a sidebar row (a pin, a Quick access folder) is not
+    // part of the file pane's selection, so Copy there has to act on the folder
+    // the menu was opened over. Without it the menu fell back to `selection`,
+    // which is empty in the sidebar -- the "Nothing selected" toast reported
+    // when copying a pinned folder.
+    function copySelection(cut, paths) {
+        const list = Array.isArray(paths)
+            ? paths.filter(p => String(p ?? "").length > 0)
+            : root.selection;
+        if (list.length === 0) { root.toast(Translation.tr("Nothing selected"), ""); return; }
+        root.clipboard = list.map(p => ({ path: p, cut: !!cut }));
         root.publishClipboard(!!cut);
-        root.statusNote = root.selection.length + " "
+        root.statusNote = list.length + " "
             + (cut ? Translation.tr("item(s) to move") : Translation.tr("item(s) copied"));
         // Say it out loud as well, and say it the way a TEXT copy says it: the
         // desktop's one-word signal card, the same one the clipboard raises.
@@ -4989,8 +4997,8 @@ Item {
         case "sortType": root.setSort(2); break;
         case "sortSize": root.setSort(3); break;
         case "refresh": root.refresh(); break;
-        case "cut": root.copySelection(true); break;
-        case "copy": root.copySelection(false); break;
+        case "cut": root.copySelection(true, root.menuTargets(target)); break;
+        case "copy": root.copySelection(false, root.menuTargets(target)); break;
         case "rename": root.beginRename(target); break;
         // Every one of these acts on the whole selection, never on only the
         // right-clicked row -- see menuTargets().
@@ -6106,9 +6114,11 @@ Item {
             Flickable {
                 id: tabLane
                 Layout.fillWidth: true
-                Layout.preferredHeight: 26
+                // 34: the chips were 26 px with 12 px text, which read as a
+                // hairline row above the address bar rather than as tabs.
+                Layout.preferredHeight: 34
                 contentWidth: Math.max(width, tabsRow.implicitWidth)
-                contentHeight: 26
+                contentHeight: 34
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
                 flickableDirection: Flickable.HorizontalFlick
@@ -6131,61 +6141,36 @@ Item {
                             // this Row is a plain Row inside the lane, and a
                             // plain Row sizes its children from their
                             // implicit size.
-                            implicitHeight: 26
-                            // 35, not 26: the title's wall has to clear the
-                            // close glyph by a real gap (8 left + title + 8 of
-                            // air + the 13 px glyph + 6 right). At 26 the text
-                            // ended one pixel from the X's left edge and the
-                            // two read as one run of characters.
-                            implicitWidth: Math.min(150, tabText.implicitWidth + 39)
+                            implicitHeight: 34
+                            // Room for the title, the air before the glyph, the
+                            // glyph and the right margin: 14 left + title + 10
+                            // of air + the 16 px glyph + 10 right. The 210 cap
+                            // is wider than before so a normal folder name is
+                            // not elided down to a stub.
+                            implicitWidth: Math.min(210, tabText.implicitWidth + 50)
                             radius: Appearance.rounding.small
-                            // Tabs you can SEE (asked 2026-10-27, corrected the
-                            // same day, and re-based the next): alternating DARK
-                            // shades, mixed from the surface the chips have to
-                            // be darker THAN -- which is the window's own grey,
-                            // colTerminalSurfaceSolid (#141414 in dark), the
-                            // grey this app paints. Not colLayer0: that is the
-                            // shell's layer colour (#0A0A0A), and a mix toward
-                            // black from it lands at #03-#06 on a #141414
-                            // window -- five levels of difference between the
-                            // chips and between them and the surface, which is
-                            // how they came out invisible and, worse, how the
-                            // open folder came out indistinguishable from the
-                            // closed ones (active was #060606 against #050505).
+                            // Tabs you can SEE: the chips are mixed LIGHTER
+                            // than the window's own grey (colTerminalSurfaceSolid,
+                            // #141414 in dark). The earlier alternating blacks
+                            // (#0D0D0D and #070707 on #141414) sat within a few
+                            // levels of the surface and read as no chips at all.
                             //
-                            // ColorUtils.mix(c1, c2, p) is p of c1, so black is
-                            // the first argument and p is the share of black:
-                            // 0.35 for even tabs (#0D0D0D) and 0.62 for odd
-                            // (#070707).
+                            // ColorUtils.mix(c1, c2, p) is p of c1, so the light
+                            // tone is first and p is its share: 8% for even
+                            // tabs and 14% for odd. A hairline outline bounds
+                            // each chip so the edge survives on a bright
+                            // wallpaper too.
                             //
-                            // The open folder wears THE BAR'S OWN COLOUR
-                            // (asked 2026-10-28, in place of the dark chip that
-                            // reached down into the toolbar). That is the whole
-                            // of the integration: the chip, the hairline under
-                            // it (erased for that span) and the address bar
-                            // below are one continuous surface, exactly like a
-                            // browser's active tab, with no block descending
-                            // over the toolbar.
-                            //
-                            // It is the WINDOW's surface -- colTerminalSurfaceSolid,
-                            // what winBg paints -- and not a lighter step of the
-                            // chip shade: a mix toward white would read as a lit
-                            // chip floating on the row (which the earlier
-                            // attempt at a lighter active tab did), while the
-                            // window's own colour reads as a hole in the strip
-                            // that the toolbar shows through.
-                            // What still says "open" when the bar behind the
-                            // chips is a different colour: the bar on its LEFT
-                            // and the bottom squared flat onto the baseline.
-                            //
-                            // No applyAlpha here: the window behind these chips
-                            // is OPAQUE (winBg in filemanager.qml), so a 0.92
-                            // chip only ever blended with the surface it is
-                            // drawn on -- the same colour, at the cost of an
-                            // off-by-scale step.
+                            // The open folder keeps THE BAR'S OWN COLOUR and
+                            // joins the address bar through the baseline break:
+                            // the chip, the hairline (erased for its span) and
+                            // the bar below are one continuous surface, exactly
+                            // like a browser's active tab. The primary bar on
+                            // its left is the accent that marks it.
                             readonly property color tabSurface: Appearance.colors.colTerminalSurfaceSolid
                             readonly property color tabShade: CF.ColorUtils.mix(
-                                "#000000", tabSurface, index % 2 === 0 ? 0.35 : 0.62)
+                                Appearance.colors.colOnLayer0, tabSurface,
+                                index % 2 === 0 ? 0.08 : 0.14)
                             readonly property bool tabActive: index === root.activeTab
                             // Whatever the alternation gives this chip is what
                             // it keeps when it becomes the open one: a tab is
@@ -6199,10 +6184,14 @@ Item {
                             color: tabActive
                                 ? tabSurface
                                 : (tabHover.containsMouse
-                                    ? CF.ColorUtils.mix(Appearance.colors.colOnLayer0, tabShade, 0.14)
+                                    ? CF.ColorUtils.mix(Appearance.colors.colOnLayer0, tabShade, 0.12)
                                     : tabShade)
+                            border.width: 1
+                            border.color: tabActive
+                                ? CF.ColorUtils.transparentize(Appearance.colors.colOutlineVariant, 0.8)
+                                : CF.ColorUtils.mix(Appearance.colors.colOutlineVariant, tabShade, 0.55)
                             // A tab title is cut at the tab's own wall: the
-                            // 150 px cap is the tab's width, and the title stops
+                            // 210 px cap is the tab's width, and the title stops
                             // there (elided) instead of running on through the
                             // close glyph and the next tab -- MEASURED before
                             // this: a 124 px slot painting 381 px at 0.3
@@ -6226,29 +6215,31 @@ Item {
                                 anchors.left: parent.left
                                 // 12, not 8: the open tab's bar lives down the
                                 // left edge now, and the title needs air between
-                                // itself and it. The same 12 on EVERY chip, so a
+                                // itself and it. The same 14 on EVERY chip, so a
                                 // tab's width does not jump when it is the one
                                 // that is open.
-                                anchors.leftMargin: 12
+                                anchors.leftMargin: 14
                                 anchors.verticalCenter: parent.verticalCenter
-                                // parent.width - 39 = 12 of left margin, 6 of
-                                // right, the 13 px glyph, and 8 px of AIR
-                                // between the title and the glyph -- the gap
-                                // that was asked for. The old -26 left the text
-                                // ending one pixel from the X, so a long name
-                                // ran straight into the close button.
-                                width: parent.width - 39
+                                // parent.width - 50 = 14 of left margin, 10 of
+                                // right, the 16 px glyph, and 10 px of AIR
+                                // between the title and the glyph. The old -39
+                                // left the text ending one pixel from the X, so
+                                // a long name ran straight into the close button.
+                                width: parent.width - 50
                                 text: root.tabLabel(modelData)
-                                font.pixelSize: Appearance.font.pixelSize.smaller
+                                // 12 px read as fine print at arm's length; the
+                                // chips carry one of a small set of words, so
+                                // they step up to the small body size.
+                                font.pixelSize: Appearance.font.pixelSize.small
                                 color: Appearance.colors.colOnLayer0
                             }
                             MaterialSymbol {
                                 id: tabCloseGlyph
                                 anchors.right: parent.right
-                                anchors.rightMargin: 6
+                                anchors.rightMargin: 8
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: "close"
-                                iconSize: 13
+                                iconSize: 16
                                 // The glyph stays on the neutral tone for every
                                 // chip -- the open one is told apart by its bar
                                 // and its join to the bar below, not by
@@ -6311,7 +6302,7 @@ Item {
                                 anchors.right: parent.right
                                 anchors.top: parent.top
                                 anchors.bottom: parent.bottom
-                                width: 24
+                                width: 28
                                 hoverEnabled: true
                                 acceptedButtons: Qt.LeftButton
                                 cursorShape: Qt.PointingHandCursor
@@ -6330,17 +6321,16 @@ Item {
                     // lane's contentWidth (built from this Row's implicit
                     // width) already accounts for it.
                     //
-                    // 26x26, the chips' own height: in a plain Row the button
-                    // keeps its own size, and the component's 34x30 default
-                    // would make the Row 30 tall inside a 26 px lane -- the
-                    // bottom four pixels of the "+" would be cut off.
+                    // 34x34, the chips' own height: in a plain Row the button
+                    // keeps its own size, and a shorter default would leave the
+                    // "+" floating against taller chips or clipped by the lane.
                     IconButton {
                         id: newTabBtn
                         symbol: "add"
                         tip: Translation.tr("New tab")
                         visible: root.tabsAvailable
-                        width: 26
-                        height: 26
+                        width: 34
+                        height: 34
                         onActivated: root.newTab("")
                     }
                 }
@@ -7200,12 +7190,19 @@ Item {
                             id: quickRepeater
                             model: root.quickPlaces
                             delegate: NavRow {
+                                id: quickRow
                                 required property var modelData
                                 label: modelData.label
                                 symbol: modelData.icon
                                 path: modelData.path
                                 active: !root.atThisPc && root.folderPath === modelData.path
                                 onActivated: root.navigateTo(modelData.path)
+                                // The same menu a pinned folder gets: Copy, Cut,
+                                // Open in new tab, Copy path. A Quick access row
+                                // is a folder like any other, and having no
+                                // right-click at all made it the one folder in
+                                // the app you could not copy from the sidebar.
+                                onContextRequested: (x, y) => root.openMenuAt(quickRow, x, y, modelData.path)
                             }
                         }
 

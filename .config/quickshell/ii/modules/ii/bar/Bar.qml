@@ -20,6 +20,14 @@ Scope {
     // Same, for the input-region diagnostic (see `gapState` on the IPC
     // handler below and `gapProxy` inside the bar window).
     property var gapAsker: null
+    // Which monitors currently have the bar out over a fullscreen window with
+    // the pointer NOT on it -- the grace window. The click-anywhere-else
+    // catcher below is mapped only where this is true, because it is the one
+    // moment a click that the bar cannot otherwise hear has to end the reveal.
+    property var fsWatch: ({})
+    // Per-monitor door into that reveal, keyed by screen name: the catcher is
+    // declared outside the bar window's own scope and cannot name it.
+    property var fsDismissers: ({})
 
     // ── "Fills the screen" ──────────────────────────────────────────────
     // Reachable over the `barCover` IPC target below. NOTHING SETS IT
@@ -645,6 +653,64 @@ Scope {
                     && !barRoot.fsPrewasInBar
                     && barRoot.fsHoverSince > 0
                     && (Date.now() - barRoot.fsHoverSince) < barRoot.fsOpenHoldMs
+                // ── Leaving gets a grace period, not a cut ─────────────────
+                //
+                // The bar used to go the moment the pointer was off it (a
+                // 200ms tick, so effectively at once). Between a deliberate
+                // edge press that brings the bar out and a hand that leaves it
+                // -- to move down to the app for a second, to reach for the
+                // other hand, to mistime a swing -- that is too strict: the
+                // reveal is thrown away by any small movement off the strip,
+                // and reaching for the bar again has to start from the edge.
+                //
+                // So the pointer leaving starts a short clock instead. The bar
+                // stays for `fsLeaveGraceMs` and goes when it runs out; coming
+                // back inside the window cancels it (the clock is reset to -1
+                // whenever the pointer is on the bar). 1500ms is the number
+                // that was asked for: long enough to react to, short enough
+                // that nobody wonders why the bar is still there.
+                //
+                // `fsAwaySince` is a timestamp rather than a flag because a
+                // duration cannot be missed -- nothing has to fire for it to
+                // elapse, and a lost event cannot leave the bar up over a
+                // fullscreen app for good.
+                readonly property int fsLeaveGraceMs: 1500
+                property double fsAwaySince: -1
+                // Latched by the enforcer while the grace is running, and read
+                // by `hideBySlide`: this is what keeps the bar on screen after
+                // the pointer has gone. A boolean rather than a second clock in
+                // that binding, because `hideBySlide` is the bar's visibility
+                // and it must not depend on a `Date.now()` evaluation that only
+                // happens when something else changes.
+                property bool fsGraceActive: false
+                // The grace window itself: reveal up, over a fullscreen window,
+                // pointer not on it. This is also what maps the outside-click
+                // catcher (published to `bar.fsWatch`).
+                readonly property bool fsOutsideWatch: barRoot.hiddenByFullscreen
+                    && !barRoot.hideBySlide
+                    && !barRoot.pointerInBar
+                    && !barRoot.fsPinned
+                onFsOutsideWatchChanged: {
+                    const m = Object.assign({}, bar.fsWatch)
+                    if ((m[barLoader.modelData.name] ?? false) === barRoot.fsOutsideWatch)
+                        return
+                    m[barLoader.modelData.name] = barRoot.fsOutsideWatch
+                    bar.fsWatch = m
+                }
+                // End a fullscreen reveal at once. One body for every caller --
+                // the bar's own strip, the click-anywhere-else catcher and the
+                // IPC -- so "a click on the app puts the bar away" cannot be
+                // true on one path and false on another.
+                function dismissReveal() {
+                    barRoot.fsAwaySince = -1
+                    barRoot.fsGraceActive = false
+                    barRoot.clearFullscreenReveal()
+                    barRoot.fsPinned = false
+                    barRoot.gapHolding = false
+                    barRoot.gapSpent = false
+                    barRoot.postSwipe = false
+                    gapHold.stop()
+                }
                 // Note the pointer arriving on the bar. Called from the hover
                 // handler rather than derived from `containsMouse`, because that
                 // latch is exactly what used to strand the bar (see
@@ -667,6 +733,8 @@ Scope {
                 }
                 function clearFullscreenHover() {
                     barRoot.fsHoverSince = -1;
+                    barRoot.fsAwaySince = -1;
+                    barRoot.fsGraceActive = false;
                     // The press belongs to this one reveal: once the hold is
                     // dropped, the next arrival at the edge has to press
                     // again rather than inherit the old one.
@@ -735,6 +803,8 @@ Scope {
                     onTriggered: {
                         // The pointer is on the bar: restart its 2s.
                         if (barRoot.pointerInBar) {
+                            // Back on the bar: the leaving clock is void.
+                            barRoot.fsAwaySince = -1;
                             barRoot.noteFullscreenHover();
                             return;
                         }
@@ -761,10 +831,36 @@ Scope {
                             && barRoot.fsHoverSince > 0
                             && (Date.now() - barRoot.fsHoverSince) < barRoot.fsOpenHoldMs)
                             return;
-                        // Pointer elsewhere: the bar's time is up, and the
-                        // "it was already here when fullscreen began" veto is
-                        // spent -- the pointer has now genuinely left, so a
-                        // later reach onto the bar counts as intent again.
+                        // Pointer elsewhere: the bar gets its grace period
+                        // first. Stamped on the first tick that sees the pointer
+                        // away, so the clock starts at the leave rather than at
+                        // the press.
+                        //
+                        // ONLY WHILE THE BAR IS ACTUALLY OUT. A grace period is
+                        // an extension of a reveal; there is nothing to extend
+                        // once the bar has gone back down, and granting one
+                        // anyway re-opened the bar one tick after it closed --
+                        // an endless grace that kept the bar over the
+                        // fullscreen app for good. `hideBySlide` is the
+                        // visibility, so it is the honest test.
+                        if (barRoot.hideBySlide) {
+                            barRoot.fsAwaySince = -1
+                            barRoot.fsGraceActive = false
+                            return
+                        }
+                        if (barRoot.fsAwaySince <= 0)
+                            barRoot.fsAwaySince = Date.now();
+                        if (Date.now() - barRoot.fsAwaySince < barRoot.fsLeaveGraceMs) {
+                            // Out of the pointer's way, but still on screen.
+                            barRoot.fsGraceActive = true
+                            return
+                        }
+                        barRoot.fsGraceActive = false
+                        // Pointer elsewhere and the grace is spent: the bar's
+                        // time is up, and the "it was already here when
+                        // fullscreen began" veto is spent -- the pointer has now
+                        // genuinely left, so a later reach onto the bar counts
+                        // as intent again.
                         barRoot.fsPrewasInBar = false;
                         barRoot.clearFullscreenHover();
                         barRoot.clearEdgePress();
@@ -1428,7 +1524,8 @@ Scope {
                 // (`fsShow`, `fsPinned`, `superShow`) was meant to be temporary
                 // but was cleared by an EVENT, so a missed event left the bar
                 // over the fullscreen app for good. A duration cannot be missed.
-                readonly property bool hideBySlide: (barRoot.hiddenByFullscreen && !barRoot.fsBarAllowedOpen)
+                readonly property bool hideBySlide: (barRoot.hiddenByFullscreen
+                        && !barRoot.fsBarAllowedOpen && !barRoot.fsGraceActive)
                     || (Config?.options.bar.autoHide.enable && !mustShow)
                 // ── The slide itself ────────────────────────────────────────
                 // How far the bar has travelled out of view, in logical px.
@@ -1667,27 +1764,35 @@ Scope {
                                 // Not while PINNED: the pin is a deliberate
                                 // "keep this down", and no cursor position
                                 // overrides it.
+                                // AND IT NO LONGER CLOSES ON THE SPOT.
+                                //
+                                // It used to spend the hold right here -- which
+                                // is exactly the "it closes instantly when the
+                                // hover is gone" this is about. A cursor that
+                                // went below the bar for a moment (to look at
+                                // the app, to move to the other hand, to come
+                                // back for a different icon) took the whole
+                                // reveal with it, with no way back except the
+                                // edge.
+                                //
+                                // So this now STARTS the grace period instead:
+                                // the bar stays out for fsLeaveGraceMs from the
+                                // moment the cursor was first seen below it, and
+                                // the enforcer (fsIdleWatch) takes it down when
+                                // that runs out. A press outside ends it at once
+                                // -- that is the click catcher's job.
+                                //
+                                // Guarded on the bar actually being out: once it
+                                // is down, `hideBySlide` is true and nothing here
+                                // may start a new grace for a bar that is not
+                                // there (that is what made an earlier version
+                                // keep it down forever).
                                 if (!barRoot.fsPinned
-                                    && barRoot.probeY > Appearance.sizes.barHeight + 2) {
-                                    barRoot.fsShow = false;
-                                    fsHideTimer.stop();
-                                    // ...and the HOLD goes too, which is the part
-                                    // that was missing (2026-11-15: "when I
-                                    // click on the fullscreen app again I want
-                                    // it to drop back out, not wait 2s").
-                                    //
-                                    // The reveal is not kept down by `fsShow`
-                                    // any more -- nothing ever sets it true, so
-                                    // it is always false and clearing it there
-                                    // changed nothing. What keeps the bar down
-                                    // is `fsBarAllowedOpen`, whose clock is
-                                    // `fsHoverSince` and the 2s `fsOpenHoldMs`.
-                                    // Spending the press here is the difference
-                                    // between "the bar goes at once when the
-                                    // cursor is below it" and "the bar sits over
-                                    // the game until the hold runs out".
-                                    barRoot.clearFullscreenHover();
-                                    barRoot.clearEdgePress();
+                                    && barRoot.probeY > Appearance.sizes.barHeight + 2
+                                    && !barRoot.hideBySlide
+                                    && barRoot.fsAwaySince <= 0) {
+                                    barRoot.fsAwaySince = Date.now();
+                                    barRoot.fsGraceActive = true;
                                 }
                                 return;
                             }
@@ -1796,11 +1901,21 @@ Scope {
                     running: barRoot.hiddenByFullscreen && barRoot.fsShow
                         && !barRoot.pointerInBar && !barRoot.fsPinned
                     onTriggered: {
+                        if (barRoot.pointerInBar || barRoot.fsPinned)
+                            return;
+                        if (!barRoot.hiddenByFullscreen || !barRoot.fsShow)
+                            return;
+                        // The grace period, the same one fsIdleWatch keeps:
+                        // this timer is the fast path, and it must not be the
+                        // one that cuts the reveal short.
+                        if (barRoot.fsAwaySince <= 0)
+                            barRoot.fsAwaySince = Date.now();
+                        if (Date.now() - barRoot.fsAwaySince < barRoot.fsLeaveGraceMs)
+                            return;
                         // `gapHolding` still holds the reveal off, but only
                         // for as long as the window is actually open: this
                         // timer is what comes back for it afterwards.
-                        if (!barRoot.pointerInBar && !barRoot.fsPinned
-                            && !barRoot.gapHolding)
+                        if (!barRoot.gapHolding)
                             barRoot.fsShow = false;
                     }
                 }
@@ -1952,12 +2067,7 @@ Scope {
                     onClicked: mouse => {
                         if (!barRoot.hiddenByFullscreen)
                             return;
-                        barRoot.clearFullscreenReveal();
-                        barRoot.fsPinned = false;
-                        barRoot.gapHolding = false;
-                        barRoot.gapSpent = false;
-                        barRoot.postSwipe = false;
-                        gapHold.stop();
+                        barRoot.dismissReveal();
                         // NOT accepted: the click belongs to the app underneath.
                         // The bar simply stops being in the way.
                     }
@@ -1966,6 +2076,17 @@ Scope {
                     target: hoverRegion
                     function onContainsMouseChanged() {
                         if (hoverRegion.containsMouse) {
+                            // Reaching BACK for a bar that is still in its
+                            // grace period buys a fresh hold: the pointer is on
+                            // the bar because the user came back for it, and
+                            // closing it under them for time that was spent
+                            // while they were away is not what the grace is
+                            // for.
+                            if (barRoot.fsGraceActive && barRoot.hiddenByFullscreen
+                                && barRoot.fsPressReveal)
+                                barRoot.fsHoverSince = Date.now();
+                            barRoot.fsAwaySince = -1;
+                            barRoot.fsGraceActive = false;
                             // Start (or restart) the bar's 2s: the pointer
                             // is on it, so it is allowed to stay open that long.
                             barRoot.noteFullscreenHover();
@@ -1993,8 +2114,19 @@ Scope {
                             // half of the rule.
                             postSwipeTimer.stop();
                             barRoot.postSwipe = false;
-                            if (barRoot.fsShow)
+                            // The pointer has left a bar that is out over a
+                            // fullscreen window: this is the moment the grace
+                            // period starts, not a reason to close. Stamped
+                            // here, at the leave, so the 1500ms is measured from
+                            // the leave and not from whatever the enforcer was
+                            // waiting on.
+                            if (barRoot.hiddenByFullscreen && !barRoot.hideBySlide) {
+                                barRoot.fsAwaySince = Date.now();
+                                barRoot.fsGraceActive = true;
                                 fsHideTimer.restart();
+                            } else if (barRoot.fsShow) {
+                                fsHideTimer.restart();
+                            }
                             // Losing the hover is ambiguous: the pointer may
                             // have dropped below the bar, or it may have moved
                             // sideways into a gap that was cut out from under
@@ -2643,8 +2775,34 @@ Scope {
                         function dismiss(): void {
                             barRoot.dismissForPress();
                         }
+                        // A click outside the bar during the grace window: the
+                        // outside-click catcher (declared on the outer Scope,
+                        // where barRoot is not in scope) reaches the window
+                        // through here.
+                        function dismissReveal(): void {
+                            barRoot.dismissReveal();
+                        }
+                        // Diagnostic for the grace period and the catcher:
+                        //   qs -c ii ipc call bar fsState
+                        function fsState(): string {
+                            return `out=${!barRoot.hideBySlide} allowed=${barRoot.fsBarAllowedOpen}`
+                                + ` show=${barRoot.fsShow} hoverRev=${barRoot.hoverReveals}`
+                                + ` watch=${barRoot.fsOutsideWatch}`
+                                + ` away=${barRoot.fsAwaySince > 0 ? Math.round(Date.now() - barRoot.fsAwaySince) : -1}ms`
+                                + ` graceOn=${barRoot.fsGraceActive}`
+                                + ` grace=${barRoot.fsLeaveGraceMs}ms`
+                                + ` pointerInBar=${barRoot.pointerInBar}`
+                                + ` fullscreen=${barRoot.hiddenByFullscreen}`;
+                        }
                         Component.onCompleted: {
                             bar.gapAsker = gapProxy;
+                            // Published per monitor, because the catcher is one
+                            // window per screen and each has to reach its own
+                            // bar. A single shared proxy would dismiss only
+                            // whichever monitor finished loading last.
+                            const doors = Object.assign({}, bar.fsDismissers)
+                            doors[barLoader.modelData.name] = () => barRoot.dismissReveal()
+                            bar.fsDismissers = doors
                         }
                     }
 
@@ -2885,6 +3043,98 @@ Scope {
         }
     }
 
+    // ── A CLICK ANYWHERE ELSE ENDS THE REVEAL AT ONCE ──────────────────────
+    //
+    // The grace period (§ fsLeaveGraceMs) is for a hand that has merely left the
+    // bar. It is deliberately NOT for a user who has gone back to the app: a
+    // click on the fullscreen window is an unmistakable "I am done with the
+    // bar", and making them watch it sit there for another second and a half is
+    // the annoyance this feature would otherwise invent.
+    //
+    // The bar's own window cannot hear that click. It is only as tall as the bar
+    // and its input region is the strip, so a press anywhere below it goes
+    // straight to the application and the bar never sees it -- which is exactly
+    // what `gapPassthrough` is for. So while, and only while, the bar is out over
+    // a fullscreen window with the pointer away from it (fsOutsideWatch), a
+    // full-screen click catcher is mapped: one surface per monitor, transparent,
+    // no keyboard focus, taking the click that lands outside the bar.
+    //
+    // Its input region SUBTRACTS the bar's own band, so the bar keeps every
+    // press on itself -- its widgets, its own dismiss area, its hover -- and the
+    // catcher only ever gets what the bar was never going to receive.
+    //
+    // The click is consumed rather than passed on. That is the trade a menu
+    // dismissal always makes (the clipboard popup does the same with its
+    // outside catcher): one press closes the bar, and it is not also a press on
+    // whatever was under it -- a game firing a weapon or a video pausing on the
+    // click that was meant to put a bar away is worse than a lost click.
+    function dismissBarReveal(screenName) {
+        console.log(`[bar] press outside the reveal (${screenName}) -- putting the bar away`)
+        const door = bar.fsDismissers?.[screenName]
+        if (typeof door === "function") {
+            door()
+            return
+        }
+        // No per-monitor door (a bar window that has not finished loading): fall
+        // back to the shared proxy rather than doing nothing.
+        if (bar.gapAsker && typeof bar.gapAsker.dismissReveal === "function")
+            bar.gapAsker.dismissReveal()
+    }
+
+    Variants {
+        model: Quickshell.screens
+
+        PanelWindow {
+            id: fsDismissCatcher
+            required property var modelData
+            screen: modelData
+            // Only while the reveal is out, over a fullscreen window, with the
+            // pointer off the bar. Every other moment this surface does not
+            // exist as far as the compositor is concerned.
+            visible: bar.fsWatch?.[modelData.name] === true
+            color: "transparent"
+            anchors {
+                top: true
+                bottom: true
+                left: true
+                right: true
+            }
+            WlrLayershell.layer: WlrLayer.Overlay
+            WlrLayershell.namespace: "quickshell:barDismiss"
+            WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+            exclusionMode: ExclusionMode.Ignore
+
+            mask: Region {
+                x: 0
+                y: 0
+                width: fsDismissCatcher.width
+                height: fsDismissCatcher.height
+                Region {
+                    // The bar's own band stays with the bar. Height includes the
+                    // few pixels of rounding the volume strip is drawn over, so
+                    // no sliver of the bar is left to the catcher.
+                    x: 0
+                    y: Config.options.bar.bottom
+                        ? fsDismissCatcher.height - (Appearance.sizes.barHeight + 4)
+                        : 0
+                    width: fsDismissCatcher.width
+                    height: Appearance.sizes.barHeight + 4
+                    intersection: Intersection.Subtract
+                }
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                // Nothing hovers this on purpose: hover belongs to the bar and
+                // to the app, and a surface that tracked the pointer over the
+                // whole screen would fight both.
+                hoverEnabled: false
+                acceptedButtons: Qt.LeftButton
+                onPressed: bar.dismissBarReveal(fsDismissCatcher.modelData.name)
+            }
+        }
+    }
+
     IpcHandler {
         target: "bar"
 
@@ -2962,6 +3212,21 @@ Scope {
                 return "no bar window (barOpen off?)";
             try {
                 return proxy.statusFit();
+            } catch (e) {
+                return "threw: " + e;
+            }
+        }
+
+        // Diagnostic: the grace period and the click-anywhere-else catcher, per
+        // monitor. `watch=true` means the catcher is mapped right now; `away`
+        // is how long the pointer has been off the bar.
+        //   qs -c ii ipc call bar fsState
+        function fsState(): string {
+            const proxy = bar.gapAsker;
+            if (!proxy)
+                return "no bar window (barOpen off?)";
+            try {
+                return proxy.fsState();
             } catch (e) {
                 return "threw: " + e;
             }

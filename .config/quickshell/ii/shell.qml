@@ -54,11 +54,13 @@ ShellRoot {
     // the only chance to rescue one that never reached a text box.
     TranscriptCard {}
 
-    // The fullscreen dictation drop-down stays gone (2026-11-17): the recording
-    // is shown in the bar's own island again -- see NowBar's dictation tab,
-    // which now draws a card in the transcript card's colours rather than bare
-    // bars -- and WhisperFlow's HUD is no longer driven by this shell. Over a
-    // fullscreen window the bar is away, so nothing is shown there for now.
+    // The dictation drop-down, for a screen the bar is not on: a fullscreen app
+    // hides the bar, and with it the bar's own dictation pill -- so a dictation
+    // there had no tell at all while the microphone was live and whisper was
+    // working on the words. This is the same tell, on the Overlay layer so a
+    // fullscreen client cannot paint over it. Back since 2026-11-18; the version
+    // before 2026-11-17 only ever animated a microphone glyph.
+    DictationIndicator {}
 
     // Stuff for every panel family
 

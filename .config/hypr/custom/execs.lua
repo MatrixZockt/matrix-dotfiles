@@ -214,3 +214,18 @@ hl.exec_cmd("$HOME/.config/hypr/custom/scripts/panel-care.py on")
 -- no-op instead of two failed starts in the journal on every login.
 hl.exec_cmd("[ -f \"$HOME/.config/systemd/user/dictate-server.service\" ] "
     .. "&& systemctl --user start dictate-server.service dictate-daemon.service")
+
+-- ── Files: keep one copy WARM so SUPER + E is instant ────────────────────
+-- The file manager is a real QML app and paid ~1.8 s of QML parsing on every
+-- press (measured: 1929 ms / 1791 ms to a window). `filemanager.sh spare`
+-- starts a fully constructed copy whose window was never mapped; SUPER + E
+-- claims it over IPC, so a press is a map instead of a load, and the launcher
+-- preloads the next one as it answers. See that script's header.
+--
+-- `sleep 6`: the spare needs a Wayland socket, and this file is parsed while
+-- Hyprland is still coming up -- the same race shell.sh waits out. Late is
+-- fine and early is not: if it does start too soon and dies, the next SUPER + E
+-- cold-starts once and preloads a fresh copy on its way out.
+-- Idempotent (`spare` exits when one already exists), so a config reload does
+-- not stack a second 130 MB process.
+hl.exec_cmd([[bash -c 'sleep 6; exec "$HOME/.config/quickshell/ii/scripts/launch/filemanager.sh" spare' &]])

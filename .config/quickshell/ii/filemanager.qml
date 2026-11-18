@@ -104,7 +104,17 @@ Window {
     // default screen -- so with no binding there is no warning and no behaviour
     // change. Same note, same reason as settings.qml.
     color: "transparent"
-    visible: true
+    // ── Warm start: this copy may be a PRELOAD ──────────────────────────
+    // A preloaded instance (scripts/launch/filemanager.sh `spare`) is a fully
+    // constructed app whose window has never been mapped: the QML, the theme,
+    // the services and the first folder read have all happened, and SUPER + E
+    // only has to map it. That is the difference between ~1.8 s of QML parsing
+    // in front of the user and a window that is simply there, and it is why
+    // this is `visible: false` for the spare and `true` for every other
+    // launch. Measured on this machine: 1790-1930 ms cold, and the warm map is
+    // what the launcher's own timing is taken from (see its header).
+    readonly property bool preloaded: Quickshell.env("II_FILES_PRELOAD") === "1"
+    visible: !root.preloaded
     title: Translation.tr("Files")
 
     // The size it ASKS for. Under the tiler that is a request the compositor
@@ -233,6 +243,24 @@ Window {
     IpcHandler {
         target: "files"
         function ping(): string { return "files"; }
+        // ── The one verb a PRELOADED copy answers ─────────────────────────
+        // Map this window, at `path` when one is given ("-" = none: the
+        // folder the preload already stands in). The path travels over IPC
+        // rather than the environment because this process was started long
+        // before the request that wants it, so II_FILES_START was never set.
+        //
+        // "already" is the answer that keeps two quick SUPER + E presses honest:
+        // the second one found a spare that a competing launch had just
+        // claimed, and a launcher that cannot tell that from a fresh one would
+        // either hand back the first press's window or drop the second press
+        // entirely. It starts its own window instead.
+        function preloadOpen(path: string): string {
+            if (root.visible) return "already";
+            const start = String(path ?? "").trim();
+            root.visible = true;
+            if (start.length > 0 && start !== "-") content.openPath(start);
+            return "ok";
+        }
         // A path, which may be a FOLDER (open it) or a FILE (the desktop's "show
         // this in the file manager": go to the folder it lives in and select it,
         // rather than trying to list a file as though it were a folder). Every

@@ -212,6 +212,27 @@ Item {
     property string mountFailurePath: ""
     property string mountFailure: ""
     property string statusNote: ""
+    // A transfer that FAILED, and the sentence that explains it. Separate from
+    // statusNote because the two are drawn differently: a note is grey and
+    // belongs to the folder, an error is red and belongs to the operation that
+    // just refused to happen. Kept until the next navigation, transfer, or for
+    // half a minute, so a failure that scrolls past is still readable.
+    property string statusError: ""
+    function setStatusError(text) {
+        root.statusError = String(text ?? "");
+        if (root.statusError.length > 0) {
+            root.statusNote = "";
+            statusErrorClear.restart();
+        } else {
+            statusErrorClear.stop();
+        }
+    }
+    Timer {
+        id: statusErrorClear
+        interval: 30000
+        repeat: false
+        onTriggered: root.statusError = ""
+    }
     // ── The transfer in flight ──────────────────────────────────────────
     //
     // A copy is the one thing this window does that takes minutes rather than
@@ -1848,6 +1869,10 @@ Item {
         root.selIndex = -1;
         root.anchorIndex = -1;
         root.statusNote = "";
+        // A failure belongs to the folder it happened in. Walking somewhere
+        // else is the next thing the person did, and a red line about the old
+        // folder over the new one's listing would be about the wrong place.
+        root.setStatusError("");
         root.filter = "";
         // ── Walking OUT leaves the folder selected behind you ────────────
         // "Which one did I just come out of" is the question being asked the
@@ -1911,11 +1936,13 @@ Item {
                   if (root.remoteListing) {
               root.beginListing(root.path);
               root.statusNote = "";
+              root.setStatusError("");
               return;
           }
           const cur = String(folderModel.folder ?? "");
           folderModel.folder = cur.endsWith("//") ? cur.slice(0, -1) : cur + "/";
           root.statusNote = "";
+          root.setStatusError("");
     }
 
     // ── Open with ───────────────────────────────────────────────────────
@@ -4336,6 +4363,8 @@ Item {
         root.transferLabel = "";
         root.transferError = "";
         root.transferSkipped = 0;
+        root.statusError = "";
+        statusErrorClear.stop();
         root.transferMove = !!move;
         root.transferDestName = root.baseName(String(destDir ?? "")) || String(destDir ?? "");
         // The line the bar carries WHILE it runs, written here rather than when
@@ -4365,6 +4394,43 @@ Item {
         transferProc.running = false;
         transferProc.running = true;
         return list.length;
+    }
+    // The transfer's own words for a failure are often the kernel's (cp's
+    // "Permission denied", rsync's "Text file busy"). They are the evidence,
+    // not the explanation, so a known cause gets one short sentence beside it
+    // -- the difference between a wall of shell and "the file is open in
+    // another program".
+    function explainTransferError(raw) {
+        const s = String(raw ?? "").trim();
+        // A known cause is answered with the SENTENCE, not with the kernel's
+        // line and then a translation of it: rsync's "[receiver] mkstemp
+        // \"/home/…/.src.txt.kWCmTT\" failed: Permission denied (13)" names a
+        // temporary file and a number, and a status bar elides the useful half
+        // if it comes second. Colons and dashes keep the cause recognisable.
+        const hints = [
+            [/text file busy|device or resource busy|resource busy/i,
+                Translation.tr("The file is in use — a program has it open.")],
+            [/permission denied|operation not permitted/i,
+                Translation.tr("Permission denied — the destination is not writable.")],
+            [/no space left on device/i,
+                Translation.tr("There is no space left on the destination drive.")],
+            [/read-only file system/i,
+                Translation.tr("The destination is mounted read-only.")],
+            [/no such file or directory/i,
+                Translation.tr("The source or destination no longer exists.")],
+            [/file name too long/i,
+                Translation.tr("The name is too long for the destination.")],
+            [/not a directory/i,
+                Translation.tr("A file is in the way of the destination.")],
+            [/input\/output error/i,
+                Translation.tr("The drive reported an I/O error.")]
+        ];
+        for (const h of hints)
+            if (h[0].test(s)) return h[1];
+        if (s.length > 0) return s;
+        return root.transferMove
+            ? Translation.tr("The move did not complete.")
+            : Translation.tr("The copy did not complete.");
     }
     function readTransferLine(line) {
         const s = String(line ?? "");
@@ -4408,8 +4474,7 @@ Item {
         // sentence that explains it is the only useful thing left in the
         // failure case.
         const why = failed
-            ? (root.transferError.length > 0 ? root.transferError
-                                             : Translation.tr("The transfer did not complete."))
+            ? root.explainTransferError(root.transferError.length > 0 ? root.transferError : "")
             : (skipped > 0 ? Translation.tr("%1 left alone").arg(skipped) : "");
         root.transferLabel = "";
         root.transferError = "";
@@ -4424,11 +4489,16 @@ Item {
             transferSettle.epoch = root.transferEpoch;
             transferSettle.restart();
         }
-        // refresh() CLEARS the status note (it is written for the folder you
-        // are looking at, and the folder just changed), so it has to happen
-        // BEFORE the reason is written -- the other order lost every failure
-        // message in the same call that raised it.
+        // refresh() CLEARS the status note AND the error (they are written for
+        // the folder you are looking at, and the folder just changed), so it
+        // has to happen BEFORE the reason is written -- the other order lost
+        // every failure message in the same call that raised it. The error is
+        // set again right after, which is what makes it outlive the re-listing.
         root.refresh();
+        // The bottom bar says what went wrong and why, in red, and stays there
+        // after refresh() -- which is why it is a property of its own rather
+        // than a statusNote the re-listing erases.
+        root.setStatusError(failed ? why : "");
         // ── The end of a transfer has to be VISIBLE ─────────────────────────
         //
         // A paste that lands in a tenth of a second -- the same filesystem, a
@@ -4446,7 +4516,7 @@ Item {
         const done = where.length > 0
             ? Translation.tr("%1 %2 item(s) to %3").arg(verb).arg(n).arg(where)
             : Translation.tr("%1 %2 item(s)").arg(verb).arg(n);
-        root.statusNote = failed ? why : (skipped > 0 ? done + " · " + why : done);
+        root.statusNote = failed ? "" : (skipped > 0 ? done + " · " + why : done);
         if (failed) root.notify(Translation.tr("Operation failed"), why, true);
         else root.ipcSignalToast(verb, moved ? "drive_file_move" : "content_copy");
     }
@@ -9188,10 +9258,22 @@ Item {
                             duration: 900
                         }
                     }
+                    // A failed copy/move owns the bar while it is up: the
+                    // reason is the one thing the person needs to read, and
+                    // the item count under it is already visible in the list.
+                    MaterialSymbol {
+                        id: statusErrorIcon
+                        visible: root.statusError.length > 0
+                        text: "error"
+                        iconSize: 14
+                        color: Appearance.colors.colError
+                    }
                     CutLabel {
                         id: statusLabel
                         Layout.fillWidth: true
                         text: {
+                            if (root.statusError.length > 0)
+                                return root.statusError;
                             if (root.listingSlow)
                                 return root.listingLine;
                             const n = root.rows.length;
@@ -9202,7 +9284,9 @@ Item {
                             return s;
                         }
                         font.pixelSize: Appearance.font.pixelSize.smallest
-                        color: Appearance.colors.colSubtext
+                        color: root.statusError.length > 0
+                            ? Appearance.colors.colError
+                            : Appearance.colors.colSubtext
                     }
                 }
                 // ── What is running ────────────────────────────────────
@@ -11643,6 +11727,16 @@ Item {
             hotplug: (hotplugWatch.running ? "on" : "off") + "/" + root.hotplugEvents
                 + "/" + root.hotplugRefreshes,
             statusNote: root.statusNote,
+            statusError: root.statusError,
+            // The bottom bar as it is DRAWN: the sentence, its colour and the
+            // error glyph, so "it said something" is a check on the line that
+            // is on screen rather than on a property that may not be bound.
+            statusBar: {
+                visible: statusBar.visible,
+                text: statusLabel.text,
+                color: String(statusLabel.color),
+                errorIcon: statusErrorIcon.visible
+            },
             // The read, as the status bar draws it: the model's own status, the
             // delayed flag that decides whether the wait is announced, and the
             // LINE that is on screen right now -- the last one being the only

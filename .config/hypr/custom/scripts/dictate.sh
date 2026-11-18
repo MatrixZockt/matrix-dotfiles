@@ -770,6 +770,45 @@ transcribe() { # transcribe <wav> -> prints the text
         say "input is silent (${level} dB), nothing to transcribe"
         return 0
     fi
+    # ── Cut the silence off both ends before anybody hears it ─────────────
+    #
+    # THIS IS THE "thank you" FIX, and it is about the audio, not the words.
+    # whisper was trained on broadcast recordings, so it expects the recording
+    # to end the way a broadcast does: with the speaker signing off. Handed a
+    # take that ends in a second of room tone it invents the sign-off --
+    # "Thank you.", "Thank you. I'll see you next time.", "Vielen Dank." --
+    # and it does it with no_speech_prob near 0 and a perfectly healthy
+    # avg_logprob, so no amount of confidence checking can tell it from speech.
+    # The trigger is the trailing silence, and the answer is to not send it.
+    #
+    # It matters per REQUEST, not only per dictation: a chunk is cut after
+    # QUIET_BLOCKS of quiet (dictate-daemon.py), so every chunk ends in
+    # silence too, and a long dictation used to collect one invented sign-off
+    # per chunk, in the middle of the sentence.
+    #
+    # -50 dB is the same line the level gate above draws; 0.1s is kept at each
+    # end so the first and last syllable are not clipped into a click, and the
+    # areverse pair is how silenceremove is made to work from the END (it only
+    # trims from the front). A take that is silence all the way through comes
+    # back empty, and empty is the honest answer: nothing to transcribe.
+    local wav_trim=""
+    if [ -s "$wav" ]; then
+        wav_trim="$(mktemp "$STATE/trim-XXXXXX.wav")"
+        if [ -n "$wav_trim" ] && ffmpeg -hide_banner -loglevel error -nostdin -y -i "$wav" \
+                -af "silenceremove=start_periods=1:start_duration=0:start_threshold=-50dB:start_silence=0.1,areverse,silenceremove=start_periods=1:start_duration=0:start_threshold=-50dB:start_silence=0.1,areverse" \
+                "$wav_trim" >>"$LOG" 2>&1 && [ "$(stat -c %s "$wav_trim" 2>/dev/null || echo 0)" -gt 2000 ]; then
+            # Bytes, not seconds: no ffprobe on the release path. 32 kB is a
+            # second of 16 kHz mono, so a whole-second difference is readable
+            # in the log without costing anything.
+            say "trimmed $(($(stat -c %s "$wav") - $(stat -c %s "$wav_trim"))) bytes of silence off the ends"
+            wav="$wav_trim"
+        else
+            rm -f "$wav_trim"
+            wav_trim=""
+            say "the take is silence end to end, nothing to transcribe"
+            return 0
+        fi
+    fi
     # Warm server first: it already holds the model, so the words come back in
     # ~0.2s instead of the second or two a fresh whisper-cli spends loading the
     # weights -- see dictate-server.sh. It is loopback only. If it is not up
@@ -895,6 +934,88 @@ def collapse_loops(text):
     return text
 
 
+# ── The sign-off at the END of the sentence ──────────────────────────────
+#
+# The list above only helps while the whole reply is one of those phrases. The
+# reported case is the other shape: real words, then the invented sign-off
+# glued onto the end of them -- "move the button down a bit. Thank you. Thank
+# you. I'll see you next time." The reply as a whole is not in the list, so
+# nothing above touches it, and the tail arrives in whatever the user is
+# typing. Dictate.sh now trims the trailing silence that causes it; these are
+# the backstop for the takes where the model signs off anyway.
+#
+# A sentence can only be cut if every word in it belongs to a sign-off -- the
+# whole trailing run, one sentence at a time, so "Thank you. Thank you. I'll
+# see you next time." goes completely and "Thanks, that's the last one." is
+# left alone.
+SIGN_WORDS = {
+    "thank", "thanks", "thankyou", "you", "very", "much", "so", "a", "lot",
+    "many", "for", "watching", "listening", "being", "here", "please",
+    "subscribe", "like", "and", "to", "my", "channel", "subtitles", "subtitle",
+    "transcribed", "by", "amara", "org", "community", "the",
+    "danke", "dank", "vielen", "vielmals", "schön", "sehr", "fürs", "zuschauen",
+    "zuschauer", "bis", "zum", "nächsten", "naechsten", "mal", "bald",
+    "tschüss", "tschuess", "auf", "wiedersehen", "wiederhören", "das", "war's",
+    "wars", "merci", "ciao", "bye", "goodbye", "see", "later", "next", "time",
+}
+# At least one of these has to be in it: "for the next time" is a sentence
+# about scheduling, "thanks for the next time" is not a sentence anybody says.
+SIGN_CORE = {
+    "thank", "thanks", "thankyou", "danke", "vielen", "tschüss", "tschuess",
+    "merci", "ciao", "bye", "goodbye",
+}
+# Phrases that are only ever spoken to a recording, never into a text box.
+SIGN_ALWAYS = (
+    "for watching", "for listening", "subscribe", "subtitles by",
+    "transcribed by", "amara", "see you next time", "see you later",
+    "for being here", "bis zum nächsten", "bis zum naechsten", "bis bald",
+    "auf wiedersehen", "fürs zuschauen", "das war's", "tschüss", "bye bye",
+)
+
+
+def sign_off(sentence):
+    """True when the sentence is nothing but a sign-off.
+
+    Two ways in: a broadcast phrase anywhere in it ("I'll see you next time"
+    is a sign-off even though "I'll" is not a sign-off word), or every single
+    word from the sign-off vocabulary with one of the core words among them
+    ("Thanks for watching the video", "Vielen Dank", "thank you thank you").
+    "Thanks, that's the last one" has words that are not in it and stays.
+    """
+    key = normalise(sentence)
+    if any(phrase in key for phrase in SIGN_ALWAYS):
+        return True
+    words = key.split()
+    if not words:
+        return False
+    return all(w in SIGN_WORDS for w in words) and any(w in SIGN_CORE for w in words)
+
+
+def strip_sign_off(text):
+    """Take the invented sign-off off the end, leaving the real words.
+
+    The whole trailing run goes, sentence by sentence, however many there are,
+    because that is the shape of the bug: whisper does not add one sign-off, it
+    runs on -- "Thank you. Thank you. I'll see you next time."
+
+    The trade is deliberate: a dictation that genuinely ends in a bare "Thank
+    you." loses it (the words before it are untouched, and anything with one
+    more word in the sentence -- "Thank you, John" -- is kept). Whisper writes
+    those words far more often than a person dictates them, and a sign-off
+    nobody said is silently wrong text in the middle of a message.
+    """
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    if not sentences:
+        return text
+    cut = 0
+    while sentences and sign_off(sentences[-1]):
+        sentences.pop()
+        cut += 1
+    if not cut:
+        return text
+    return " ".join(s.strip() for s in sentences).strip()
+
+
 def judge(text, segments):
     text = (text or "").strip()
     if not text:
@@ -914,6 +1035,9 @@ def judge(text, segments):
     # not words someone said.
     if collapsed != text and normalise(collapsed) in HALLUCINATIONS:
         return ""
+    collapsed = strip_sign_off(collapsed)
+    if not re.search(r"[0-9A-Za-zÀ-ÿ]", collapsed):
+        return ""                      # only a sign-off was there: nothing said
     return collapsed
 
 
@@ -941,17 +1065,19 @@ PY
             # The words are corrected once, on the joined sentence (finish_raw):
             # a chunk on its own must not be rewritten before it is joined.
             clean_transcript < "$out"
-            rm -f "$out" "$reply"
+            rm -f "$out" "$reply" "$wav_trim"
             return 0
         fi
     fi
     rm -f "$out" "$reply"
     if [ ! -x "$DATA/whisper.cpp/build/bin/whisper-cli" ]; then
         say "no whisper-cli at $DATA/whisper.cpp/build/bin -- run the installer"
+        rm -f "$wav_trim"
         return 1
     fi
     if [ ! -f "$model" ]; then
         say "no model at $model"
+        rm -f "$wav_trim"
         return 1
     fi
     # No language for the bar on this path. whisper-cli only prints what it
@@ -968,6 +1094,7 @@ PY
             "$DATA/whisper.cpp/build/bin/whisper-cli" \
         -m "$model" -f "$wav" -nt -np -t "$THREADS" -mc 0 "${lang_args[@]}" 2>>"$LOG" \
         | clean_transcript
+    rm -f "$wav_trim"
 }
 
 # Everything after the microphone: wrap, measure, transcribe, type. Shared by

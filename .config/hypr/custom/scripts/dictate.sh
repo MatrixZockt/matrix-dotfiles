@@ -799,8 +799,11 @@ transcribe() { # transcribe <wav> -> prints the text
                 "$wav_trim" >>"$LOG" 2>&1 && [ "$(stat -c %s "$wav_trim" 2>/dev/null || echo 0)" -gt 2000 ]; then
             # Bytes, not seconds: no ffprobe on the release path. 32 kB is a
             # second of 16 kHz mono, so a whole-second difference is readable
-            # in the log without costing anything.
-            say "trimmed $(($(stat -c %s "$wav") - $(stat -c %s "$wav_trim"))) bytes of silence off the ends"
+            # in the log without costing anything. (ffmpeg's own padding can
+            # make the copy a few bytes LONGER while the audio is shorter, so
+            # the number is only worth a line when it is positive.)
+            local saved=$(( $(stat -c %s "$wav") - $(stat -c %s "$wav_trim") ))
+            [ "$saved" -gt 0 ] && say "trimmed $saved bytes of silence off the ends"
             wav="$wav_trim"
         else
             rm -f "$wav_trim"
@@ -857,9 +860,9 @@ transcribe() { # transcribe <wav> -> prints the text
         fi
     fi
     if [ "$got" = "1" ]; then
-        if TF_TEXT="$out" TF_LANG="$LANG_FILE" LANG_CODES="$LANG_CODES" \
+        if TF_TEXT="$out" TF_LANG="$LANG_FILE" LANG_CODES="$LANG_CODES" TF_WAV="$wav" \
                 python3 - "$reply" <<'PY'
-import json, os, re, sys, time
+import json, math, os, re, sys, time
 
 # WHAT THIS IS FOR: whisper does not return nothing on silence, it returns
 # something. Room tone between two sentences becomes "Thank you.", a breath
@@ -1016,6 +1019,171 @@ def strip_sign_off(text):
     return " ".join(s.strip() for s in sentences).strip()
 
 
+# ── Did anybody actually say that? ───────────────────────────────────────
+#
+# The list below and the sign-off stripper are both guesses about WORDS, and
+# whisper's inventions are not a fixed set: reported 2026-11-18, a dictated
+# sentence ended with "and the next one" -- never said, just decoded off the
+# room tone after the last word. No list can keep up with that.
+#
+# So the audio is asked instead. Every reply carries per-segment start/end
+# times, and the audio those times refer to is the file we just sent, so a
+# segment that sits on silence is a segment nobody spoke, whatever it says.
+# The measurement is one ffmpeg pass over the take (66 ms for 4 s) and it only
+# runs when the reply has the SHAPE of the bug: several segments and a short
+# tail (a real sentence is many words; an invented sign-off is a few).
+
+def rms_frames(path):
+    """Every 0.1 s of the take: how loud it was, in dB.
+
+    Read from the WAV itself, not from ffmpeg: `astats` reports a RUNNING RMS
+    (measured: 40 frames of a take that is half tone, half digital silence all
+    drifted from -30 to -34 dB, and the silence never showed up), which answers
+    "how loud has this been" when the question is "how loud is THIS". Sixteen
+    thousand samples a second is also cheaper to parse here than to pipe
+    through another process on the release path.
+    """
+    if not path:
+        return []
+    try:
+        import array
+        import wave
+        with wave.open(path, "rb") as f:
+            rate = f.getframerate() or 16000
+            if f.getsampwidth() != 2 or f.getnchannels() != 1:
+                return []
+            raw = f.readframes(f.getnframes())
+    except Exception:
+        return []
+    samples = array.array("h")
+    samples.frombytes(raw[:len(raw) - (len(raw) % 2)])
+    step = max(1, rate // 10)          # one number per 0.1 s
+    frames = []
+    for at in range(0, len(samples), step):
+        block = samples[at:at + step]
+        if not block:
+            break
+        energy = sum(float(s) * s for s in block) / len(block)
+        frames.append((at / float(rate),
+                       10.0 * math.log10(energy / (32768.0 ** 2)) if energy > 0 else -120.0))
+    return frames
+
+
+def heard_anything(frames, start, end, reference):
+    """Was there a voice in this segment's window, or only room tone?
+
+    Two lines, and both are needed. -50 dB is the same silence line the level
+    gate draws: under it this is not a recording of anything. The relative one
+    is what makes a noisy room work -- 14 dB under the loudness of the rest of
+    the take is room tone, not somebody talking (speech stays within a few dB
+    of itself, a fan or a breath does not). No measurement means no opinion.
+    """
+    if not frames:
+        return True
+    window = [level for at, level in frames if start - 0.06 <= at < end + 0.06]
+    if not window:
+        return True
+    floor = max(-50.0, reference - 14.0)
+    return (sum(window) / len(window)) >= floor
+
+
+def speech_level(frames, before=None, after=None):
+    """How loud this take is where it was actually speaking.
+
+    The median of the frames on the far side of the segment under test, not the
+    maximum: one door slam must not become the yardstick, and the median of a
+    sentence is the body of it. Falls back to the whole take when there is
+    nothing on that side.
+    """
+    spared = [(at, level) for at, level in frames
+              if (before is None or at < before) and (after is None or at > after)]
+    levels = sorted(level for _, level in spared) or sorted(level for _, level in frames)
+    if not levels:
+        return -50.0
+    return levels[len(levels) // 2]
+
+
+def trim_silent_words(kept, frames):
+    """Cut words the reply says were spoken in silence, inside the last segment.
+
+    The sign-off does not always arrive as its own segment: "Send him the
+    invoice and the next one" can come back as ONE segment, and then no
+    per-segment test can separate the two halves. The reply carries a time for
+    every WORD, though, so the tail of that last segment is measured word by
+    word and anything that happened in silence is cut -- text and all, by
+    rebuilding the segment from the words that were actually heard.
+
+    Only the LAST segment, and only from its end: this is for the sign-off that
+    runs on after the sentence, not a way to rewrite what somebody said.
+    """
+    if not kept or not frames:
+        return kept
+    last = kept[-1]
+    if not isinstance(last, dict):
+        return kept
+    words = last.get("words")
+    if not isinstance(words, list) or len(words) < 2:
+        return kept
+    reference = speech_level(frames, before=float(last.get("start") or 0.0))
+    spoken = 0
+    for index, word in enumerate(words):
+        if not isinstance(word, dict):
+            return kept
+        start, end = word.get("start"), word.get("end")
+        if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+            return kept
+        if heard_anything(frames, float(start), float(end), reference):
+            spoken = index + 1
+    if spoken == 0 or spoken == len(words):
+        return kept
+    rebuilt = "".join(str(w.get("word") or "") for w in words[:spoken]).strip()
+    if not rebuilt:
+        return kept
+    trimmed = dict(last)
+    trimmed["text"] = " " + rebuilt
+    trimmed["end"] = words[spoken - 1].get("end")
+    return kept[:-1] + [trimmed]
+
+
+def drop_unheard(segments, wav):
+    """Take the segments nobody spoke off both ENDS of the reply.
+
+    Only the ends: a pause in the middle of a sentence is a pause, and dropping
+    a middle segment would cut a real sentence in two. The ends are where this
+    bug lives -- whisper starts and finishes a take the way a broadcast does.
+    """
+    timed = [s for s in segments if isinstance(s, dict)]
+    if not timed or not wav:
+        return segments
+    frames = rms_frames(wav)
+    if not frames:
+        return segments
+    kept = list(segments)
+
+    def silent(seg):
+        start, end = seg.get("start"), seg.get("end")
+        if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+            return False
+        # Judge the segment against the take MINUS itself, or a take that is
+        # all room tone would only ever agree with itself.
+        if kept and seg is kept[0]:
+            reference = speech_level(frames, after=float(end))
+        else:
+            reference = speech_level(frames, before=float(start))
+        return not heard_anything(frames, float(start), float(end), reference)
+
+    while len(kept) > 1 and isinstance(kept[-1], dict) and silent(kept[-1]):
+        kept.pop()
+    while len(kept) > 1 and isinstance(kept[0], dict) and silent(kept[0]):
+        kept.pop(0)
+    kept = trim_silent_words(kept, frames)
+    # One segment, and nothing was said in it: that is a reply made entirely of
+    # room tone ("www.hans.com.br" off four seconds of silence), not a sentence.
+    if len(kept) == 1 and isinstance(kept[0], dict) and silent(kept[0]):
+        return []
+    return kept
+
+
 def judge(text, segments):
     text = (text or "").strip()
     if not text:
@@ -1047,7 +1215,23 @@ except Exception:
     raise SystemExit(1)
 if not isinstance(data, dict):
     raise SystemExit(1)
-text = judge(data.get("text") or "", data.get("segments") or [])
+said = data.get("segments") or []
+kept = drop_unheard(said, os.environ.get("TF_WAV", ""))
+if said and not kept:
+    # Every segment measured as room tone: the reply was an invention end to end,
+    # so there is nothing to type (and nothing to fall through to the word
+    # filters with).
+    text = ""
+else:
+    words = data.get("text") or ""
+    if kept:
+        # The segments are the truth now, whether one was dropped or one was CUT
+        # short: the reply's whole-sentence string still carries the invented
+        # words.
+        joined = " ".join(str(s.get("text") or "").strip() for s in kept).strip()
+        if joined:
+            words = joined
+    text = judge(words, kept)
 with open(os.environ["TF_TEXT"], "w") as f:
     f.write(text)
 # whisper names the language ("german"); the bar wants the tag ("de").

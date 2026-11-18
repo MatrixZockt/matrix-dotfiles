@@ -111,8 +111,11 @@ The Blender desktop entry already goes through `heavy-run`, so a GUI session —
 thing an agent drives — is inside the budget too. Anything started some other way
 is what `memory-guard.service` is for: it samples free memory every two seconds and,
 when it falls under 10% of RAM (or zram is full and memory pressure is high), closes
-the single largest process that is not part of the session, biggest first, and says
-so in a notification and in `journalctl --user -u memory-guard`.
+the process that is actually growing — RSS slope over the last twelve seconds, not
+plain size — and says so in a notification and in
+`journalctl --user -u memory-guard`. The editor, Claude and the browser are ranked
+behind everything else, so a render is what goes and the tools you are working in
+are only touched when nothing else is left.
 
 Swap here is zram, which is RAM: once RAM and zram are both full the kernel reclaims
 for minutes before it OOM-kills anything, so the machine freezes rather than losing

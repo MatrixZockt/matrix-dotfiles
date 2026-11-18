@@ -1,6 +1,7 @@
 # Keeps a heavy render (or an agent driving one) from taking the whole machine
-# down with it: watches free memory and closes the single largest process that
-# is not part of the session before the kernel would freeze instead.
+# down with it: watches free memory and closes the process that is growing fastest
+# (not merely the largest), keeping the editor, Claude and the browser behind
+# everything else, before the kernel would freeze instead.
 #
 # The story behind it is in the script's header: on 2026-11-18 an agent rendered
 # a Blender scene with Cycles set to CPU, and with zram as the only swap the
@@ -13,7 +14,7 @@
 # fires only after reclaim has already frozen the desktop. Hence one process at
 # a time, chosen here, with a notification.
 [Unit]
-Description=Memory guard (closes the largest runaway process before the desktop freezes)
+Description=Memory guard (closes the fastest-growing process before the desktop freezes)
 After=default.target
 PartOf=default.target
 # A guard that is down is a machine that can freeze unattended, so come back

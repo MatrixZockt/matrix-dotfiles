@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""memory-guard -- close the biggest thing before the machine goes down with it.
+"""memory-guard -- close what is growing, before the machine goes down with it.
 
 WHY THIS EXISTS
   2026-11-18: an AI agent rendered in Blender with Cycles set to CPU. Every core
@@ -23,12 +23,46 @@ WHAT IT DOES
     B) swap is SWAP_PCT full (default 92%) and memory pressure's "full avg10"
        is at least PRESSURE (default 10%) -- full zram plus visible stalls.
 
-  When it fires it takes the largest resident process that is not on the keep
-  list, sends SIGTERM, waits TERM_GRACE (3 s), and sends SIGKILL only if that
-  process is still there. Then it re-checks memory and either stops or takes the
-  next largest, up to MAX_KILLS (3). One line per action goes to the journal, and
-  the same line is sent as a notification, so "why did my render vanish" has an
-  answer on screen and in `journalctl --user -u memory-guard`.
+  When it fires it takes one process, sends SIGTERM, waits TERM_GRACE (3 s), and
+  sends SIGKILL only if that process is still there. Then it re-checks memory and
+  either stops or takes the next one, up to MAX_KILLS (3). One line per action
+  goes to the journal, and the same line is sent as a notification, so "why did
+  my render vanish" has an answer on screen and in
+  `journalctl --user -u memory-guard`.
+
+WHAT IT PICKS (and what it never picks)
+  Not "the biggest process". A browser that has sat at 260 MB all afternoon is
+  big and innocent; a render that climbed to 4 GB in twenty seconds is what is
+  taking the machine down. So every pid's RSS is sampled each tick, the slope
+  over the last WINDOW seconds (default 12) is the primary key, and resident
+  size only breaks ties between processes that are growing equally: the victim
+  is the fastest-growing one above MIN_RSS_MB. If nothing is growing any more
+  (already-past-the-limit memory, a process parked at 10 GB), the slope is zero
+  for everyone and the tie-break picks the largest -- the right answer then,
+  because a process that grew to that size and stayed is still what has to go.
+
+  Never the first choice, whatever they weigh:
+    * the editor      -- code, zed, neovim, emacs, JetBrains, ...
+    * Claude          -- claude, claude-desktop, and their node helpers
+    * the browser     -- brave, chrome, firefox, ...
+    * Freebuff itself -- the agent that starts renders
+  These are ranked behind every ordinary process. Only when nothing else is left
+  above MIN_RSS_MB does the guard touch one, and it says so in the journal. A
+  Blender that an agent launched is *not* inherited into the Claude family: it is
+  the thing this guard exists to stop, and only small helpers (node, language
+  servers) inherit a family from their parent.
+
+  The session's own machinery is never a victim at all: compositor, shell, dbus,
+  pipewire, portals, keyring, this guard, the dictation and llama units. Neither
+  is anything with oom_score_adj <= -500 -- that is the standard way to say "not
+  me" and is honoured.
+
+  A candidate smaller than MIN_RSS_MB (512) is skipped: freeing a 400 MB process
+  cannot buy anything at this end of the curve, and killing a row of small
+  innocent things is worse than letting the kernel decide. The one exception is
+  a process still climbing at FAST_GROWTH (64 MB/s): that is the threat long
+  before it reaches half a gigabyte, so its slope alone qualifies it. COOLDOWN
+  (60 s) after an episode, so a burst does not become a massacre.
 
   This is the backstop, not the budget: `heavy-run` (same folder) puts a render
   or an agent inside heavy.slice, which makes the cgroup itself refuse to grow
@@ -36,24 +70,13 @@ WHAT IT DOES
   A process started outside it -- an agent that runs `blender` itself, a compile
   from a menu -- is what this guard is for.
 
-SAFETY
-  * The session's own machinery is never a victim: compositor, shell, dbus,
-    pipewire, portals, keyring, this guard, the dictation and llama units.
-  * Processes with oom_score_adj <= -500 are skipped -- that is the standard way
-    to say "not me" and is honoured.
-  * Kernel threads have no VmRSS and are skipped; so is pid 1, the guard itself
-    and its parent.
-  * A candidate smaller than MIN_RSS_MB (512) is never killed: freeing a
-    400 MB process cannot buy anything at this end of the curve, and killing a
-    row of small innocent things is worse than letting the kernel decide.
-  * COOLDOWN (60 s) after an episode, so a burst does not become a massacre.
-
 TESTING
-  memory-guard --check     print the readings, the trigger state and the top
-                           candidates (marked kept/free) and change nothing.
+  memory-guard --check     print the readings, the trigger state and the ranked
+                           candidates (growth per second, kept/last resort, and
+                           which one would be closed) and change nothing.
   DRY_RUN=1 or --dry-run   run the normal loop but only log what it would kill.
-  FLOOR / INTERVAL / MAX_KILLS / MIN_RSS_MB / COOLDOWN / TERM_GRACE read the
-  environment, but only as validated positive integers -- see env_int().
+  FLOOR / INTERVAL / WINDOW / MAX_KILLS / MIN_RSS_MB / COOLDOWN / TERM_GRACE read
+  the environment, but only as validated positive integers -- see env_int().
 """
 
 import os
@@ -61,7 +84,7 @@ import signal
 import sys
 import time
 
-# Never a victim, whatever it weighs. Exact names, plus the prefixes below.
+# Never a victim, whatever it weighs: the session's own machinery.
 PROTECTED = {
     "systemd", "systemd-journal", "systemd-logind", "systemd-oomd", "systemd-udevd",
     "hyprland", "Hyprland", "qs", "quickshell", "Xwayland", "Xorg", "sddm-helper",
@@ -72,6 +95,60 @@ PROTECTED = {
     "NetworkManager", "wpa_supplicant", "iio-sensor-prox", "upowerd",
 }
 PROTECTED_PREFIXES = ("xdg-desktop-portal", "xdg-document-portal", "xdg-permission-store")
+
+# The user's tools. Ranked last, killed only if nothing else is left.
+FAMILY_NAMES = {
+    "editor": {
+        "code", "code-insiders", "codium", "vscodium", "zed", "zed-editor",
+        "neovide", "nvim", "vim", "gvim", "emacs", "kate", "sublime_text",
+        "subl", "helix", "hx", "lapce", "micro", "gnome-text-editor", "geany",
+        "idea", "pycharm", "webstorm", "goland", "clion", "rustrover", "fleet",
+        "studio64", "android-studio",
+    },
+    "claude": {"claude", "claude-desktop", "claude-code"},
+    "browser": {
+        "brave", "brave-browser", "chrome", "chromium", "google-chrome",
+        "google-chrome-stable", "firefox", "firefox-bin", "firefox-esr",
+        "vivaldi", "vivaldi-bin", "opera", "zen", "zen-bin", "librewolf",
+        "thorium", "msedge", "waterfox",
+    },
+    "agent": {"freebuff", "codebuff"},
+}
+
+# Electron children keep their parent's comm, but some tools are only
+# recognisable by where they live on disk (Claude's node bundle, the Freebuff
+# orchestrator, a JetBrains or Android Studio JVM named "java").
+FAMILY_PATHS = (
+    ("claude", ("/claude-desktop/", "/.config/Claude/", "/claude-code/")),
+    ("agent", ("resources/bun/", "resources/orchestrator", "/Freebuff/", "/freebuff/")),
+    ("editor", ("/JetBrains/", "/android-studio/", "/.vscode-server/")),
+    ("browser", ("/opt/brave-bin/", "/opt/google/chrome/", "/usr/lib/firefox/",
+                 "/opt/microsoft/msedge/")),
+)
+
+# An IDE that runs on a JVM cannot be recognised by its exe (that is
+# .../bin/java) or, for a Gradle daemon, by its comm -- only its command line
+# says which tool it belongs to.
+FAMILY_CMDLINE = (
+    ("editor", ("-Didea.home.path", "/android-studio/", "/JetBrains/",
+                "studio.sh", "-Didea.config.path")),
+    ("claude", ("claude-code", "/.config/Claude/")),
+    ("agent", ("orchestrator.js", "resources/bun/", "freebuff")),
+)
+
+# Interpreters a script of ours can appear as: the guard must never close itself.
+INTERPRETERS = {"python3", "python", "python3.14", "sh", "bash", "env"}
+
+# Only these may inherit a family from the process that started them: editors'
+# language servers and Claude's node helpers. A renderer a tool launched is a
+# normal candidate -- that is the case this guard exists for.
+HELPERS = {
+    "node", "node-MainThread", "pyright", "pylsp", "clangd", "gopls", "tsserver",
+    "typescript-language-server", "eslint", "jdtls", "rust-analyzer",
+    "lua-language-server", "gpu-process", "utility", "crashpad_handler",
+}
+
+NAME_FAMILY = {name: family for family, names in FAMILY_NAMES.items() for name in names}
 
 HYPR_ICON = os.path.join(
     os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")),
@@ -95,9 +172,11 @@ def env_int(name, default, lo, hi):
 
 FLOOR_MB = env_int("FLOOR", 0, 0, 1 << 20)              # 0 = 10% of RAM, min 2048
 INTERVAL = env_int("INTERVAL", 2, 1, 300)
+WINDOW = env_int("WINDOW", 12, 2, 300)                  # seconds of RSS history
 TERM_GRACE = env_int("TERM_GRACE", 3, 1, 60)
 MAX_KILLS = env_int("MAX_KILLS", 3, 0, 10)
 MIN_RSS_MB = env_int("MIN_RSS_MB", 512, 16, 1 << 20)
+FAST_GROWTH_MB = env_int("FAST_GROWTH", 64, 1, 100000)  # MB/s that needs no size
 COOLDOWN = env_int("COOLDOWN", 60, 0, 3600)
 SWAP_PCT = env_int("SWAP_PCT", 92, 50, 100)
 PRESSURE = env_int("PRESSURE", 10, 1, 100)
@@ -137,28 +216,56 @@ def pressure_full_avg10():
     return 0.0
 
 
-def proc_field(pid, path, key):
+def status_field(pid, key):
+    """One numeric field from /proc/pid/status (VmRSS, PPid, ...)."""
     try:
-        with open("/proc/%d/%s" % (pid, path)) as handle:
-            if path == "status":
-                for line in handle:
-                    if line.startswith(key + ":"):
-                        return int(line.split()[1])
-                return None
-            return handle.read().strip()
+        with open("/proc/%d/status" % pid) as handle:
+            for line in handle:
+                if line.startswith(key + ":"):
+                    return int(line.split()[1])
     except (OSError, ValueError, IndexError):
-        return None
+        pass
+    return None
 
 
 def comm(pid):
-    return proc_field(pid, "comm", "") or ""
+    try:
+        with open("/proc/%d/comm" % pid) as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def exe_path(pid):
+    try:
+        return os.readlink("/proc/%d/exe" % pid)
+    except OSError:
+        return ""
+
+
+def cmdline(pid):
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as handle:
+            return handle.read(8192).replace(b"\0", b" ").decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def starttime(pid):
+    """Field 22 of /proc/pid/stat: distinguishes a pid from its next user."""
+    try:
+        with open("/proc/%d/stat" % pid) as handle:
+            data = handle.read()
+        return data[data.rfind(")") + 2:].split()[19]
+    except (OSError, IndexError):
+        return ""
 
 
 def oom_score_adj(pid):
-    value = proc_field(pid, "oom_score_adj", "")
     try:
-        return int(value)
-    except (TypeError, ValueError):
+        with open("/proc/%d/oom_score_adj" % pid) as handle:
+            return int(handle.read().strip())
+    except (OSError, ValueError):
         return 0
 
 
@@ -167,27 +274,109 @@ def protected(pid, name):
         return "self"
     if name in PROTECTED or name.startswith(PROTECTED_PREFIXES):
         return "kept"
+    if name in INTERPRETERS and "memory-guard" in cmdline(pid):
+        return "self"                       # the script running as python3
     if oom_score_adj(pid) <= -500:
         return "score"
     return ""
 
 
-def candidates():
-    """(rss_kb, pid, name, reason_if_kept) for every user-visible process."""
-    found = []
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit():
-            continue
-        pid = int(entry)
-        name = comm(pid)
-        if not name:
-            continue                      # kernel thread: no comm worth the name
-        rss = proc_field(pid, "status", "VmRSS")
-        if not rss:
-            continue                      # kernel thread, or gone this instant
-        found.append((rss, pid, name, protected(pid, name)))
-    found.sort(reverse=True)
-    return found
+def family(pid, name):
+    """editor / claude / browser / agent, or "" for an ordinary process."""
+    found = NAME_FAMILY.get(name, "")
+    if found:
+        return found
+    path = exe_path(pid)
+    if path:
+        for family_name, needles in FAMILY_PATHS:
+            if any(needle in path for needle in needles):
+                return family_name
+    text = cmdline(pid)
+    if text:
+        for family_name, needles in FAMILY_CMDLINE:
+            if any(needle in text for needle in needles):
+                return family_name
+    return ""
+
+
+def parent_family(pid, name):
+    """A helper inherits the family of the tool that started it, a few levels up."""
+    if name not in HELPERS:
+        return ""
+    parent = status_field(pid, "PPid")
+    for _ in range(4):
+        if not parent or parent <= 1:
+            return ""
+        parent_name = comm(parent)
+        inherited = family(parent, parent_name)
+        if inherited in ("editor", "claude", "browser"):
+            return inherited
+        parent = status_field(parent, "PPid")
+    return ""
+
+
+def slope(samples):
+    """kB/s over the tracked window, or None until there are two samples."""
+    if len(samples) < 2:
+        return None
+    (first_t, first_rss), (last_t, last_rss) = samples[0], samples[-1]
+    span = last_t - first_t
+    if span < 1.0:
+        return None
+    return (last_rss - first_rss) / span
+
+
+def rank_key(row):
+    """Best victim first: ordinary processes, then fastest growing, then biggest.
+
+    Families are pushed behind everything, which is what "never picks my editor,
+    Claude or the browser first" means in practice.
+    """
+    growth = row["growth"] or 0.0
+    last_resort = 1 if (row["kept"] or row["family"]) else 0
+    return (last_resort, -max(growth, 0.0), -row["rss"])
+
+
+class Tracker:
+    """RSS history per process, so growth is measured instead of guessed."""
+
+    def __init__(self):
+        self.hist = {}
+
+    def sample(self):
+        now = time.monotonic()
+        seen = set()
+        rows = []
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            name = comm(pid)
+            if not name:
+                continue                      # kernel thread: no comm worth the name
+            rss = status_field(pid, "VmRSS")
+            if not rss:
+                continue                      # kernel thread, or gone this instant
+            key = (pid, starttime(pid))
+            seen.add(key)
+            samples = self.hist.setdefault(key, [])
+            samples.append((now, rss))
+            # Two samples minimum, and nothing older than the window: the slope
+            # has to describe right now, not the process's whole life.
+            while len(samples) > 2 and samples[0][0] < now - WINDOW:
+                samples.pop(0)
+            rows.append({
+                "pid": pid,
+                "name": name,
+                "rss": rss,
+                "growth": slope(samples),
+                "family": family(pid, name) or parent_family(pid, name),
+                "kept": protected(pid, name),
+            })
+        for key in [k for k in self.hist if k not in seen]:
+            del self.hist[key]
+        rows.sort(key=rank_key)
+        return rows
 
 
 def trigger(state):
@@ -204,6 +393,19 @@ def trigger(state):
         if used_pct >= SWAP_PCT and full >= PRESSURE:
             return True, "swap %.0f%% used and memory pressure full avg10 %.1f%%" % (used_pct, full)
     return False, ""
+
+
+def describe(row):
+    """How big it is, and whether it is the thing that is growing."""
+    detail = "%d MB" % (row["rss"] // 1024)
+    growth = row["growth"]
+    if growth is None:
+        detail += ", growth not measured yet"
+    elif growth > 0:
+        detail += ", growing %d MB/s" % max(1, round(growth / 1024))
+    else:
+        detail += ", not growing"
+    return detail
 
 
 def notify(title, body):
@@ -223,15 +425,16 @@ def notify(title, body):
         pass
 
 
-def kill(pid, name, rss_kb):
+def kill(row):
     action = "would close" if DRY_RUN else "closing"
-    log("%s %s (pid %d, %d MB) to keep the desktop alive"
-        % (action, name, pid, rss_kb // 1024))
-    notify("Closing %s" % name,
+    log("%s %s (pid %d, %s) to keep the desktop alive"
+        % (action, row["name"], row["pid"], describe(row)))
+    notify("Closing %s" % row["name"],
            "%d MB was all that was left of memory; %s is what grew."
-           % (meminfo()["MemAvailable"] // 1024, name))
+           % (meminfo()["MemAvailable"] // 1024, describe(row)))
     if DRY_RUN:
         return True
+    pid = row["pid"]
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -252,33 +455,62 @@ def kill(pid, name, rss_kb):
     return True
 
 
-def episode(reason):
-    """One intervention: up to MAX_KILLS victims, biggest first."""
+def victim(rows, skip=()):
+    """Fastest-growing ordinary process; families only when none is left.
+
+    Size floor MIN_RSS_MB, or a slope above FAST_GROWTH: a process climbing at
+    200 MB/s is the threat long before it is 512 MB.
+
+    Returns (row, last_resort) or (None, False).
+    """
+    floor_kb = MIN_RSS_MB * 1024
+    fast_kb = FAST_GROWTH_MB * 1024
+    fallback = None
+    for row in rows:                     # already sorted best-first
+        if row["pid"] in skip or row["kept"]:
+            continue
+        if row["rss"] < floor_kb and (row["growth"] or 0.0) < fast_kb:
+            continue
+        if row["family"]:
+            if fallback is None:
+                fallback = row
+            continue
+        return row, False
+    return fallback, fallback is not None
+
+
+def episode(reason, tracker):
+    """One intervention: up to MAX_KILLS victims, fastest-growing first."""
     log("triggered: %s" % reason)
     killed = 0
-    total_mb = meminfo()["MemTotal"] // 1024
-    floor = FLOOR_MB or max(2048, total_mb // 10)
+    done = set()
+    floor = FLOOR_MB or max(2048, meminfo()["MemTotal"] // 1024)
     while killed < MAX_KILLS:
         state = meminfo()
         if state["MemAvailable"] // 1024 >= floor + 512:
             log("memory recovered: %d MB available" % (state["MemAvailable"] // 1024))
             break
-        victim = next(
-            ((rss, pid, name) for rss, pid, name, kept in candidates()
-             if not kept and rss >= MIN_RSS_MB * 1024),
-            None,
-        )
-        if victim is None:
+        rows = tracker.sample()          # fresh slopes: kill the grower, not the history
+        row, last_resort = victim(rows, done)
+        if row is None:
             log("nothing left worth closing above %d MB; leaving it to the kernel"
                 % MIN_RSS_MB)
             break
-        rss, pid, name = victim
-        kill(pid, name, rss)
+        if last_resort:
+            log("only the keep list (editor/Claude/browser) is above %d MB; "
+                "%s is the least bad of those" % (MIN_RSS_MB, row["name"]))
+        kill(row)
+        done.add(row["pid"])
         killed += 1
     return killed
 
 
 def check():
+    tracker = Tracker()
+    tracker.sample()
+    time.sleep(2)
+    rows = tracker.sample()
+
     state = meminfo()
     fired, reason = trigger(state)
     total_mb = state["MemTotal"] // 1024
@@ -290,14 +522,35 @@ def check():
               % ((state["SwapTotal"] - state["SwapFree"]) // 1024,
                  state["SwapTotal"] // 1024, pressure_full_avg10()))
     print("trigger         %s" % (reason if fired else "no"))
-    print("victims, largest first (up to 6):")
-    shown = 0
-    for rss, pid, name, kept in candidates():
-        if shown >= 6:
-            break
-        print("  %-20s pid %-8d %6d MB  %s"
-              % (name, pid, rss // 1024, "kept (" + kept + ")" if kept else "candidate"))
-        shown += 1
+    print("ranked, best victim first; families are last resort:")
+    chosen, last_resort = victim(rows)
+    floor_kb = MIN_RSS_MB * 1024
+    shown = [row for row in rows
+             if row["rss"] >= floor_kb or (row["growth"] or 0.0) >= FAST_GROWTH_MB * 1024][:8]
+    # A family below the size floor would never be shown, but "is my editor
+    # safe?" is the question this line answers.
+    family_row = next((row for row in rows if row["family"] and not row["kept"]
+                       and row["rss"] >= floor_kb), None)
+    if family_row is not None and all(row["pid"] != family_row["pid"] for row in shown):
+        shown.append(family_row)
+    for row in shown:
+        tag = "candidate"
+        if row["kept"]:
+            tag = "kept (" + row["kept"] + ")"
+        elif row["family"]:
+            tag = "last resort (" + row["family"] + ")"
+        if chosen is not None and row["pid"] == chosen["pid"] and not last_resort:
+            tag += ", WOULD CLOSE"
+        print("  %-20s pid %-8d %6d MB  %14s  %s"
+              % (row["name"], row["pid"], row["rss"] // 1024,
+                 ("%+d MB/s" % round(row["growth"] / 1024)) if row["growth"] is not None
+                 else "n/a", tag))
+    if chosen is None:
+        print("would close     nothing above %d MB" % MIN_RSS_MB)
+    else:
+        print("would close     %s (pid %d, %s)%s"
+              % (chosen["name"], chosen["pid"], describe(chosen),
+                 " -- last resort, keep list" if last_resort else ""))
     return 0
 
 
@@ -305,20 +558,36 @@ def main():
     if "--check" in sys.argv:
         return check()
     once = "--once" in sys.argv
-    log("watching memory every %ds; floor %s; dry run %s"
-        % (INTERVAL, ("%d MB" % FLOOR_MB) if FLOOR_MB else "10% of RAM", DRY_RUN))
+    tracker = Tracker()
+    # Growth needs history. Acting on the first sample would mean acting on
+    # plain size, which is exactly what this guard no longer does, so a fresh
+    # start (boot, restart) spends a few seconds measuring before it may fire.
+    warmup = max(2 * INTERVAL, min(WINDOW // 2, 30))
+    started = time.monotonic()
+    log("watching memory every %ds; floor %s; pick fastest-growing process; "
+        "editor/Claude/browser last resort; measuring growth for %ds; dry run %s"
+        % (INTERVAL, ("%d MB" % FLOOR_MB) if FLOOR_MB else "10% of RAM", warmup, DRY_RUN))
+    cooldown_until = 0.0
     while True:
+        tracker.sample()
+        if time.monotonic() - started < warmup:
+            time.sleep(INTERVAL)
+            continue
         fired, reason = trigger(meminfo())
         if fired:
-            episode(reason)
-            if once:
-                return 0
-            time.sleep(COOLDOWN)
+            if time.monotonic() < cooldown_until:
+                if once:
+                    log("inside the cooldown after the last episode; not acting again")
+                    return 0
+            else:
+                episode(reason, tracker)
+                cooldown_until = time.monotonic() + COOLDOWN
+                if once:
+                    return 0
         elif once:
             log("nothing to do: memory is inside the limit")
             return 0
-        else:
-            time.sleep(INTERVAL)
+        time.sleep(INTERVAL)
 
 
 if __name__ == "__main__":

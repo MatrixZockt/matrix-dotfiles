@@ -1,0 +1,328 @@
+#!/usr/bin/env python3
+"""memory-guard -- close the biggest thing before the machine goes down with it.
+
+WHY THIS EXISTS
+  2026-11-18: an AI agent rendered in Blender with Cycles set to CPU. Every core
+  pegged, the render took most of the RAM, and the machine went down hard.
+
+  The RAM half is what actually breaks the desktop, and it was unguarded here for
+  a good reason: swap on this machine is zram (compressed in RAM, no disk behind
+  it). When RAM and zram are both nearly full the kernel does not OOM-kill -- it
+  spends minutes in reclaim first, so the machine is not slow, it is frozen.
+  systemd-oomd was armed to cut a whole user session tree twice on 2026-11-12 and
+  had to be disarmed (see /etc/systemd/system/user-.slice.d/90-oomd-session-safety.conf),
+  so since then nothing at all was watching the top of the memory curve.
+
+WHAT IT DOES
+  Samples /proc/meminfo every INTERVAL seconds (default 2) and fires when either
+
+    A) MemAvailable falls below FLOOR -- default 10% of RAM, at least 2 GiB. 10%
+       is about where the kernel's own reclaim starts to be felt as stalls, so
+       it is the last moment with room to choose a victim instead of having one
+       chosen for us.
+    B) swap is SWAP_PCT full (default 92%) and memory pressure's "full avg10"
+       is at least PRESSURE (default 10%) -- full zram plus visible stalls.
+
+  When it fires it takes the largest resident process that is not on the keep
+  list, sends SIGTERM, waits TERM_GRACE (3 s), and sends SIGKILL only if that
+  process is still there. Then it re-checks memory and either stops or takes the
+  next largest, up to MAX_KILLS (3). One line per action goes to the journal, and
+  the same line is sent as a notification, so "why did my render vanish" has an
+  answer on screen and in `journalctl --user -u memory-guard`.
+
+  This is the backstop, not the budget: `heavy-run` (same folder) puts a render
+  or an agent inside heavy.slice, which makes the cgroup itself refuse to grow
+  past its share and kills *inside* that budget, without touching the desktop.
+  A process started outside it -- an agent that runs `blender` itself, a compile
+  from a menu -- is what this guard is for.
+
+SAFETY
+  * The session's own machinery is never a victim: compositor, shell, dbus,
+    pipewire, portals, keyring, this guard, the dictation and llama units.
+  * Processes with oom_score_adj <= -500 are skipped -- that is the standard way
+    to say "not me" and is honoured.
+  * Kernel threads have no VmRSS and are skipped; so is pid 1, the guard itself
+    and its parent.
+  * A candidate smaller than MIN_RSS_MB (512) is never killed: freeing a
+    400 MB process cannot buy anything at this end of the curve, and killing a
+    row of small innocent things is worse than letting the kernel decide.
+  * COOLDOWN (60 s) after an episode, so a burst does not become a massacre.
+
+TESTING
+  memory-guard --check     print the readings, the trigger state and the top
+                           candidates (marked kept/free) and change nothing.
+  DRY_RUN=1 or --dry-run   run the normal loop but only log what it would kill.
+  FLOOR / INTERVAL / MAX_KILLS / MIN_RSS_MB / COOLDOWN / TERM_GRACE read the
+  environment, but only as validated positive integers -- see env_int().
+"""
+
+import os
+import signal
+import sys
+import time
+
+# Never a victim, whatever it weighs. Exact names, plus the prefixes below.
+PROTECTED = {
+    "systemd", "systemd-journal", "systemd-logind", "systemd-oomd", "systemd-udevd",
+    "hyprland", "Hyprland", "qs", "quickshell", "Xwayland", "Xorg", "sddm-helper",
+    "dbus-broker", "dbus-daemon", "pipewire", "pipewire-pulse", "wireplumber",
+    "gnome-keyring-d", "gpg-agent", "ssh-agent", "kwalletd6", "polkitd",
+    "memory-guard", "power-failsafe", "power-autoswitch", "session-doctor",
+    "dictate-daemon", "llama-server",
+    "NetworkManager", "wpa_supplicant", "iio-sensor-prox", "upowerd",
+}
+PROTECTED_PREFIXES = ("xdg-desktop-portal", "xdg-document-portal", "xdg-permission-store")
+
+HYPR_ICON = os.path.join(
+    os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")),
+    "icons/hicolor/512x512/apps/hyprland.svg",
+)
+
+
+def env_int(name, default, lo, hi):
+    """Read a number from the environment, but only a sane one.
+
+    A plain int(os.environ.get(...)) on a daemon's knob is how a stray exported
+    value turns a 2-second sample into a busy loop, or a floor into zero.
+    """
+    raw = os.environ.get(name, "")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if lo <= value <= hi else default
+
+
+FLOOR_MB = env_int("FLOOR", 0, 0, 1 << 20)              # 0 = 10% of RAM, min 2048
+INTERVAL = env_int("INTERVAL", 2, 1, 300)
+TERM_GRACE = env_int("TERM_GRACE", 3, 1, 60)
+MAX_KILLS = env_int("MAX_KILLS", 3, 0, 10)
+MIN_RSS_MB = env_int("MIN_RSS_MB", 512, 16, 1 << 20)
+COOLDOWN = env_int("COOLDOWN", 60, 0, 3600)
+SWAP_PCT = env_int("SWAP_PCT", 92, 50, 100)
+PRESSURE = env_int("PRESSURE", 10, 1, 100)
+
+DRY_RUN = os.environ.get("DRY_RUN", "") == "1" or "--dry-run" in sys.argv
+
+
+def log(message):
+    print("[memory-guard] " + message, flush=True, file=sys.stderr)
+
+
+def meminfo():
+    """MemTotal / MemAvailable / SwapTotal / SwapFree in kB, from /proc/meminfo."""
+    wanted = {"MemTotal": 0, "MemAvailable": 0, "SwapTotal": 0, "SwapFree": 0}
+    try:
+        with open("/proc/meminfo") as handle:
+            for line in handle:
+                key = line.split(":", 1)[0]
+                if key in wanted:
+                    wanted[key] = int(line.split()[1])
+    except OSError as error:
+        log("cannot read /proc/meminfo: %s" % error)
+    return wanted
+
+
+def pressure_full_avg10():
+    """PSI: % of the last 10 s during which every task stalled on memory."""
+    try:
+        with open("/proc/pressure/memory") as handle:
+            for line in handle:
+                if line.startswith("full "):
+                    for field in line.split()[1:]:
+                        if field.startswith("avg10="):
+                            return float(field.split("=", 1)[1])
+    except (OSError, ValueError):
+        pass
+    return 0.0
+
+
+def proc_field(pid, path, key):
+    try:
+        with open("/proc/%d/%s" % (pid, path)) as handle:
+            if path == "status":
+                for line in handle:
+                    if line.startswith(key + ":"):
+                        return int(line.split()[1])
+                return None
+            return handle.read().strip()
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def comm(pid):
+    return proc_field(pid, "comm", "") or ""
+
+
+def oom_score_adj(pid):
+    value = proc_field(pid, "oom_score_adj", "")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def protected(pid, name):
+    if pid <= 1 or pid == os.getpid() or pid == os.getppid():
+        return "self"
+    if name in PROTECTED or name.startswith(PROTECTED_PREFIXES):
+        return "kept"
+    if oom_score_adj(pid) <= -500:
+        return "score"
+    return ""
+
+
+def candidates():
+    """(rss_kb, pid, name, reason_if_kept) for every user-visible process."""
+    found = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        name = comm(pid)
+        if not name:
+            continue                      # kernel thread: no comm worth the name
+        rss = proc_field(pid, "status", "VmRSS")
+        if not rss:
+            continue                      # kernel thread, or gone this instant
+        found.append((rss, pid, name, protected(pid, name)))
+    found.sort(reverse=True)
+    return found
+
+
+def trigger(state):
+    """(bool, reason) for one sample."""
+    total_mb = state["MemTotal"] // 1024
+    avail_mb = state["MemAvailable"] // 1024
+    floor = FLOOR_MB or max(2048, total_mb // 10)
+    if avail_mb < floor:
+        return True, "available %d MB under floor %d MB" % (avail_mb, floor)
+    swap_total = state["SwapTotal"]
+    if swap_total:
+        used_pct = 100.0 * (swap_total - state["SwapFree"]) / swap_total
+        full = pressure_full_avg10()
+        if used_pct >= SWAP_PCT and full >= PRESSURE:
+            return True, "swap %.0f%% used and memory pressure full avg10 %.1f%%" % (used_pct, full)
+    return False, ""
+
+
+def notify(title, body):
+    """Best effort, through D-Bus: notify-send is broken on this machine."""
+    if DRY_RUN:
+        return
+    try:
+        import subprocess
+        subprocess.run(
+            ["gdbus", "call", "--session", "--dest", "org.freedesktop.Notifications",
+             "--object-path", "/org/freedesktop/Notifications",
+             "--method", "org.freedesktop.Notifications.Notify",
+             "memory-guard", "0", HYPR_ICON, title, body, "[]", "{}", "9000"],
+            timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        )
+    except Exception:
+        pass
+
+
+def kill(pid, name, rss_kb):
+    action = "would close" if DRY_RUN else "closing"
+    log("%s %s (pid %d, %d MB) to keep the desktop alive"
+        % (action, name, pid, rss_kb // 1024))
+    notify("Closing %s" % name,
+           "%d MB was all that was left of memory; %s is what grew."
+           % (meminfo()["MemAvailable"] // 1024, name))
+    if DRY_RUN:
+        return True
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    deadline = time.time() + TERM_GRACE
+    while time.time() < deadline:
+        time.sleep(0.25)
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        return True
+    return True
+
+
+def episode(reason):
+    """One intervention: up to MAX_KILLS victims, biggest first."""
+    log("triggered: %s" % reason)
+    killed = 0
+    total_mb = meminfo()["MemTotal"] // 1024
+    floor = FLOOR_MB or max(2048, total_mb // 10)
+    while killed < MAX_KILLS:
+        state = meminfo()
+        if state["MemAvailable"] // 1024 >= floor + 512:
+            log("memory recovered: %d MB available" % (state["MemAvailable"] // 1024))
+            break
+        victim = next(
+            ((rss, pid, name) for rss, pid, name, kept in candidates()
+             if not kept and rss >= MIN_RSS_MB * 1024),
+            None,
+        )
+        if victim is None:
+            log("nothing left worth closing above %d MB; leaving it to the kernel"
+                % MIN_RSS_MB)
+            break
+        rss, pid, name = victim
+        kill(pid, name, rss)
+        killed += 1
+    return killed
+
+
+def check():
+    state = meminfo()
+    fired, reason = trigger(state)
+    total_mb = state["MemTotal"] // 1024
+    floor = FLOOR_MB or max(2048, total_mb // 10)
+    print("MemTotal        %d MB" % total_mb)
+    print("MemAvailable    %d MB (floor %d MB)" % (state["MemAvailable"] // 1024, floor))
+    if state["SwapTotal"]:
+        print("swap            %d of %d MB used, pressure full avg10 %.1f%%"
+              % ((state["SwapTotal"] - state["SwapFree"]) // 1024,
+                 state["SwapTotal"] // 1024, pressure_full_avg10()))
+    print("trigger         %s" % (reason if fired else "no"))
+    print("victims, largest first (up to 6):")
+    shown = 0
+    for rss, pid, name, kept in candidates():
+        if shown >= 6:
+            break
+        print("  %-20s pid %-8d %6d MB  %s"
+              % (name, pid, rss // 1024, "kept (" + kept + ")" if kept else "candidate"))
+        shown += 1
+    return 0
+
+
+def main():
+    if "--check" in sys.argv:
+        return check()
+    once = "--once" in sys.argv
+    log("watching memory every %ds; floor %s; dry run %s"
+        % (INTERVAL, ("%d MB" % FLOOR_MB) if FLOOR_MB else "10% of RAM", DRY_RUN))
+    while True:
+        fired, reason = trigger(meminfo())
+        if fired:
+            episode(reason)
+            if once:
+                return 0
+            time.sleep(COOLDOWN)
+        elif once:
+            log("nothing to do: memory is inside the limit")
+            return 0
+        else:
+            time.sleep(INTERVAL)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(0)

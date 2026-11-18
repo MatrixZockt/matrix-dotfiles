@@ -97,6 +97,17 @@ if [[ -d "$REPO/extras/systemd/user" ]]; then
     done
     # TIMERS get the same treatment, and need it more: a timer that is installed
     # but not enabled does absolutely nothing, and `*.service` never matched one
+    # Slices too: heavy.slice is the memory/CPU budget for renders and agents
+    # (see extras/bin/heavy-run). Installing the wrapper without its slice would
+    # run every "capped" command in a limit-less implicit slice.
+    for f in "$REPO/extras/systemd/user"/*.slice; do
+        [[ -e "$f" ]] || continue
+        name=$(basename "$f")
+        echo "  slice   $name"
+        if [[ $DRY_RUN -eq 0 ]]; then
+            install -m 0644 "$f" "$HOME/.config/systemd/user/$name"
+        fi
+    done
     # -- so a scheduled unit would have sat in the repo looking deployed. The
     # service it triggers is installed by the loop above; enabling the timer is
     # what puts it on the clock.

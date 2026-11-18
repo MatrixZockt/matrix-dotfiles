@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# heavy-run -- run a command inside this machine's heavy-work budget.
+#
+#   heavy-run blender -b scene.blend -a
+#   heavy-run python3 render.py
+#   heavy-run -- make -j32
+#
+# The budget itself lives in heavy.slice (MemoryHigh/MemoryMax/MemorySwapMax/
+# CPUQuota, with the reasoning in that file): a render that grows past it gets
+# throttled, then killed inside its own cgroup, instead of freezing the desktop.
+# Without that ceiling the machine dies the way it did on 2026-11-18 -- all of
+# RAM plus zram full, and the kernel reclaiming for minutes rather than killing.
+#
+# WHY systemd-run AND NOT ulimit/prlimit
+#   ulimit -v is a per-process address-space limit that no modern renderer
+#   respects -- Blender maps far more than it touches, so a -v ceiling either
+#   does nothing useful or kills a healthy render. The cgroup limit counts
+#   resident pages for the whole tree, which is what actually runs out.
+#
+# --scope keeps the command in the foreground and in this terminal: its output,
+# its exit status and its signals are all still yours. --quiet keeps systemd's
+# "Running scope as unit" line out of that output; --collect removes the scope
+# afterwards so repeated runs do not pile up dead units.
+set -uo pipefail
+
+if [ $# -eq 0 ] || [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    awk 'NR > 1 { if ($0 !~ /^#/ && $0 !~ /^$/) exit; sub(/^# ?/, ""); print }' "$0"
+    exit 0
+fi
+[ "$1" = "--" ] && shift
+
+SLICE="${HEAVY_SLICE:-heavy.slice}"
+
+if ! command -v systemd-run >/dev/null 2>&1; then
+    echo "heavy-run: systemd-run is missing; running without a budget" >&2
+    exec "$@"
+fi
+
+# If the slice file was never installed, systemd would happily create an empty
+# implicit slice with no limits -- the command would run, look capped, and not
+# be. Say so instead of pretending.
+if ! systemctl --user show "$SLICE" >/dev/null 2>&1; then
+    echo "heavy-run: $SLICE is not installed (copy extras/systemd/user/heavy.slice" \
+         "to ~/.config/systemd/user/ and run systemctl --user daemon-reload);" \
+         "running without a budget" >&2
+    exec "$@"
+fi
+
+exec systemd-run --user --scope --quiet --collect --slice="$SLICE" -- "$@"

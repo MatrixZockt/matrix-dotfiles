@@ -92,6 +92,34 @@ The same folder also holds the two dictation units (`dictate-server`, `dictate-d
 copy them the same way if you use the dictation feature. The login nudge in
 `custom/execs.lua` checks for the unit first, so without it nothing fails.
 
+### A ceiling on heavy work
+
+Two pieces keep a render, a compile or an agent from taking the machine down with
+it. Both are installed by `./install.sh`.
+
+`heavy.slice` is the budget: past 45% of RAM the kernel throttles and reclaims,
+past 60% it kills the biggest process **inside the slice**, and the CPU is held to
+16 of the 32 threads so the desktop and the input path stay live. Run anything in
+it with:
+
+```bash
+heavy-run blender -b scene.blend -a
+heavy-run -- make -j32
+```
+
+The Blender desktop entry already goes through `heavy-run`, so a GUI session — the
+thing an agent drives — is inside the budget too. Anything started some other way
+is what `memory-guard.service` is for: it samples free memory every two seconds and,
+when it falls under 10% of RAM (or zram is full and memory pressure is high), closes
+the single largest process that is not part of the session, biggest first, and says
+so in a notification and in `journalctl --user -u memory-guard`.
+
+Swap here is zram, which is RAM: once RAM and zram are both full the kernel reclaims
+for minutes before it OOM-kills anything, so the machine freezes rather than losing
+one process. That is the failure these two exist to stop. Check either of them with
+`memory-guard --check` (readings, trigger state, who would be chosen) or
+`systemctl --user show heavy.slice`.
+
 **Not in this repo, on purpose:** wallpapers and other third-party art, anything
 specific to one machine's hardware, and every secret, hostname or personal path.
 Wallpapers are not kept here at all — no picture ships and `~/Pictures/Wallpapers` is

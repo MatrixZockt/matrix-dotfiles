@@ -1,0 +1,38 @@
+# Keeps a heavy render (or an agent driving one) from taking the whole machine
+# down with it: watches free memory and closes the single largest process that
+# is not part of the session before the kernel would freeze instead.
+#
+# The story behind it is in the script's header: on 2026-11-18 an agent rendered
+# a Blender scene with Cycles set to CPU, and with zram as the only swap the
+# machine thrashed to a hard stop. The budget half of the fix is heavy.slice
+# (docs/FEATURES.md); this unit is the backstop for anything started outside it.
+#
+# It is also the reason the OOM protection had to be arranged the way it was:
+# systemd-oomd is disarmed for this session (it killed two whole sessions on
+# 2026-11-12), so the kernel's OOM killer is the only other thing left, and it
+# fires only after reclaim has already frozen the desktop. Hence one process at
+# a time, chosen here, with a notification.
+[Unit]
+Description=Memory guard (closes the largest runaway process before the desktop freezes)
+After=default.target
+PartOf=default.target
+# A guard that is down is a machine that can freeze unattended, so come back
+# from anything: a crash, an OOM sweep, or someone stopping it by mistake.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.local/bin/memory-guard
+Restart=always
+RestartSec=3
+# Low priority on purpose: it must keep being scheduled while everything else
+# is thrashing, and it must never be the thing competing for memory.
+Nice=-5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=2
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=memory-guard
+
+[Install]
+WantedBy=default.target

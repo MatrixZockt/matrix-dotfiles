@@ -1,0 +1,41 @@
+# The memory/CPU budget for work that is allowed to be slow but not allowed to
+# take the machine down: Blender renders, agents driving one, long compiles.
+#
+# WHY A SLICE AND NOT A WATCHDOG
+#  2026-11-18: an agent rendered a Blender scene with Cycles set to CPU. The
+#  render filled RAM and zram (this machine's only swap is compressed RAM), and
+#  the kernel spent its time in reclaim instead of killing anything -- the
+#  desktop froze and the machine had to be restarted.
+#
+#  A limit has to bite *before* that point, which means the kernel's own cgroup
+#  accounting, not a sampler hoping to notice in time. Inside this slice the
+#  memory controller does the work: past MemoryHigh the kernel throttles and
+#  reclaims, past MemoryMax it OOM-kills the biggest process *in the slice*, and
+#  the desktop outside it is untouched. memory-guard (see its script header) is
+#  the backstop for anything started outside this budget.
+#
+# NUMBERS, for 32 GB of RAM and 32 threads
+#   MemoryHigh  45%  ~14 GB  where reclaim starts to push back
+#   MemoryMax   60%  ~19 GB  the hard ceiling: one render cannot have more
+#   MemorySwapMax 4 GB       zram is RAM; let heavy work spill a little, not a lot
+#   CPUQuota    1600%        leaves 16 of 32 threads for the desktop and for the
+#                            input latency that makes a UI feel alive
+#
+#  Percentages are relative to the parent slice (the user session), so they
+#  follow the machine rather than pinning a number that a RAM upgrade would make
+#  wrong.
+#
+# USING IT
+#   heavy-run blender -b scene.blend -a          (extras/bin/heavy-run)
+#   systemd-run --user --scope --slice=heavy.slice -- make -j32
+#   The Blender desktop entry is wrapped in heavy-run, so a GUI session is
+#   inside the budget too, which is what the agent that crashed the machine used.
+[Unit]
+Description=Memory and CPU budget for heavy work (renders, agents, compiles)
+
+[Slice]
+MemoryHigh=45%
+MemoryMax=60%
+MemorySwapMax=4G
+CPUQuota=1600%
+IOWeight=50

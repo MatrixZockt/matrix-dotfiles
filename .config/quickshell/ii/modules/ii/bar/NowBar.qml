@@ -1270,7 +1270,9 @@ Item {
             // this wallpaper the primary comes out white, which is exactly why
             // the meter read as a line of white dots instead of as something
             // happening. One fixed hue instead of a theme that may be greyscale.
-            readonly property color liveAccent: "#73b8ff"
+            // One value, shared with the fullscreen drop-down
+            // (DictationIndicator), so the two tells cannot drift apart.
+            readonly property color liveAccent: Dictation.accent
 
             // Travelling wave, so a quiet room still looks like listening: at
             // the levels a still room produces every bar would otherwise be the
@@ -1345,11 +1347,25 @@ Item {
                         }
                     }
 
+                    // THE DROP-DOWN'S METER, copied here verbatim (see
+                    // DictationIndicator.qml): 5 bars, 4..16px, the same
+                    // sensitivity curve and the same travelling wave.
+                    //
+                    // This is the one thing the two tells had drifted on. The
+                    // bar drew 7 bars up to 18px, the drop-down 5 up to 16px,
+                    // so the same sentence looked like two different meters
+                    // depending on whether an app was fullscreen. There is one
+                    // meter for one microphone, and it lives in this block.
+                    //
+                    // Recording only: the microphone is closed while the words
+                    // are being made, and the spinner above already says that
+                    // -- as it does in the drop-down.
                     Row {
                         anchors.verticalCenter: parent.verticalCenter
-                        spacing: 3.5
+                        spacing: 2.5
+                        visible: Dictation.listening
                         Repeater {
-                            model: 7
+                            model: 5
                             Rectangle {
                                 width: 3
                                 radius: 1.5
@@ -1363,18 +1379,14 @@ Item {
                                 // moved them 9px -> 26px. Inline, the property
                                 // reads are dependencies in the usual way, so
                                 // every bar follows the voice.
+                                //
+                                // A quiet room stays low (the wave only
+                                // ripples), speech fills the row, and the two
+                                // numbers that decide that are the drop-down's.
                                 height: {
-                                    const wobble = 0.5 + 0.5 * Math.sin((dictationView.wave + index * 0.14) * Math.PI * 2);
-                                    // Transcribing closes the microphone, so the
-                                    // level is flat 0 by definition and the bars
-                                    // used to freeze into a row of dots. The wave
-                                    // alone drives them here, so the card keeps
-                                    // moving exactly as the repo's did while it
-                                    // waited for the text.
-                                    const base = Dictation.busy
-                                        ? 0.35 + 0.6 * wobble
-                                        : 0.12 + 0.88 * Dictation.level;
-                                    return 4 + 14 * Math.min(1, base * (0.65 + 0.35 * wobble));
+                                    const wobble = 0.5 + 0.5 * Math.sin((dictationView.wave + index * 0.16) * Math.PI * 2);
+                                    const base = 0.12 + 0.88 * Dictation.level;
+                                    return 4 + 12 * Math.min(1, base * (0.82 + 0.18 * wobble));
                                 }
                                 color: dictationView.liveAccent
                                 // No Behavior here. A 70ms height animation on

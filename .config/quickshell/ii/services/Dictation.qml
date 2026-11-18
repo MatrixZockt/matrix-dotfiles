@@ -52,6 +52,16 @@ Singleton {
     /// Anything worth showing in the bar.
     readonly property bool showing: listening || busy
 
+    /// The colour dictation is drawn in, by both tells: the bar's island pill
+    /// (NowBar) and the fullscreen drop-down (DictationIndicator). One value,
+    /// because they are the same light on the same machine -- picking each
+    /// one's colour where it is drawn is how the two drifted apart (the bar a
+    /// fixed blue, the drop-down the theme's primary).
+    ///
+    /// A fixed hue on purpose: a theme can be greyscale, and a meter drawn in
+    /// whatever the wallpaper produces is not a meter anybody can read.
+    readonly property color accent: "#73b8ff"
+
     // A warm whisper answers a short dictation in a few hundred milliseconds,
     // so the working tell can arrive and leave inside a single blink -- which
     // reads as a glitch instead of as "it is working". Once it has been up it

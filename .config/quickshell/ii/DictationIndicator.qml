@@ -313,7 +313,10 @@ Scope {
                             text: "mic"
                             iconSize: 18
                             fill: 1
-                            color: Appearance.colors.colPrimary
+                            // The bar's colour, not the theme's primary: this is
+                            // the same tell as the bar's pill, and the two are
+                            // read side by side (see Dictation.accent).
+                            color: Dictation.accent
                         }
 
                         MaterialSymbol {
@@ -321,7 +324,7 @@ Scope {
                             visible: Dictation.busy
                             text: "progress_activity"
                             iconSize: 18
-                            color: Appearance.colors.colPrimary
+                            color: Dictation.accent
 
                             RotationAnimation on rotation {
                                 running: Dictation.busy
@@ -353,12 +356,16 @@ Scope {
                                 // this binding did not re-run when
                                 // Dictation.level changed, while the property
                                 // reads do.
+                                // Size and sensitivity are the ones the bar's
+                                // island draws too (copied there, see NowBar):
+                                // a quiet room is a low row, speech fills it,
+                                // and the two pills cannot disagree.
                                 height: {
                                     const wobble = 0.5 + 0.5 * Math.sin((win.wave + index * 0.16) * Math.PI * 2);
                                     const base = 0.12 + 0.88 * Dictation.level;
                                     return 4 + 12 * Math.min(1, base * (0.82 + 0.18 * wobble));
                                 }
-                                color: ColorUtils.transparentize(Appearance.colors.colPrimary, 0.15)
+                                color: ColorUtils.transparentize(Dictation.accent, 0.15)
                             }
                         }
                     }
@@ -384,14 +391,14 @@ Scope {
                         implicitWidth: langText.implicitWidth + 10
                         implicitHeight: 16
                         radius: 5
-                        color: ColorUtils.transparentize(Appearance.colors.colPrimary, 0.84)
+                        color: ColorUtils.transparentize(Dictation.accent, 0.84)
 
                         StyledText {
                             id: langText
                             anchors.centerIn: parent
                             font.pixelSize: Appearance.font.pixelSize.smaller
                             font.weight: 600
-                            color: Appearance.colors.colPrimary
+                            color: Dictation.accent
                             text: Dictation.languageLabel
                         }
                     }

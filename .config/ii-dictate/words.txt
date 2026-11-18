@@ -41,6 +41,9 @@ wireplumber
 systemd
 
 # --- tools and engines ---
+Claude
+ChatGPT
+Higgsfield
 whisper.cpp
 WhisperFlow
 llama.cpp

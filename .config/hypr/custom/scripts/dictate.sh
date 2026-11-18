@@ -227,19 +227,72 @@ focused_is_xwayland() {
 }
 
 # Give the borrowed clipboard back, whatever it was before the dictation, and
-# take the sentence off it. Called by the delivery step AFTER the paste has
-# been confirmed (see the note in paste_text), not from inside it.
+# take the sentence off it. Called by the delivery step once the paste has
+# landed, by the guard that outlives a delivery that died before it could, and
+# by the manual `paste` subcommand.
+#
+# SAFE TO RUN TWICE. Two callers can reach this at the same moment (the
+# delivery and its guard), and a second pass that found the backup already
+# taken used to fall through to `wl-copy --clear` and EMPTY the clipboard it had
+# just correctly restored. So the type file is written for every borrow --
+# `empty` when there was nothing on the clipboard -- and only whoever finds it
+# still there does the work and removes it. The lock makes the check atomic.
 restore_clipboard() {
-    local prev_file prev_type
+    local prev_file prev_type type_file
     prev_file="$STATE/clipboard-backup"
-    prev_type="$(cat "$STATE/clipboard-backup.type" 2>/dev/null)"
-    if [ -s "$prev_file" ] && [ -n "$prev_type" ]; then
-        wl-copy -t "$prev_type" < "$prev_file" 2>/dev/null
-    else
-        wl-copy --clear 2>/dev/null || true
+    type_file="$STATE/clipboard-backup.type"
+    if command -v flock >/dev/null 2>&1; then
+        exec 8>"$STATE/restore.lock" 2>/dev/null || true
+        flock -w 3 8 2>/dev/null || true
     fi
-    rm -f "$prev_file" "$STATE/clipboard-backup.type"
+    prev_type="$(cat "$type_file" 2>/dev/null)"
+    # Nothing recorded: no borrow in flight, or somebody else already put it
+    # back. Leave the selection alone -- clearing here is how a race turned a
+    # correct restore into an empty clipboard.
+    [ -n "$prev_type" ] || { exec 8>&- 2>/dev/null; return 0; }
+    rm -f "$type_file"
+    if [ "$prev_type" = empty ] || [ ! -s "$prev_file" ]; then
+        # `8>&-`: wl-copy forks a process that keeps owning the selection, and
+        # a child holding this lock would make every later restore wait out its
+        # full flock timeout before giving the clipboard back.
+        wl-copy --clear 8>&- 9>&- 2>/dev/null || true
+    else
+        wl-copy -t "$prev_type" < "$prev_file" 8>&- 9>&- 2>/dev/null
+    fi
+    rm -f "$prev_file"
     PASTE_STAGED=0
+    exec 8>&- 2>/dev/null
+    return 0
+}
+
+# THE BORROW ALWAYS ENDS.
+#
+# The restore normally happens in the delivery's own housekeeping, a beat after
+# the chord. That is also the one thing a crashed delivery, a hung screenshot,
+# a killed process group or an unexpected early return can skip -- and then the
+# sentence stays on the selection, so the next Ctrl+V anywhere pastes the last
+# thing said out loud instead of what the user copied (reported 2026-11-18).
+#
+# So the borrow arms a guard the moment the chord goes out: a detached sleep
+# that puts the clipboard back if, and only if, the same borrow is still there
+# when it wakes. Both conditions matter -- a newer dictation's sentence, or a
+# copy the user made in between, means this borrow is already over and the
+# guard must do nothing. The guard is cheap (one wl-paste, one stat) and it is
+# the difference between "the clipboard comes back" and "it usually does".
+RESTORE_GUARD_SECONDS="${RESTORE_GUARD_SECONDS:-6}"
+arm_restore_guard() {   # $1 = the sentence just put on the clipboard
+    local backup="$STATE/clipboard-backup" type_file="$STATE/clipboard-backup.type"\
+          ino sentence="${1:-}"
+    [ "$RESTORE_GUARD_SECONDS" != "0" ] || return 0
+    [ -f "$type_file" ] || return 0
+    ino="$(stat -c %i "$backup" 2>/dev/null)"
+    (   exec 9>&- 2>/dev/null
+        sleep "$RESTORE_GUARD_SECONDS"
+        [ -f "$type_file" ] || exit 0
+        [ "$(stat -c %i "$backup" 2>/dev/null)" = "$ino" ] || exit 0
+        [ "$(wl-paste -n -t text/plain 2>/dev/null)" = "$sentence" ] || exit 0
+        restore_clipboard
+    ) >/dev/null 2>&1 &
 }
 
 paste_text() {
@@ -296,12 +349,16 @@ paste_text() {
         rm -f "$prev_file" "$STATE/clipboard-backup.type"
         types="$(wl-paste --list-types 2>/dev/null | grep -vi 'x-kde-passwordManagerHint')"
         prev_type="$(printf '%s' "$types" | head -n1)"
-        if command -v wl-paste >/dev/null && [ -n "$prev_type" ]; then
-            if wl-paste -n -t "$prev_type" > "$prev_file" 2>/dev/null; then
-                printf '%s' "$prev_type" > "$STATE/clipboard-backup.type"
-            else
-                rm -f "$prev_file"
-            fi
+        if command -v wl-paste >/dev/null && [ -n "$prev_type" ] \
+                && wl-paste -n -t "$prev_type" > "$prev_file" 2>/dev/null; then
+            printf '%s' "$prev_type" > "$STATE/clipboard-backup.type"
+        else
+            # An empty clipboard is recorded too (`empty`), not left as "no
+            # type file": the difference between "there was nothing to put
+            # back" and "already put back" has to be readable, or a second
+            # restore pass cannot tell them apart.
+            rm -f "$prev_file"
+            printf '%s' empty > "$STATE/clipboard-backup.type"
         fi
     fi
     # Ask the shell not to announce this clipboard change (nor the restore). It
@@ -370,6 +427,9 @@ paste_text() {
     fi
     PASTE_STAGED=1
     paste_shortcut "${2:-}" || { PASTE_FAIL="no Ctrl+V (ydotoold down and wtype missing?)"; restore_clipboard; return 1; }
+    # From here the sentence is on the selection and the chord is out: the
+    # borrow now has an owner that ends it even if this delivery does not.
+    arm_restore_guard "$1"
     # The chord is out; does the selection still hold the sentence? A competing
     # owner between the copy and the app's read -- another copy, or a clipboard
     # manager re-serving an entry -- is the other way a dictation pastes
@@ -1263,7 +1323,21 @@ finish_raw() {
     # whatever the landed check concluded.
     case "$method" in
         paste*)
+            # How long the sentence must stay on the selection AFTER the chord.
+            #
+            # The chord carries no text: Ctrl+V pastes whatever the selection
+            # holds when the APP reads it, so a restore that runs too early
+            # hands a slow app the user's previous clipboard. That is why this
+            # used to be a flat second.
+            #
+            # But when the landed check says the sentence is already DRAWN in
+            # the window, the app has read the selection by definition and the
+            # extra second buys nothing -- it only widens the window in which a
+            # Ctrl+V somewhere else returns the transcript instead of what the
+            # user copied. So: a short beat for the paint, and the full second
+            # only when the check had no verdict to give.
             local dwell_ms=1000 elapsed_ms=0 pad
+            [ "$landed" = "1" ] && dwell_ms=250
             if [ -n "$paste_sent_ms" ]; then
                 elapsed_ms=$(( $(date +%s%3N) - paste_sent_ms ))
             fi
@@ -1355,7 +1429,13 @@ case "${1:-}" in
     paste) # manual: deliver TEXT the way a finished dictation would, for testing
            # the delivery path without speaking into the microphone.
         [ -n "${2:-}" ] || { echo "usage: dictate.sh paste TEXT" >&2; exit 2; }
-        if paste_text "$2"; then say "manual paste ok"; else
+        if paste_text "$2"; then
+            # Same rule as a real dictation: the sentence is borrowed for the
+            # chord, not left behind for the next Ctrl+V.
+            sleep 0.35
+            restore_clipboard
+            say "manual paste ok"
+        else
             say "manual paste failed: ${PASTE_FAIL:-unknown}"
             printf '%s' "$2" | wtype -
         fi

@@ -770,6 +770,35 @@ Item {
         triggeredOnStart: true
         onTriggered: progressStatusFile.reload()
     }
+    // ── What can become what ───────────────────────────────────────────────
+    //
+    // The Convert rows are built from the converter's own table rather than a
+    // copy of it: one place decides that a PNG can become a PDF and an MP4 can
+    // become an MP3, so a row can never offer something the script refuses.
+    // Read ONCE, at start -- the table is static, and asking per right-click
+    // would be a process per click.
+    readonly property string convertScript: Quickshell.shellPath("scripts/system/convert-file.sh")
+    property var convertMatrix: ({})
+    Process {
+        id: convertFormatsProc
+        running: true
+        command: ["bash", root.convertScript, "--list-json"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const text = String(this.text ?? "").trim();
+                if (text.length === 0) return;
+                try {
+                    const parsed = JSON.parse(text);
+                    if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
+                        root.convertMatrix = parsed;
+                } catch (e) {
+                    // No table, no Convert rows: a menu missing a group is a
+                    // far better failure than a window that will not load.
+                    console.log("[files] convert table unreadable:", e);
+                }
+            }
+        }
+    }
     // ── The launch feedback this window raises (and must end) ─────────────
     //
     // Double-clicking a file hands it to another app, and that was invisible
@@ -1288,6 +1317,27 @@ Item {
                     root.firstLine(shellProc.output), true);
             } else if (String(payload ?? "").length > 0) {
                 root.pendingSelectName = root.baseName(payload);
+                pendingSelectTimer.attempts = 0;
+                pendingSelectTimer.restart();
+            }
+            root.refresh();
+            return;
+        }
+        // A conversion writes a NEW file next to the old one, so the folder has
+        // to be re-read -- and the file it wrote is the one the pointer is
+        // reaching for next, so it lands selected (the helper prints its path).
+        // The OLD file is untouched: this is not a replace, and the same source
+        // can be converted to three formats in a row.
+        if (mode === "convert") {
+            root.statusNote = "";
+            const said = String(shellProc.output ?? "").trim()
+                .split("\n").filter(line => line.trim().length > 0);
+            const made = code === 0 ? String(said[said.length - 1] ?? "").trim() : "";
+            if (made.length === 0) {
+                root.notify(Translation.tr("Could not convert"),
+                    root.firstLine(shellProc.output), true);
+            } else {
+                root.pendingSelectName = root.baseName(made);
                 pendingSelectTimer.attempts = 0;
                 pendingSelectTimer.restart();
             }
@@ -4853,6 +4903,13 @@ Item {
             { id: "compress", label: Translation.tr("Compress to .zip"), icon: "folder_zip", enabled: !root.atThisPc },
             { id: "extractHere", label: Translation.tr("Extract here"), icon: "folder_open", enabled: isZip },
             { id: "extractToFolder", label: Translation.tr("Extract to folder"), icon: "create_new_folder", enabled: isZip },
+            // What this file can BECOME, not a fixed list: the row opens a
+            // second menu of formats built from the file's own suffix (see
+            // convertTargets), so a PNG offers JPG/WebP/AVIF/... and an MP4
+            // offers MKV/WebM/GIF/MP3/..., and a folder or a .txt offers no
+            // row at all rather than a greyed one -- there is no conversion of
+            // a folder, and a dead row under every right-click is furniture.
+            { id: "convertMenu", label: Translation.tr("Convert to…"), icon: "transform", enabled: !isDir && root.convertTargets(p).length > 0 },
 
             // Rename names ONE thing: greyed over a multi-selection rather
             // than renaming only the row under the pointer (see menuTargets).
@@ -4914,6 +4971,54 @@ Item {
         const t = String(target ?? "");
         if (t.length === 0) return root.selection;
         return root.isSelected(t) ? root.selection : [t];
+    }
+    // ── Convert to ──────────────────────────────────────────────────────
+    //
+    // The target list is the helper's own table, read once at start
+    // (convertMatrix). A menu that offers a format the script would refuse is
+    // the one bug worth designing out here, and the way out is to have one
+    // table: scripts/system/convert-file.sh --list-json. Its conversions are
+    // reached from the same table, so the row and the work cannot disagree.
+    function convertTargets(p) {
+        if (root.isDirPath(p)) return [];
+        const m = root.convertMatrix || {};
+        const list = m[root.suffixOf(root.baseName(String(p ?? "")))];
+        return Array.isArray(list) ? list : [];
+    }
+    // The formats, in the shape the menu rows take. The label is the format's
+    // own name as a person writes it (PNG, JPG, TAR.GZ) -- never a translated
+    // noun, because "JPG" is what the file will be called.
+    function convertMenuItems(p) {
+        const want = String(p ?? "");
+        return root.convertTargets(want).map(ext => ({
+            id: "convert:" + ext,
+            label: Translation.tr("Convert to") + " " + String(ext).toUpperCase(),
+            icon: root.convertIcon(ext),
+            enabled: true
+        }));
+    }
+    function convertIcon(ext) {
+        if (ext === "gif") return "gif_box";
+        if (ext === "pdf") return "picture_as_pdf";
+        if (ext === "zip" || ext === "tar.gz") return "folder_zip";
+        if (root.imageExts.indexOf(ext) !== -1) return "image";
+        if (root.videoExts.indexOf(ext) !== -1) return "movie";
+        if (["mp3", "flac", "wav", "ogg", "opus", "m4a", "aac"].indexOf(ext) !== -1) return "music_note";
+        return "transform";
+    }
+    // One file at a time, and the file the pointer is on: a conversion is a
+    // question about ONE format becoming another, and there is no sensible
+    // answer for four files with four different types.
+    function convertFile(p, ext) {
+        const path = String(p ?? "");
+        const to = String(ext ?? "").toLowerCase();
+        if (path.length === 0 || to.length === 0) return;
+        root.statusNote = Translation.tr("Converting…");
+        // `2>&1`: the helper's refusals are the only thing a failed conversion
+        // says about itself, and stderr is not collected by this window's one
+        // command slot -- so it is folded into the stream the handler reads.
+        root.sh("bash " + root.shq(root.convertScript) + " " + root.shq(path) + " " + root.shq(to) + " 2>&1",
+                "convert", "");
     }
     function openMenu(x, y, target) {
         root.menuTarget = String(target ?? "");
@@ -5003,7 +5108,28 @@ Item {
         const id = typeof item === "string" ? item : (item?.id ?? "");
         const target = root.menuTarget;
         const vol = root.volumeByPath(target);
+        // The Convert row is not an action but a SECOND MENU, and it replaces
+        // this one in place: closing and reopening would flash the popup and
+        // move it away from the pointer. A shorter list than the menu it came
+        // from is fine; a longer one has to be pushed back inside the card, or
+        // its last rows are rows nobody can click (see openMenu).
+        if (id === "convertMenu") {
+            const formats = root.convertMenuItems(target);
+            if (formats.length > 0) {
+                root.menuItems = formats;
+                const h = root.menuHeight(formats);
+                const margin = 8;
+                root.menuY = Math.max(margin, Math.min(root.menuY, root.height - h - margin));
+            }
+            return;
+        }
         root.closeMenu();
+        // `convert:<ext>` -- the target format is in the id, so one case covers
+        // every format without a row handler each.
+        if (id.indexOf("convert:") === 0) {
+            if (target) root.convertFile(target, id.slice("convert:".length));
+            return;
+        }
         switch (id) {
         case "openWith": {
             // One file at a time: the chooser is a question about THIS document

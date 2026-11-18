@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=VoiceStudio
+GenericName=AI voice studio
+Comment=Local voice cloning, design, dubbing, dictation and transcription
+Exec=/home/matrix/.local/bin/VoiceStudio %U
+TryExec=/home/matrix/.local/bin/VoiceStudio
+Icon=voicestudio
+Terminal=false
+Categories=AudioVideo;Audio;
+Keywords=voicestudio;voice;cloning;clone;tts;text-to-speech;dub;dubbing;dictation;transcribe;transcription;audiobook;elevenlabs;ai;
+StartupNotify=true
+StartupWMClass=VoiceStudio

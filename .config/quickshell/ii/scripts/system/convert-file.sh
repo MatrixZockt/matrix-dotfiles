@@ -90,8 +90,14 @@ targets_for() {
 have() { command -v "$1" >/dev/null 2>&1; }
 
 OUT=""
+# THE TWO CHANNELS. stdout belongs to the app: PROGRESS lines while it works,
+# and the finished path as the LAST line. stderr is for a person reading a
+# terminal -- and a failure is written to BOTH, because the window reads stdout
+# and a conversion that refused for a reason must not look like one that did
+# nothing.
 fail() {
     echo "$*" >&2
+    printf 'ERROR %s\n' "$*"
     [ -n "$OUT" ] && rm -f "$OUT"
     exit 1
 }
@@ -181,11 +187,83 @@ audio_args() {
     esac
 }
 
+PROGRESS_FILE=""
+# How long the finished file should be, so the encode can be reported as a
+# percentage of it. No answer means no percentage (an MKV with no duration in
+# its header is a real thing) -- the window then shows the job without a number
+# rather than a number that is wrong.
+TOTAL_US=""
+measure_input() {
+    local seconds
+    seconds="$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$IN" 2>/dev/null)"
+    TOTAL_US="$(awk -v s="${seconds:-0}" 'BEGIN { if (s + 0 > 0) printf "%d", s * 1000000 }')"
+}
+
+# ── Running ffmpeg where it can be watched, and stopped ──────────────────
+#
+# In the BACKGROUND, being polled, rather than waited on in the foreground.
+# Both halves are about the same thing: a 20-minute MP4 to WebM is minutes of
+# work, and a window that cannot say how far along it is, or call it off, is a
+# window that looks frozen.
+#
+# `-progress <file>` is ffmpeg's own machine-readable progress: it rewrites
+# out_time_us every half second or so, which is exactly the number this needs
+# (the alternative -- counting frames from the log -- needs to know the frame
+# rate, and lies on a variable-rate file).
+#
+# The trap is why this is a background job and not a pipe: bash only runs a
+# signal trap between commands, so a script blocked waiting on a foreground
+# ffmpeg cannot answer a Cancel until the encode has finished anyway. Waiting
+# in a loop of short sleeps means a TERM is answered within 0.2 s -- kill the
+# encoder, take the half-written file with it, and say so.
 run_ffmpeg() {
     have ffmpeg || fail "ffmpeg is not installed"
-    ffmpeg -hide_banner -loglevel error -nostdin -y "$@" \
-        || fail "ffmpeg could not convert $NAME to .$TO"
+    PROGRESS_FILE="$(mktemp "${TMPDIR:-/tmp}/convert-progress.XXXXXX")" || PROGRESS_FILE=""
+    # An array, not `${X:+-progress "$X"}`: quote removal does not reach inside
+    # a `:+` expansion, so the quotes would arrive at ffmpeg as characters and
+    # it would look for a file whose name starts with a quote.
+    local -a prog=()
+    [ -n "$PROGRESS_FILE" ] && prog=(-progress "$PROGRESS_FILE")
+    ffmpeg -hide_banner -loglevel error -nostdin -y -nostats "${prog[@]}" "$@" "$OUT" &
+    local pid=$! shown=0 pct now
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ -n "$TOTAL_US" ] && [ -s "${PROGRESS_FILE:-/nonexistent}" ]; then
+            now="$(tr '\r' '\n' < "$PROGRESS_FILE" | sed -n 's/^out_time_us=//p' | tail -1)"
+            case "$now" in ''|*[!0-9]*) now=0 ;; esac
+            pct=$(( now * 100 / TOTAL_US ))
+            [ "$pct" -gt 99 ] && pct=99        # 100 means DONE, not nearly
+            if [ "$pct" -gt "$shown" ]; then
+                printf 'PROGRESS %s\n' "$pct"
+                shown=$pct
+            fi
+        fi
+        sleep 0.2
+    done
+    wait "$pid"
+    local rc=$?
+    rm -f "${PROGRESS_FILE:-}"
+    PROGRESS_FILE=""
+    [ "$rc" = 0 ] || fail "ffmpeg could not convert $NAME to .$TO"
 }
+
+# ── A Cancel that cancels ──────────────────────────────────────────────
+#
+# TERM (what the window's Cancel sends) stops the encoder mid-file and deletes
+# what it had written: half an MP4 in the folder is not a converted file, and
+# leaving it would make the next attempt look like a name collision. INT is
+# here because the same script run by hand deserves the same behaviour.
+# HUP is in the list because the window that started this can be CLOSED: the
+# shell goes away, ffmpeg goes away with it, and without this the half-written
+# file is the one thing left behind.
+trap 'pkill -TERM -P $$ 2>/dev/null; rm -f "$OUT" "${PROGRESS_FILE:-}"; echo "cancelled" >&2; exit 130' TERM INT HUP
+
+# Anything below that is not ffmpeg is quick (one ImageMagick pass, or an
+# unpack and a repack): 0 now, 100 when it lands, so the window's line appears
+# and then ends instead of sitting at nothing.
+case "$TO" in
+    mp4|mkv|webm|mov|gif|avi|mp3|wav|flac|m4a|ogg|opus|aac) measure_input ;;
+    *) printf 'PROGRESS 0\n' ;;
+esac
 
 if audio_target "$TO"; then
     # From a video (the picture is dropped) or from another audio file -- one
@@ -257,4 +335,5 @@ fi
 
 [ -s "$OUT" ] || fail "the conversion produced no file"
 
+printf 'PROGRESS 100\n'
 printf '%s\n' "$OUT"

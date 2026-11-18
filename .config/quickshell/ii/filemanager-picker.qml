@@ -497,6 +497,7 @@ PanelWindow {
         function forgetSize(path: string): void { FolderSizes.forget(path); }
         function probeVolumes(): string { return content.probeVolumes(); }
         function probeMenu(): string { return content.probeMenu(); }
+        function probeConvertCancel(): void { content.cancelConvert(); }
         // Where each details row's blank (folder-background) tail begins.
         function probeNameBlank(): string { return content.probeNameBlank(); }
         // The tile cell the grid chose for the pane's width.

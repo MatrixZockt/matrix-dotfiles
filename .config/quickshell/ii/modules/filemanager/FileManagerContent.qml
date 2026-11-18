@@ -779,6 +779,34 @@ Item {
     // would be a process per click.
     readonly property string convertScript: Quickshell.shellPath("scripts/system/convert-file.sh")
     property var convertMatrix: ({})
+    // ── The conversion that is running ────────────────────────────────────
+    // Its own state, and its own process (convertProc below), because a
+    // conversion is the only thing this window starts that can take minutes:
+    // an MP4 to WebM is a real encode. Two things follow from that, and both
+    // are the reason these are not flags on the transfer's state:
+    //
+    //   * it has to be VISIBLE -- a percentage that moves, from the encoder's
+    //     own progress, not a "Converting…" that cannot be told apart from a
+    //     window that died;
+    //   * it has to be STOPPABLE, and stopping it must not stop anything else.
+    property bool convertRunning: false
+    property int convertPercent: 0
+    property string convertLabel: ""     // "big.mp4 → WEBM", for the line
+    property string convertResult: ""    // the helper's last non-progress line
+    property string convertError: ""
+    property bool convertCancelled: false
+    // The conversion itself. A process of its OWN, not the window's shared
+    // `shellProc`: that one slot is restarted by the next sh() call, so any
+    // other action -- a rename, a refresh, a folder read -- used to kill a
+    // running encode mid-file and leave half an MP4 in the folder. Lines are
+    // read as they arrive (SplitParser, like the transfer's), because the
+    // whole point is the number while it is still moving.
+    Process {
+        id: convertProc
+        command: []
+        stdout: SplitParser { onRead: line => root.readConvertLine(String(line ?? "")) }
+        onExited: (code, status) => root.finishConvert(code)
+    }
     Process {
         id: convertFormatsProc
         running: true
@@ -1317,27 +1345,6 @@ Item {
                     root.firstLine(shellProc.output), true);
             } else if (String(payload ?? "").length > 0) {
                 root.pendingSelectName = root.baseName(payload);
-                pendingSelectTimer.attempts = 0;
-                pendingSelectTimer.restart();
-            }
-            root.refresh();
-            return;
-        }
-        // A conversion writes a NEW file next to the old one, so the folder has
-        // to be re-read -- and the file it wrote is the one the pointer is
-        // reaching for next, so it lands selected (the helper prints its path).
-        // The OLD file is untouched: this is not a replace, and the same source
-        // can be converted to three formats in a row.
-        if (mode === "convert") {
-            root.statusNote = "";
-            const said = String(shellProc.output ?? "").trim()
-                .split("\n").filter(line => line.trim().length > 0);
-            const made = code === 0 ? String(said[said.length - 1] ?? "").trim() : "";
-            if (made.length === 0) {
-                root.notify(Translation.tr("Could not convert"),
-                    root.firstLine(shellProc.output), true);
-            } else {
-                root.pendingSelectName = root.baseName(made);
                 pendingSelectTimer.attempts = 0;
                 pendingSelectTimer.restart();
             }
@@ -5009,16 +5016,92 @@ Item {
     // One file at a time, and the file the pointer is on: a conversion is a
     // question about ONE format becoming another, and there is no sensible
     // answer for four files with four different types.
+    //
+    // A second request while one is running is REFUSED, not queued and never
+    // started-on-top: the encoder is the only thing on this machine doing that
+    // work, and starting a second would either fight it for the GPU or (worse)
+    // quietly replace it. The line above the pane says which file is still
+    // going, and its Cancel is one press away.
     function convertFile(p, ext) {
         const path = String(p ?? "");
         const to = String(ext ?? "").toLowerCase();
         if (path.length === 0 || to.length === 0) return;
-        root.statusNote = Translation.tr("Converting…");
-        // `2>&1`: the helper's refusals are the only thing a failed conversion
-        // says about itself, and stderr is not collected by this window's one
-        // command slot -- so it is folded into the stream the handler reads.
-        root.sh("bash " + root.shq(root.convertScript) + " " + root.shq(path) + " " + root.shq(to) + " 2>&1",
-                "convert", "");
+        if (root.convertRunning) {
+            root.statusNote = Translation.tr("Already converting") + " " + root.convertLabel
+                + " — " + Translation.tr("cancel it first");
+            root.ipcSignalToast(Translation.tr("Already converting"), "hourglass_top");
+            return;
+        }
+        root.convertLabel = root.baseName(path) + " → " + to.toUpperCase();
+        root.convertPercent = 0;
+        root.convertResult = "";
+        root.convertError = "";
+        root.convertCancelled = false;
+        root.convertRunning = true;
+        root.statusNote = "";
+        convertProc.command = ["bash", root.convertScript, path, to];
+        convertProc.running = false;
+        convertProc.running = true;
+    }
+    // What the helper says while it works: `PROGRESS <percent>`, `ERROR <why>`,
+    // and the finished path. Anything else is ignored rather than displayed.
+    function readConvertLine(line) {
+        const s = String(line ?? "").trim();
+        if (s.length === 0) return;
+        if (s.indexOf("PROGRESS ") === 0) {
+            const n = Number(s.slice("PROGRESS ".length));
+            if (isFinite(n))
+                root.convertPercent = Math.max(root.convertPercent, Math.max(0, Math.min(100, Math.round(n))));
+            return;
+        }
+        if (s.indexOf("ERROR ") === 0) {
+            root.convertError = s.slice("ERROR ".length).trim();
+            return;
+        }
+        root.convertResult = s;
+    }
+    // Cancel is a signal to the helper, and the helper is what actually stops
+    // the encoder (see its trap): killing the shell alone would leave ffmpeg
+    // writing, and killing ffmpeg alone would leave half a file behind.
+    function cancelConvert() {
+        if (!root.convertRunning) return;
+        root.convertCancelled = true;
+        convertProc.signal(15);
+    }
+    function finishConvert(code) {
+        const cancelled = root.convertCancelled;
+        const made = String(root.convertResult ?? "").trim();
+        const why = String(root.convertError ?? "").trim();
+        const label = root.convertLabel;
+        root.convertRunning = false;
+        root.convertCancelled = false;
+        root.convertPercent = 0;
+        root.convertLabel = "";
+        root.convertResult = "";
+        root.convertError = "";
+        // The note goes AFTER the refresh, not before: re-reading the folder
+        // clears the status line on its way in (refresh() drops a note that
+        // belonged to the folder it is leaving), so a message set first is a
+        // message nobody ever sees.
+        if (cancelled) {
+            // The helper already removed what it had written: the folder is as
+            // it was, and saying so is the whole difference between "cancelled"
+            // and "disappeared".
+            root.refresh();
+            root.statusNote = Translation.tr("Conversion cancelled") + " · " + label;
+            return;
+        }
+        if (Number(code) !== 0 || made.length === 0) {
+            root.refresh();
+            root.notify(Translation.tr("Could not convert"),
+                why.length > 0 ? why : root.firstLine(label), true);
+            return;
+        }
+        root.pendingSelectName = root.baseName(made);
+        pendingSelectTimer.attempts = 0;
+        pendingSelectTimer.restart();
+        root.refresh();
+        root.statusNote = Translation.tr("Converted") + " · " + root.baseName(made);
     }
     function openMenu(x, y, target) {
         root.menuTarget = String(target ?? "");
@@ -6272,6 +6355,8 @@ Item {
         // painted over the name, so the bar has to grow by exactly its height
         // while it is up and shrink back when the copy ends.
         + (root.transferRunning ? root.transferLineHeight : 0)
+        // The conversion's line is a row of the same kind, for the same reason.
+        + (root.convertRunning ? root.transferLineHeight : 0)
     // The strip's own bottom edge to the bar's rectangle: where the tab
     // baseline hairline hangs (see tabBaseline in the address bar). ONE name
     // for both, so the line can never drift away from the margin it marks.
@@ -7143,6 +7228,91 @@ Item {
                             width: parent.width * root.transferFraction
                             color: Appearance.colors.colPrimary
                             Behavior on width { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+                        }
+                    }
+                }
+
+                // ── The conversion line ─────────────────────────────────
+                // The shape of the transfer's line, because it answers the same
+                // question -- how much longer? -- for the one other job that
+                // can take minutes. The number is the ENCODER'S own, read from
+                // ffmpeg's progress, and the Cancel beside it is the only way
+                // out of a 20-minute WebM that was a mistake.
+                Item {
+                    id: convertLine
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: root.convertRunning ? root.transferLineHeight : 0
+                    visible: root.convertRunning
+                    implicitHeight: root.transferLineHeight
+
+                    StyledText {
+                        anchors.left: parent.left
+                        anchors.leftMargin: 10
+                        anchors.right: convertCancel.left
+                        anchors.rightMargin: 12
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.verticalCenterOffset: -1
+                        text: Translation.tr("Converting") + " " + root.convertLabel
+                        font.pixelSize: Appearance.font.pixelSize.smallest
+                        font.letterSpacing: 1.2
+                        font.weight: Font.Medium
+                        color: Appearance.colors.colSubtext
+                        elide: Text.ElideMiddle
+                    }
+                    Rectangle {
+                        id: convertCancel
+                        anchors.right: convertPercent.left
+                        anchors.rightMargin: 12
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: convertCancelLabel.implicitWidth + 16
+                        height: 14
+                        radius: 7
+                        color: convertCancelMouse.containsMouse ? Appearance.colors.colPrimary : "transparent"
+                        border.width: 1
+                        border.color: Appearance.colors.colOutlineVariant
+                        StyledText {
+                            id: convertCancelLabel
+                            anchors.centerIn: parent
+                            text: Translation.tr("Cancel")
+                            font.pixelSize: Appearance.font.pixelSize.smallest
+                            font.letterSpacing: 1.2
+                            font.weight: Font.Medium
+                            color: convertCancelMouse.containsMouse
+                                ? Appearance.colors.colOnPrimary : Appearance.colors.colSubtext
+                        }
+                        MouseArea {
+                            id: convertCancelMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.cancelConvert()
+                        }
+                    }
+                    StyledText {
+                        id: convertPercent
+                        anchors.right: parent.right
+                        anchors.rightMargin: 10
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.verticalCenterOffset: -1
+                        text: root.convertPercent + "%"
+                        font.pixelSize: Appearance.font.pixelSize.smallest
+                        font.letterSpacing: 1.2
+                        font.weight: Font.Medium
+                        color: Appearance.colors.colOnLayer0
+                    }
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        height: 2
+                        color: Appearance.colors.colOutlineVariant
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            width: parent.width * (root.convertPercent / 100)
+                            color: Appearance.colors.colPrimary
+                            Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
                         }
                     }
                 }
@@ -11854,6 +12024,14 @@ Item {
                 + "/" + root.hotplugRefreshes,
             statusNote: root.statusNote,
             statusError: root.statusError,
+            // The conversion, as the line above the pane draws it: running, how
+            // far the encoder says it is, and which file that is. A job nobody
+            // can see the state of is the bug this answers.
+            convert: {
+                running: root.convertRunning,
+                percent: root.convertPercent,
+                label: root.convertLabel
+            },
             // The bottom bar as it is DRAWN: the sentence, its colour and the
             // error glyph, so "it said something" is a check on the line that
             // is on screen rather than on a property that may not be bound.

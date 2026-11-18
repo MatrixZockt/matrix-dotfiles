@@ -397,6 +397,7 @@ Window {
         }
         function probeFocusActivate(): void { content.activateFocus(); }
         function probeMenu(): string { return content.probeMenu(); }
+        function probeConvertCancel(): void { content.cancelConvert(); }
         // Where each details row's blank (folder-background) tail begins.
         function probeNameBlank(): string { return content.probeNameBlank(); }
         // The right-click menu on the blank tail of <name> as it is composed:

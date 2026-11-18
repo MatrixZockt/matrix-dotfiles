@@ -9,7 +9,12 @@
 # Every launch is a NEW WINDOW and a NEW process, exactly like Files, so the
 # editor has ordinary window behaviour: two documents side by side are two
 # windows, SUPER+Q closes the one you are in, and the compositor can tile them.
-# There is no instance lookup and no IPC press for that reason.
+# There is no instance lookup and no IPC press for that reason -- but there IS a
+# warm copy, for the same reason Files has one: a cold editor cost 816-1376 ms on
+# this machine, nearly all of it its own QML. warm.sh keeps one constructed,
+# never-shown copy and this claims it (a map, not a load), then preloads the next
+# one. A spare that is never claimed quits after half an hour (the Timer in
+# texteditor.qml), so an editor you are not using costs nothing.
 #
 # The editor is started detached from whoever called (a file manager, a browser
 # download, a terminal), because closing the caller must not close the document.
@@ -20,6 +25,9 @@ shell_dir="$(dirname "$(dirname "$(dirname "$script_path")")")"
 qml_path="$shell_dir/texteditor.qml"
 shell="$(basename "$shell_dir")"
 
+source "$shell_dir/scripts/launch/warm.sh"
+warm_setup "$shell_dir" editor "$qml_path"
+
 # ── Optional file argument ───────────────────────────────────────────────────
 # A file:// URI is decoded first (`%20`, and non-ASCII percent-encoded bytes),
 # which is how every freedesktop caller spells a path.
@@ -29,6 +37,20 @@ case "$want" in
 esac
 if [ -n "$want" ]; then
     want="$(printf '%s' "$want" | python3 -c 'import sys,urllib.parse;print(urllib.parse.unquote(sys.stdin.read()),end="")' 2>/dev/null || printf '%s' "$want")"
+fi
+
+# ── The warm path ──────────────────────────────────────────────────────────
+# `preloadOpen` maps the spare and loads the file into it, all in the process
+# that is already constructed. "-" is "no file, a new empty document": an empty
+# argument is not something the ipc CLI carries reliably.
+#
+# On success the window is a WINDOW of this launch like any other (SUPER+Q, the
+# tiler, its own pid); the replacement spare is started in the background as the
+# launch answers, so the next one is instant too. A claim that fails (no spare,
+# a competing launch took it, it died) falls through to the cold path below.
+if warm_claim preloadOpen "${want:--}"; then
+    warm_spawn
+    exit 0
 fi
 
 # Its output goes to a log rather than to the void, so a failed launch can say
@@ -66,18 +88,6 @@ listening() {
     [ -n "${1:-}" ] && qs ipc --pid "$1" call editor ping >/dev/null 2>&1
 }
 
-window_on_screen() {
-    command -v hyprctl >/dev/null 2>&1 || return 0
-    timeout 3 hyprctl clients -j 2>/dev/null | python3 -c '
-import json, sys
-want = int(sys.argv[1])
-try:
-    clients = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-sys.exit(0 if any(c.get("pid") == want for c in clients) else 1)' "${1:?}" 2>/dev/null
-}
-
 seen_pid=""
 nothing_on_screen=""
 deadline=$((SECONDS + 60))
@@ -87,7 +97,7 @@ while [ "$SECONDS" -lt "$deadline" ]; do
     [ -n "$pid" ] && seen_pid="$pid"
     if [ -n "$pid" ] && listening "$pid"; then
         for _ in $(seq 1 25); do
-            window_on_screen "$pid" && exit 0
+            warm_on_screen "$pid" && { warm_spawn; exit 0; }
             sleep 0.2
         done
         nothing_on_screen="$pid"

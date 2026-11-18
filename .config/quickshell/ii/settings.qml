@@ -265,7 +265,14 @@ Window {
     // behaviour change. (Same dead binding exists in RecordingPill.qml and
     // WaffleNotificationPopup.qml, both panels pinned to one screen anyway.)
     color: "transparent"
-    visible: true
+    // ── Warm start: this copy may be a PRELOAD ──────────────────────────
+    // A preloaded instance (scripts/launch/settings.sh, through warm.sh) is a
+    // fully constructed settings app whose window has never been mapped. A cold
+    // start measured ~1.0 s on this machine; the map is all that is left. It is
+    // only ever reached when nothing is on screen -- a window the user has is
+    // still talked to over IPC instead -- so "one settings app" is unchanged.
+    readonly property bool preloaded: Quickshell.env("II_SETTINGS_PRELOAD") === "1"
+    visible: !root.preloaded
     title: root.appTitle
     width: 920
     height: 700
@@ -289,6 +296,20 @@ Window {
         MaterialThemeLoader.reapplyTheme()
         Config.readWriteDelay = 0 // Settings app always only sets one var at a time so delay isn't needed
         root.goToPage(SettingsNav.requestedPage)
+    }
+
+    // ── A spare nobody claims goes away ─────────────────────────────────
+    // Same bound as the editor's: one hidden copy is kept so "open Settings" is
+    // a map, and an unclaimed one quits after half an hour instead of holding a
+    // process (with its `nmcli monitor` children) for the rest of the session.
+    // `visible` is the claim, so the timer only ever runs on a spare.
+    // `II_SETTINGS_SPARE_MS` exists so the timer can be tested in seconds rather
+    // than by waiting half an hour, and so a session can shorten or lengthen it
+    // without an edit. Unset = 30 min.
+    Timer {
+        interval: Number(Quickshell.env("II_SETTINGS_SPARE_MS") ?? 1800000)
+        running: root.preloaded && !root.visible
+        onTriggered: Qt.quit()
     }
 
     // The first half of the reuse in scripts/launch/settings.sh: a copy of the
@@ -326,6 +347,27 @@ Window {
             if (root.taskManagerMode)
                 root.convertBackToSettings();
             SettingsNav.request(page, section);
+        }
+
+        // ── The one verb a PRELOADED copy answers ────────────────────────
+        // Map this window on the page that was asked for. The page travels over
+        // IPC rather than in the environment because this process was started
+        // before the request that wants it (QS_SETTINGS_PAGE was never set for
+        // it). "-" means "no page asked for" -- an empty argument is not
+        // something the ipc CLI can be relied on to carry.
+        //
+        // "already" is the answer that keeps a competing launch honest: it found
+        // a copy a moment after that copy was claimed, and the launcher starts
+        // its own window rather than handing back this one.
+        function preloadOpen(page: string, section: string): string {
+            if (root.visible) return "already";
+            const p = String(page ?? "").trim();
+            const s = String(section ?? "").trim();
+            if (root.taskManagerMode)
+                root.convertBackToSettings();
+            SettingsNav.request(p === "-" ? "" : p, s === "-" ? "" : s);
+            root.visible = true;
+            return "ok";
         }
 
         // Close the app from outside. The launcher uses this to replace a copy it

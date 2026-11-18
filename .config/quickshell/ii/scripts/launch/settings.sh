@@ -32,6 +32,9 @@ shell_dir="$(dirname "$(dirname "$(dirname "$script_path")")")"
 qml_path="$shell_dir/settings.qml"
 shell="$(basename "$shell_dir")"
 
+source "$shell_dir/scripts/launch/warm.sh"
+warm_setup "$shell_dir" settings "$qml_path"
+
 page="${1:-}"
 section="${2:-}"
 
@@ -89,6 +92,37 @@ if [ -z "${SETTINGS_LAUNCH_LOCKED:-}" ] && command -v flock >/dev/null 2>&1; the
     fi
     SETTINGS_LAUNCH_LOCKED=1
 fi
+
+# ── A copy the user can SEE comes first ────────────────────────────────────
+# A preloaded copy has no window yet, so "a settings process exists" is not "the
+# app is open" any more. Only a pid the compositor has a window for is talked to
+# here; a hidden spare is claimed below instead, and a spare that is talked to
+# with `open` would answer happily and stay invisible.
+for pid in $(settings_pids); do
+    warm_on_screen "$pid" || continue
+    if qs ipc --pid "$pid" call settings open "$page" "$section" >/dev/null 2>&1; then
+        answer
+        exit 0
+    fi
+done
+
+# ── THE WARM PATH ──────────────────────────────────────────────────────────
+# Nothing is on screen: claim the spare, which maps the window on the page that
+# was asked for, and preload the next one as this answers. "-" is "no page asked
+# for" -- an empty argument is not something the ipc CLI carries reliably.
+if warm_claim preloadOpen "${page:--}" "${section:--}"; then
+    answer
+    warm_spawn
+    exit 0
+fi
+
+# A claim that could not confirm a window leaves nothing usable: that copy answers
+# IPC but will not map, and the cold path below would mistake it for the launch
+# (it is listening, so the wait would end "opened" over an empty screen).
+for stale in $(settings_pids); do
+    warm_is_spare "$stale" || continue
+    kill "$stale" 2>/dev/null
+done
 
 pid="$(settings_pid)"
 if [ -n "$pid" ]; then
@@ -172,6 +206,7 @@ while [ "$SECONDS" -lt "$deadline" ]; do
     [ -n "$pid" ] && seen_pid="$pid"
     if listening "$pid"; then
         answer
+        warm_spawn
         if [ -n "$page" ]; then
             qs ipc --pid "$pid" call settings open "$page" "$section" >/dev/null 2>&1
         fi

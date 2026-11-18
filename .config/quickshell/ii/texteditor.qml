@@ -50,7 +50,16 @@ Window {
     id: root
 
     color: "transparent"
-    visible: true
+    // ── Warm start: this copy may be a PRELOAD ──────────────────────────
+    // A preloaded instance (scripts/launch/texteditor.sh, through warm.sh) is a
+    // fully constructed editor whose window has never been mapped: the QML, the
+    // theme and the services have all been paid for, and a launch only has to
+    // map it. Measured on this machine: 816-1376 ms from keypress to a window
+    // cold, and the map is all that is left here. It keeps being a NEW window
+    // per launch -- the spare has never been on screen, so claiming it is not
+    // raising an editor somebody is already using.
+    readonly property bool preloaded: Quickshell.env("II_EDITOR_PRELOAD") === "1"
+    visible: !root.preloaded
     width: 940
     height: 700
     minimumWidth: 420
@@ -246,6 +255,22 @@ Window {
         const start = String(Quickshell.env("II_EDITOR_FILE") ?? "");
         if (start.length > 0)
             root.loadPath(start);
+    }
+
+    // ── A spare nobody claims goes away ─────────────────────────────────
+    // The launcher keeps one hidden copy so the next launch is a map, and this
+    // is the bound on what that costs: a spare that has been sitting unclaimed
+    // for half an hour quits, so an app you are not using stops holding a
+    // process (and the next launch is simply cold once, then warm again). The
+    // timer stops the moment the window is claimed -- `visible` is the claim --
+    // and never runs in an ordinary, visible editor.
+    // `II_EDITOR_SPARE_MS` exists so the timer can be tested in seconds rather
+    // than by waiting half an hour (`II_EDITOR_SPARE_MS=2000 texteditor.sh spare`),
+    // and so a session can shorten or lengthen it without an edit. Unset = 30 min.
+    Timer {
+        interval: Number(Quickshell.env("II_EDITOR_SPARE_MS") ?? 1800000)
+        running: root.preloaded && !root.visible
+        onTriggered: Qt.quit()
     }
 
     // ── Reading ─────────────────────────────────────────────────────────
@@ -1078,6 +1103,22 @@ Window {
     IpcHandler {
         target: "editor"
         function ping(): string { return "editor"; }
+        // ── The one verb a PRELOADED copy answers ────────────────────────
+        // Map this window, with `path` loaded when one is given ("" = a new
+        // empty document). The file travels over IPC rather than in the
+        // environment because this process was started long before the request
+        // that wants it, so II_EDITOR_FILE was never set for it.
+        //
+        // "already" is what keeps two quick launches honest: the second found a
+        // spare that a competing launch had just claimed, and the launcher's
+        // answer there is its own window rather than that one again.
+        function preloadOpen(path: string): string {
+            if (root.visible) return "already";
+            const start = String(path ?? "").trim();
+            root.visible = true;
+            if (start.length > 0 && start !== "-") root.loadPath(start);
+            return "ok";
+        }
         function openPath(path: string): void { root.loadPath(path); }
         function probeState(): string {
             return JSON.stringify({

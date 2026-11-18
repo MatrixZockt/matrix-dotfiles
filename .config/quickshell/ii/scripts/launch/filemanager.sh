@@ -78,118 +78,26 @@ if [ "${1:-}" = "picker" ]; then
       exec setsid qs -p "$picker_qml_path" >>"$picker_log" 2>&1
 fi
 
-spare_log="${XDG_RUNTIME_DIR:-/tmp}/ii-${shell}-files-spare.log"
-# The spare's pid, written by the spare ITSELF (see `spare` mode below). The
-# alternative -- scanning /proc for a process whose environment says PRELOAD --
-# worked and cost 60 ms of the press: two forks per candidate (tr + grep) over
-# every qs on the machine. A press is a menu-speed gesture, so the pid is a file
-# here and the /proc read is spent on ONE pid to verify it is still the spare
-# (see spare_pid) instead of on all of them.
-spare_file="${XDG_RUNTIME_DIR:-/tmp}/ii-${shell}-files-spare.pid"
-
-# ── Which windows does the compositor have on screen, by pid? ────────────────
-# One read, reused by everything below: it is both "what is on screen" (the
-# launch check) and "which preloaded copy is still HIDDEN" (the spare list) --
-# a claimed spare is a normal window whose environment still says PRELOAD, so
-# the environment alone would keep counting it as available.
-window_pids() {
-    command -v hyprctl >/dev/null 2>&1 || return 0
-    timeout 3 hyprctl clients -j 2>/dev/null | python3 -c '
-import json, sys
-try:
-    clients = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-print(" ".join(str(c.get("pid")) for c in clients))'
-}
-
-# ── Is the recorded spare still a spare? ────────────────────────────────────
-# A pid file on its own would be a lie after a reboot, a kill -9 or a session
-# that reused the number, so the file is only a HINT: the answer comes from that
-# one process's own /proc environment. II_FILES_PRELOAD says it was started as a
-# spare and II_FILES_SPARE says it is THIS shell's (a second checkout, or a
-# differently-named config, never claims this one's). A claimed spare keeps both
-# variables for the rest of its life, which is fine: `preloadOpen` answers
-# "already" for it, and the launcher's reply to that is its own window.
-spare_pid() {
-    local pid
-    [ -r "$spare_file" ] || return 1
-    pid="$(cat "$spare_file" 2>/dev/null)"
-    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-    kill -0 "$pid" 2>/dev/null || return 1
-    tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null \
-        | grep -Fqx "II_FILES_PRELOAD=1" || return 1
-    tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null \
-        | grep -Fqx "II_FILES_SPARE=${shell_dir}" || return 1
-    printf '%s\n' "$pid"
-}
-
-# ── Preload one hidden copy, at most one ────────────────────────────────────
-# Detached from this script's death (setsid) and from its stdout: a spare is
-# alive for as long as nobody wants it, which is usually longer than the launch
-# that started it. `exec` at the end of `spare` mode is what keeps a wrapper bash
-# out of the process list -- the spare IS the qs process.
-# ── One spare, never two ─────────────────────────────────────────────────────
-# The pid file is the fast path (that is all a press uses), and this scan is the
-# BACKSTOP: after a claim that could not be confirmed, the file has been dropped
-# but the process may still be alive and hidden. Spawning on top of one would
-# leave two idle 130 MB copies for the rest of the session, so the backstop looks
-# for a live preloaded process of this shell with no window on screen and adopts
-# it -- by writing its pid back -- instead of starting another. It runs after the
-# press is already answered (or on the cold path's way out), so its cost is not
-# a press's cost.
-spawn_spare() {
-    local candidate on_screen
-    [ -n "$(spare_pid)" ] && return 0
-    on_screen=" $(window_pids) "
-    for candidate in $(pgrep -x qs); do
-        tr '\0' '\n' < "/proc/$candidate/environ" 2>/dev/null \
-            | grep -Fqx "II_FILES_PRELOAD=1" || continue
-        tr '\0' '\n' < "/proc/$candidate/environ" 2>/dev/null \
-            | grep -Fqx "II_FILES_SPARE=${shell_dir}" || continue
-        case "$on_screen" in *" $candidate "*) continue ;; esac
-        printf '%s\n' "$candidate" > "$spare_file" 2>/dev/null
-        return 0
-    done
-    II_FILES_PRELOAD=1 II_FILES_SPARE="$shell_dir" \
-        setsid sh -c 'echo $$ > "$1"; exec qs -p "$2"' sh "$spare_file" "$qml_path" \
-        >>"$spare_log" 2>&1 </dev/null &
-    return 0
-}
+# ── The warm copy ───────────────────────────────────────────────────────────
+# The pid file, the /proc verification of it, the backstop that adopts a hidden
+# copy instead of stacking a second one, and the claim itself all live in one
+# shared file now (warm.sh), because Files, Text Editor and Settings use the same
+# mechanism and one copy of that reasoning is worth more than three that agree
+# until one of them is edited. Same file names it had before, so a spare that is
+# already running is still found.
+source "$shell_dir/scripts/launch/warm.sh"
+warm_setup "$shell_dir" files "$qml_path"
 
 if [ "${1:-}" = "spare" ]; then
-    if [ -n "$(spare_pid)" ]; then
-        exit 0                     # idempotent: a reload must not stack one
-    fi
-    export II_FILES_PRELOAD=1 II_FILES_SPARE="$shell_dir"
-    # `$$` is written by the process that then BECOMES qs (exec keeps the pid),
-    # so the file names the qs process exactly -- no guessing, no `$!` of a
-    # wrapper that has already exited.
-    exec setsid sh -c 'echo $$ > "$1"; exec qs -p "$2"' sh "$spare_file" "$qml_path" \
-        >>"$spare_log" 2>&1 </dev/null
+    # Idempotent (a config reload must not stack one), and it `exec`s, so the pid
+    # the spare writes is the qs process's own.
+    warm_exec_spare
 fi
 
-# ── Is this pid's WINDOW on screen? Asked of the compositor, not of the app ──
-# Answering IPC and being on screen are two different moments, and this script
-# used to call the first one success: in the old WINDOW form the app could map
-# and then be closed a second later (its process warm, its IPC answering, its
-# screen empty) in 3 of 5 launches -- "sometimes opens invisible". The
-# compositor lists this instance's pid for its window, so that is what is asked,
-# and nothing else. `timeout` because a wedged compositor socket must not hang a
-# launcher; no hyprctl at all (another session, another compositor) leaves the
-# check as it was rather than failing for a reason that has nothing to do with
-# the app.
-window_on_screen() {
-    command -v hyprctl >/dev/null 2>&1 || return 0
-    timeout 3 hyprctl clients -j 2>/dev/null | python3 -c '
-import json, sys
-want = int(sys.argv[1])
-try:
-    clients = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-sys.exit(0 if any(c.get("pid") == want for c in clients) else 1)' "${1:?}" 2>/dev/null
-}
+# `warm_on_screen` (warm.sh) is the compositor check this script used to keep
+# here: answering IPC and being on screen are two different moments, and a
+# launcher that called the first one success reported "opened" over an empty
+# screen ("sometimes opens invisible", 3 of 5 launches in the old window form).
 
 # ── Optional folder argument ─────────────────────────────────────────────
 # A path (or file:// URL -- that is what a freedesktop caller passes) is decoded
@@ -224,50 +132,26 @@ fi
 
 # ── THE WARM PATH: claim the spare ──────────────────────────────────────────
 # `preloadOpen` maps the window and navigates it, all in the process that is
-# already loaded. The answer is read, not assumed: "ok" is a spare that was
-# still hidden, "already" is one a competing press claimed a moment earlier (and
-# starting a second window is the correct answer there, not showing that one
-# again), and no answer at all is a spare that has died since the pid was read.
+# already loaded. warm_claim reads the answer instead of assuming it: "ok" is a
+# spare that was still hidden, "already" is one a competing press claimed a
+# moment earlier (and starting a second window is the correct answer there, not
+# showing that one again), and no answer at all is a spare that has died since
+# the pid was read.
 #
 # A file to REVEAL is handed over as its path: the app's own openPath decides
 # folder-vs-file (it is the same function the desktop entry and the portal
 # already drive), and doing it there keeps one implementation of "reveal" rather
 # than a second one in bash that has to agree about selection.
-warm_claim() {
-    local pid answer
-    pid="$(spare_pid)"
-    [ -n "$pid" ] || return 1
-    if [ -n "$want_reveal" ]; then
-        answer="$(qs ipc --pid "$pid" call files preloadOpen "$want_reveal" 2>/dev/null)" || return 1
-    else
-        answer="$(qs ipc --pid "$pid" call files preloadOpen "${want_path:--}" 2>/dev/null)" || return 1
-    fi
-    if [ "$answer" != "ok" ]; then
-        # Not a spare any more (a competing press claimed it), or the pid file
-        # outlived the process it named. Either way this file no longer
-        # describes a hidden copy, and leaving it would make every future spawn
-        # think one already exists.
-        rm -f "$spare_file"
-        return 1
-    fi
-    # Consumed: from here on this process is an ordinary Files window, and the
-    # replacement spare is the spawn below. Dropping the file is what says so.
-    rm -f "$spare_file"
-    # The map is the only thing left to wait for, and it is short: a second (50 x
-    # 20 ms) is already generous for a constructed window, and it is bounded so a
-    # spare that answers but never maps falls through to a cold start instead of
-    # hanging the key.
-    for _ in $(seq 1 50); do
-        window_on_screen "$pid" && return 0
-        sleep 0.02
-    done
-    return 1
-}
-
-if warm_claim; then
+claim_status=1
+if [ -n "$want_reveal" ]; then
+    warm_claim preloadOpen "$want_reveal" && claim_status=0
+else
+    warm_claim preloadOpen "${want_path:--}" && claim_status=0
+fi
+if [ "$claim_status" -eq 0 ]; then
     # Replace what was just used, in the background: the press is already
     # answered, and the next one has to be instant too.
-    spawn_spare
+    warm_spawn
     exit 0
 fi
 
@@ -336,7 +220,7 @@ while [ "$SECONDS" -lt "$deadline" ]; do
         # frame, and it is bounded so that "answers but draws nothing" is
         # reported instead of waited on forever.
         for _ in $(seq 1 25); do
-            window_on_screen "$pid" && { spawn_spare; exit 0; }
+            warm_on_screen "$pid" && { warm_spawn; exit 0; }
             sleep 0.2
         done
         nothing_on_screen="$pid"

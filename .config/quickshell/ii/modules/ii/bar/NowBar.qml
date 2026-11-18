@@ -1423,20 +1423,19 @@ Item {
                         }
                     }
 
-                    // "Private": this dictation is being transcribed on THIS
-                    // machine, not on the server -- no internet, the free tier
-                    // spent, or the key refused. Shown only while such a
-                    // dictation is on screen, and only when it really happened:
-                    // a badge for "the internet is down" would be a permanent
-                    // complaint instead of a fact about this take.
+                    // "Private": every dictation is transcribed by the warm
+                    // whisper.cpp server on 127.0.0.1 -- the words never leave
+                    // the machine. It used to mean "this one fell back"; the
+                    // cloud path and its key were removed on 2026-11-18, so the
+                    // badge now says what is always true.
                     Row {
                         anchors.verticalCenter: parent.verticalCenter
                         spacing: 4
-                        visible: Dictation.privateFallback
+                        visible: Dictation.privateTranscription
 
                         MaterialSymbol {
                             anchors.verticalCenter: parent.verticalCenter
-                            text: "wifi_off"
+                            text: "lock"
                             iconSize: 13
                             color: Appearance.colors.colOnSurfaceVariant
                         }

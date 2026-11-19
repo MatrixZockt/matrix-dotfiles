@@ -712,6 +712,19 @@ Singleton {
                 // launcher's right-click menu, read by
                 // services/Notifications.qml.
                 property list<string> soundMutedApps: []
+                // ── Do not disturb ──
+                // The whole-desktop switch, stored HERE rather than in
+                // services/Notifications.qml, because Settings is a separate
+                // process: the config file is the only thing the two can
+                // share (the same channel mutedApps uses).
+                property bool doNotDisturb: false
+                // When DND switches itself off, as an epoch-ms deadline.
+                // 0 means "until turned off by hand".
+                property real dndUntil: 0
+                // The window the user picked, in minutes; 0 = no timer. Kept
+                // apart from the deadline so the choice survives an expiry
+                // (and a Settings reopen) instead of drifting with the clock.
+                property int dndDurationMin: 0
                 property JsonObject monitor: JsonObject {
                     property bool enable: false
                     property string name: "" // Name of the monitor to show notifications on, like "eDP-1". Find out with 'hyprctl monitors' command

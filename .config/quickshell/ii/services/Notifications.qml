@@ -107,7 +107,61 @@ Singleton {
         }
     }
 
-    property bool silent: false
+    // ── Do not disturb ──────────────────────────────────────────────────
+    //
+    // The switch lives in the CONFIG file, not in this singleton's memory,
+    // because the Settings app is a different process with no way to call
+    // into the shell. Writing there and reading the config watch here is the
+    // only channel the two share (the same one `mutedApps` uses).
+    //
+    // It can also switch itself off: `dndUntil` is an epoch-ms deadline and
+    // `dndClock` advances through a timer while a deadline is set, so
+    // `silent` re-evaluates on its own. A deadline is a promise -- "quiet for
+    // the next hour" must not leave the desktop silent until the next login.
+    readonly property bool dndOn: Config?.options.notifications.doNotDisturb ?? false
+    readonly property real dndUntil: Config?.options.notifications.dndUntil ?? 0
+    readonly property int dndDurationMin: Config?.options.notifications.dndDurationMin ?? 0
+    property real dndClock: Date.now()
+    readonly property bool silent: NotificationUtils.dndActive(root.dndOn, root.dndUntil, root.dndClock)
+    // Date.now(), not `dndClock`: the clock above only advances while a timer
+    // is running, and reporting "64 s left" for a 4 s deadline because the
+    // last tick predates the switch is exactly the kind of readout that makes
+    // a working feature look broken.
+    readonly property real dndRemainingMs: root.dndUntil > 0 ? Math.max(0, root.dndUntil - Date.now()) : 0
+
+    function setDoNotDisturb(enabled, durationMin) {
+        const notifications = Config.options.notifications;
+        const minutes = Number(durationMin ?? root.dndDurationMin) || 0;
+        notifications.dndDurationMin = minutes;
+        notifications.doNotDisturb = enabled;
+        notifications.dndUntil = enabled
+            ? NotificationUtils.dndDeadline(minutes, Date.now())
+            : 0;
+        root.dndClock = Date.now();
+    }
+
+    function toggleDoNotDisturb() {
+        root.setDoNotDisturb(!root.silent, root.dndDurationMin);
+    }
+
+    // A stale clock must not outlive the switch: an externally-set DND (the
+    // Settings app, a hand edit) never calls setDoNotDisturb(), so the moment
+    // the setting flips is also when the clock has to be re-stamped.
+    onDndOnChanged: root.dndClock = Date.now()
+
+    Timer {
+        // Only while DND is on: an ordinary desktop needs no wake-ups, and the
+        // deadline check below is the only thing here that has to be timely.
+        interval: 5000
+        repeat: true
+        running: root.dndOn
+        onTriggered: {
+            root.dndClock = Date.now();
+            if (root.dndUntil > 0 && root.dndClock >= root.dndUntil)
+                root.setDoNotDisturb(false, root.dndDurationMin);
+        }
+    }
+
     property int unread: 0
     property var filePath: Directories.notificationsPath
     property list<Notif> list: []
@@ -666,6 +720,10 @@ Singleton {
 
     function playNotificationSound(notification) {
         if (!(Config?.options.notifications.sound ?? true)) return;
+        // Do not disturb has to include the chime. A "quiet" switch that still
+        // rings at every mail arrival is not quiet; the notification is still
+        // collected in the sidebar, it just makes no noise.
+        if (root.silent) return;
         const appName = String(notification?.appName ?? "");
         if (root.ownSoundAppNames.indexOf(appName) >= 0)
             return;
@@ -689,11 +747,18 @@ Singleton {
     // certain apps", with a way to see what each app was allowed and what it
     // was blocked from.
     //
-    // A muted app gets no popup, no chime and no card in the notification
-    // centre -- the three things a notification IS here. It is not dropped
-    // silently, though: `recordApp` counts it, so the Settings page can say
-    // "12 blocked" and show the last summary it swallowed, which is the
-    // difference between "muted" and "broken" when a mail client goes quiet.
+    // A muted app gets no popup and no card in the notification centre -- the
+    // two things a notification IS here. The CHIME still plays: asked for
+    // 2026-11-19, "turn the notification off for that app but keep the
+    // notification sound from the PC working" -- hiding an app's banners must
+    // not take the desktop's own sound with it. An app whose chime should also
+    // go has the narrower `soundMutedApps` switch below; together the two can
+    // still make an app completely silent.
+    //
+    // It is not dropped silently, though: `recordApp` counts it, so the
+    // Settings page can say "12 blocked" and show the last summary it
+    // swallowed, which is the difference between "muted" and "broken" when a
+    // mail client goes quiet.
     //
     // DND (`silent`, above) is still the whole-desktop switch; this is per app
     // and persists in the config file.
@@ -858,12 +923,15 @@ Singleton {
             notification.tracked = true
             // ── A muted app stops here ─────────────────────────────────
             //
-            // Counted, then dismissed: no popup, no chime, no card. The
-            // sender is told the notification is gone (dismiss watches the
-            // DBus NotificationClosed signal) instead of being left to
-            // believe a card is waiting to be read.
+            // Counted, chime, then dismissed: no popup and no card, but the
+            // PC's notification sound still plays for this app (muting its
+            // banners must not take the sound with it). The sender is told the
+            // notification is gone (dismiss watches the DBus
+            // NotificationClosed signal) instead of being left to believe a
+            // card is waiting to be read.
             if (root.isMuted(notification.appName ?? "", notification.desktopEntry ?? "", notification.appIcon ?? "")) {
                 root.recordApp(notification.appName, notification.appIcon, notification.summary, "blocked");
+                root.playNotificationSound(notification);
                 notification.dismiss();
                 return;
             }
@@ -1133,6 +1201,18 @@ Singleton {
         // impossible to exercise from here -- ydotool does not reach this
         // compositor, so `focus` below drives the very function the card
         // calls rather than a copy of it.
+        // `notifications dnd` -- the whole-desktop switch as the shell sees
+        // it: the setting, its deadline, and whether that deadline has already
+        // passed. The last field is the point -- enforcement and the deadline
+        // are two different pieces, and reading them apart is how a switch that
+        // silently stopped expiring would be noticed.
+        function dnd(): string {
+            return `on=${root.dndOn} durationMin=${root.dndDurationMin}`
+                + ` until=${Math.round(root.dndUntil)}`
+                + ` remainingMs=${Math.round(root.dndRemainingMs)}`
+                + ` silent=${root.silent}`;
+        }
+
         function cards(): string {
             return `list=${root.list.length} grouped=${root.appNameList.length} cards=${root.flatCards.length}\n`
                 + root.flatCards.map((c, i) =>

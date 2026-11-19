@@ -239,7 +239,7 @@ Item {
             buttonIcon: "notifications_paused"
             toggled: Notifications.silent
             onClicked: () => {
-                Notifications.silent = !Notifications.silent;
+                Notifications.toggleDoNotDisturb();
             }
         }
         // The count, and the way to give the list the whole sidebar.

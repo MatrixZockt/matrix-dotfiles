@@ -163,6 +163,39 @@ Singleton {
      * @param { boolean } muted
      * @returns { string[] }
      */
+    /**
+     * The epoch-ms moment a DND window ends, or 0 for "no timer".
+     *
+     * Shared by the shell (which enforces the deadline) and Settings (which
+     * sets it), so the two cannot disagree about what "30 minutes" means.
+     *
+     * @param { number } durationMin
+     * @param { number } nowMs
+     * @returns { number }
+     */
+    function dndDeadline(durationMin, nowMs) {
+        const minutes = Number(durationMin) || 0;
+        if (!(minutes > 0))
+            return 0;
+        return Number(nowMs) + minutes * 60000;
+    }
+
+    /**
+     * Is Do not disturb in force? A deadline in the past means it ended on its
+     * own, which is the whole point of it having one.
+     *
+     * @param { boolean } enabled
+     * @param { number } dndUntil
+     * @param { number } nowMs
+     * @returns { boolean }
+     */
+    function dndActive(enabled, dndUntil, nowMs) {
+        if (enabled !== true)
+            return false;
+        const until = Number(dndUntil) || 0;
+        return until <= 0 || Number(nowMs) < until;
+    }
+
     function withAppMuted(mutedApps, appName, muted) {
         const key = root.normalizeAppIdentity(appName);
         const list = (mutedApps ?? []).filter((a) => root.normalizeAppIdentity(a) !== key);

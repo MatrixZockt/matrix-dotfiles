@@ -88,9 +88,11 @@ Singleton {
         { page: "sound", section: "", name: "Earbang protection", keywords: "earbang protection clipping distortion safety", icon: "hearing" },
         { page: "sound", section: "", name: "Balance", keywords: "balance left right channels pan", icon: "balance" },
 
-        { page: "services", section: "", name: "Notifications", keywords: "notification alert banner toast do not disturb", icon: "notifications" },
+        { page: "notifications", section: "", name: "Notifications", keywords: "notification alert banner toast do not disturb", icon: "notifications" },
         { page: "services", section: "", name: "Classic SUPER menu", keywords: "super menu launcher search classic old new card grid tabs recently used", icon: "search", short: "super menu launcher classic" },
-        { page: "services", section: "", name: "Do not disturb", keywords: "do not disturb dnd focus silence quiet", icon: "do_not_disturb_on", short: "dnd do not disturb" },
+        { page: "notifications", section: "", name: "Do not disturb", keywords: "do not disturb dnd focus silence quiet auto off timer", icon: "do_not_disturb_on", short: "dnd do not disturb" },
+        { page: "notifications", section: "", name: "Notification sound", keywords: "sound chime alert volume mute per app", icon: "volume_up", short: "chime" },
+        { page: "notifications", section: "", name: "Per-app notifications", keywords: "per app mute block silence allow sound", icon: "apps", short: "mute app" },
         { page: "services", section: "", name: "Lock screen", keywords: "lock screen lock screensaver blank", icon: "lock", short: "lock lockscreen" },
 
         // ── Devices ───────────────────────────────────────────────────────

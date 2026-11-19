@@ -1,0 +1,130 @@
+#!/bin/sh
+# tradingview -- launch TradingView with its pixels on the GPU.
+#
+# ── WHY XWAYLAND, AND NOT NATIVE WAYLAND ────────────────────────────────────
+# This wrapper used to force native Wayland for one reason: sharpness. The app
+# ignores ELECTRON_OZONE_PLATFORM_HINT, so it used to fall back to X11, where
+# Hyprland's old `xwayland:force_zero_scaling` capped the X server at the panel's
+# 2560x1600 and stretched every window 1.5x -- blurry text on a 2560x1600@1.5
+# panel. `--ozone-platform=wayland` fixed that.
+#
+# That reason is gone (force_zero_scaling is false again, so an X11 client draws
+# at the desk's own scale, 1:1 and sharp) and the cost of native Wayland turned
+# out to be the whole point of this file: MEASURED 2026-10-26, this app on
+# native Wayland runs with NO Chromium GPU process at all -- zygotes, renderers
+# and the network service, nothing else -- so every tile is rasterised and
+# composited on the CPU, holding a core at ~12 % with a chart open. Every other
+# Electron app on this desk (Discord, WhatsApp, Claude, Freebuff) runs on
+# XWayland and HAS its GPU process, on /dev/dri/renderD128 (the Intel iGPU).
+# Same app, same build, same flags; the only difference is the ozone platform.
+# This is the same failure freebuff-desktop documents: native Wayland + GPU
+# does not come up on this machine (SCANOUT/ENOMEM from the i915 GBM path),
+# while XWayland + GPU is real hardware.
+#
+# So: XWayland by default, with the desk's scale passed explicitly (`--force-
+# device-scale-factor`), because an X11 client does not inherit the compositor
+# scale. If no live X server is found the wrapper falls back to native Wayland
+# rather than not starting at all -- software rendering beats no window.
+#
+# Window matching is unaffected: the class comes from the app itself
+# (StartupWMClass=tradingview), not from this wrapper.
+#
+# GPU raster + zero-copy + VA-API: Linux Chromium leaves tile rasterisation and
+# video decoding on the CPU unless told otherwise. No --ignore-gpu-blocklist: on
+# Brave it pushed the GPU process onto the NVIDIA render node and into a Vulkan
+# path that errors on Wayland, and it is not what any app here needed.
+
+APP=/usr/bin/tradingview
+
+# ── The wrapper owns the platform and the scale ────────────────────────────────────
+# A .desktop Exec is APPENDED after this wrapper's own flags, and for
+# Chromium the LAST flag wins over an earlier one. Measured 2026-10-27:
+# `Exec=tradingview --ozone-platform=wayland %U` arrived as an extra trailing
+# arg, overrode this file's `--ozone-platform=x11`, and put the app on native
+# Wayland -- which on this machine means NO Chromium GPU process (CPU raster,
+# documented above) and an app that "loaded extremely scaled big" on top of
+# it. A wrapper that computes both decisions from live compositor state must
+# not be overridable by a static line in a launcher entry, so any
+# --ozone-platform / --force-device-scale-factor a caller supplies -- in
+# either `--flag` or `--flag=value` form -- is dropped before exec. The
+# desktop-wide fallback (Xft.dpi=144 via x11-dpi.sh) covers apps with no
+# wrapper at all; this covers apps that have one.
+_oldIFS=$IFS
+IFS='
+'
+set -f
+_keep=""
+_dropval=0
+for _a in "$@"; do
+    case "$_a" in
+        --ozone-platform|--force-device-scale-factor) _dropval=1; continue ;;
+        --ozone-platform=*|--force-device-scale-factor=*) continue ;;
+    esac
+    if [ "$_dropval" = 1 ]; then _dropval=0; continue; fi
+    _keep="${_keep}${_a}
+"
+done
+# Rebuild always: with nothing left, the unquoted expansion is zero words and
+# "$@" becomes empty -- dropping the caller's flags, not keeping them.
+# shellcheck disable=SC2086
+set -- $_keep
+set +f
+IFS=$_oldIFS
+
+# Xwayland's display number is not stable and DISPLAY is not exported in every
+# launch context (a .desktop Exec is not a shell), so find a socket that
+# actually answers instead of trusting the variable. The desk has a stale
+# /tmp/.X11-unix/X0 lying around, and a stale socket answers nothing.
+x_display_answers() {
+    [ -S "/tmp/.X11-unix/X${1#:}" ] || return 1
+    DISPLAY="$1" timeout 2 xrandr --current >/dev/null 2>&1
+}
+
+find_x_display() {
+    if [ -n "${DISPLAY:-}" ] && x_display_answers "$DISPLAY"; then
+        printf '%s' "$DISPLAY"; return 0
+    fi
+    for n in 0 1 2 3; do
+        if x_display_answers ":$n"; then printf '%s' ":$n"; return 0; fi
+    done
+    return 1
+}
+
+# The panel's scale, from the compositor. Falls back to 1.5, which is what this
+# desk runs at; an unreadable hyprctl must not open the app at 1x.
+panel_scale() {
+    s=$(hyprctl monitors -j 2>/dev/null | python3 -c '
+import json,sys
+try: print(json.load(sys.stdin)[0]["scale"])
+except Exception: print("")' 2>/dev/null)
+    case "$s" in ''|*[!0-9.]*) s=1.5 ;; esac
+    printf '%s' "$s"
+}
+
+GPU_FLAGS="--enable-gpu-rasterization --enable-features=VaapiVideoDecodeLinuxGL,VaapiVideoDecoder,CanvasOopRasterization"
+
+if xdisp=$(find_x_display); then
+    DISPLAY="$xdisp"
+    export DISPLAY
+    # Hyprland's env usually carries XAUTHORITY; a systemd-launched context does
+    # not, and without it the client is refused with "Authorization required".
+    # An empty XAUTHORITY also means "look in ~/.xauthority", so only set it
+    # when it is absent.
+    if [ -z "${XAUTHORITY:-}" ] && [ -f "$HOME/.Xauthority" ]; then
+        export XAUTHORITY="$HOME/.Xauthority"
+    fi
+    # An X11 client does NOT inherit the compositor's XCURSOR_THEME (`hl.env()`
+    # only reaches processes Hyprland spawns itself), so the pointer would
+    # change artwork when it enters the window. Same theme the rest of the desk
+    # uses.
+    export XCURSOR_THEME="${XCURSOR_THEME:-Bibata-Modern-Ice}"
+    export XCURSOR_SIZE="${XCURSOR_SIZE:-24}"
+    # Shim path so Chromium's hardcoded "Adwaita" cursor request resolves to Bibata.
+    export XCURSOR_PATH=~/.local/share/cursor-shims:~/.local/share/icons:~/.icons:/usr/share/icons:/usr/share/pixmaps
+    exec "$APP" --ozone-platform=x11 \
+        --force-device-scale-factor="$(panel_scale)" \
+        $GPU_FLAGS "$@"
+fi
+
+# No live X server: native Wayland is soft, but it is a window.
+exec "$APP" --ozone-platform=wayland $GPU_FLAGS "$@"

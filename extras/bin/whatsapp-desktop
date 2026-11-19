@@ -1,0 +1,142 @@
+#!/bin/bash
+# WhatsApp Desktop, launched on the GPU.
+#
+# Same problem as Freebuff (see ~/.local/bin/freebuff-desktop): on this
+# machine Chromium cannot get a GPU buffer through native Wayland, so Electron
+# gives up and draws everything with SwiftShader on the CPU. Measured on
+# 2026-10-20: the running WhatsApp GPU process had libgallium (the real Mesa
+# driver) NOT loaded and SwiftShader mapped -- i.e. pure software rendering,
+# while Brave, Discord and Claude on the same desk all had Mesa on renderD129.
+#
+# Going through XWayland fixes it: a scratch instance started with
+# `--ozone-platform=x11` opened its window normally AND loaded Mesa/iris on
+# /dev/dri/renderD129, which is the real GPU. `--force-device-scale-factor`
+# is passed explicitly because Xwayland runs at the panel's native pixels here
+# (force_zero_scaling = true, custom/general.lua) -- without it Electron draws
+# at 1x and the app comes up half-size.
+#
+# Fallback: with no live X server the app starts exactly as before (native
+# Wayland, software). Slow, but it opens -- that is the whole point.
+APP="/opt/WhatsApp Desktop/whatsapp-linux-desktop"
+
+# A socket file is not proof of a server; ask each candidate for real.
+x_display_answers() {
+    [ -S "/tmp/.X11-unix/X${1#:}" ] || return 1
+    DISPLAY="$1" timeout 2 xrandr --current >/dev/null 2>&1
+}
+
+find_x_display() {
+    local n d
+    if [ -n "${DISPLAY:-}" ] && x_display_answers "$DISPLAY"; then
+        printf '%s' "$DISPLAY"; return 0
+    fi
+    for n in 0 1 2 3; do
+        d=":$n"
+        if x_display_answers "$d"; then printf '%s' "$d"; return 0; fi
+    done
+    return 1
+}
+
+panel_scale() {
+    local s
+    s=$(hyprctl monitors -j 2>/dev/null | python3 -c '
+import json,sys
+try: print(json.load(sys.stdin)[0]["scale"])
+except Exception: print("")' 2>/dev/null)
+    case "$s" in ''|*[!0-9.]*) s=1.5 ;; esac
+    printf '%s' "$s"
+}
+
+# ── The wrapper owns the platform and the scale ────────────────────────────────────
+# Same rule as ~/.local/bin/tradingview: a .desktop Exec is APPENDED after
+# this wrapper's flags, and for Chromium the LAST flag wins. Any caller-supplied
+# --ozone-platform / --force-device-scale-factor is dropped below so a
+# launcher line can never flip this app to native Wayland (no GPU process on
+# this machine) or override the panel scale the wrapper measures live.
+_oldIFS=$IFS
+IFS='
+'
+set -f
+_keep=""
+_dropval=0
+for _a in "$@"; do
+    case "$_a" in
+        --ozone-platform|--force-device-scale-factor) _dropval=1; continue ;;
+        --ozone-platform=*|--force-device-scale-factor=*) continue ;;
+    esac
+    if [ "$_dropval" = 1 ]; then _dropval=0; continue; fi
+    _keep="${_keep}${_a}
+"
+done
+# Always rebuild: an empty _keep expands to zero words, clearing "$@".
+# shellcheck disable=SC2086
+set -- $_keep
+set +f
+IFS=$_oldIFS
+
+if xdisp=$(find_x_display); then
+    export DISPLAY="$xdisp"
+    [ -z "${XAUTHORITY:-}" ] && [ -f "$HOME/.Xauthority" ] && export XAUTHORITY="$HOME/.Xauthority"
+    # Same pointer fix as freebuff-desktop: an X11 client does not inherit the
+    # compositor's XCURSOR_THEME, so without this its cursor is the stock X one
+    # and changes artwork at the window edge. Forced, not inherited (the
+    # inherited name can be an uninstalled one, which falls back to the dark
+    # stock cursor), and the same artwork in both light and dark mode.
+    export XCURSOR_THEME=Bibata-Modern-Ice
+    export XCURSOR_SIZE="${XCURSOR_SIZE:-24}"
+    # Shim path so Chromium's hardcoded "Adwaita" cursor request resolves to Bibata.
+    export XCURSOR_PATH=~/.local/share/cursor-shims:~/.local/share/icons:~/.icons:/usr/share/icons:/usr/share/pixmaps
+    # GPU raster + zero-copy + VA-API (added 2026-10-23).
+    #
+    # XWayland alone did NOT keep this app on the GPU: measured on 2026-10-23
+    # the GPU process started under this wrapper (11:38) had NO render node
+    # open and had libvk_swiftshader mapped -- Chromium had given up on
+    # ANGLE/GL and fallen back to software, so every pixel was drawn on the
+    # CPU while the app looked perfectly normal.
+    #
+    # Verified fixed the same day: with these flags its GPU process holds
+    # /dev/dri/renderD129 (Mesa/iris, 5 descriptors) and the window opens
+    # normally. --ignore-gpu-blocklist is NOT needed and is deliberately
+    # absent -- on Brave it made Chromium open the NVIDIA node too and start
+    # a Vulkan path that errors on Wayland; the raster switch alone is what
+    # brings WhatsApp back onto the GPU.
+    # GPU *compositing* is deliberately off (2026-11-05).
+    #
+    # Symptom: clicking a chat did nothing and a right-click menu opened and
+    # closed within a fraction of a second. The window was painting two layers
+    # at once -- the Calls pane drawn over the chat list, with the chat list
+    # left dimmed underneath -- so every press was hit-tested against the stale
+    # layer on top and the row underneath never saw it. Restarting the app did
+    # not help, because this block re-created the same state each time. The
+    # owner also reports Android Studio popups flashing shut the same way;
+    # that is a JVM/Qt app, so treat it as a possibly related symptom rather
+    # than proof of one shared cause. Inside WhatsApp the fault is the
+    # Chromium compositor and hit-test disagreeing on XWayland + Mesa.
+    #
+    # With this flag the UI paints correctly (one pane, normal chat list) and
+    # presses reach the app again. Rasterization stays on the GPU; only the
+    # compositing step moves to the CPU, which for a chat window is cheap.
+    # ── Zero-copy is OFF (2026-11-19) ─────────────────────────────────────
+    # White-window report: the app's window became one flat white surface
+    # (a screenshot of it is a single grey(255) bitmap, window still mapped).
+    # The combination above is the cause: --disable-gpu-compositing makes the
+    # COMPOSITOR read frames on the CPU, while --enable-zero-copy keeps those
+    # frames in GPU-only shared images. Chromium then has to ProduceMemory
+    # from a shared image it cannot map; when that fails the surface is left
+    # blank -- exactly the all-white window, and "random" because it depends
+    # on which path produced the last frame.
+    #
+    # Only zero-copy goes. Rasterization stays on the GPU (that was the point
+    # of the 2026-10-23 work) and compositing stays on the CPU (that is the
+    # 2026-11-05 hit-test fix): with no zero-copy there is a real copy from
+    # the GPU raster target to the CPU compositor, which is what makes the
+    # window paint at all.
+    exec "$APP" --ozone-platform=x11 \
+        --force-device-scale-factor="$(panel_scale)" \
+        --enable-gpu-rasterization \
+        --disable-gpu-compositing \
+        --enable-features=VaapiVideoDecodeLinuxGL,VaapiVideoDecoder,CanvasOopRasterization \
+        "$@"
+fi
+
+exec "$APP" "$@"

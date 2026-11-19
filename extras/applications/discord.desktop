@@ -1,0 +1,20 @@
+# Local override of /usr/share/applications/discord.desktop (2026-10-23).
+#
+# Identical to the package's entry except for the GPU flags, which cannot be
+# set any other way: /usr/bin/discord is a plain launcher with no flags file
+# (unlike /usr/bin/brave, which reads ~/.config/brave-flags.conf).
+#
+# Discord already composited on renderD129; these switches add what Linux
+# Chromium leaves on the CPU by default -- tile rasterisation, zero-copy
+# uploads and VA-API video decoding (off in every Electron build on Linux).
+[Desktop Entry]
+Name=Discord
+StartupWMClass=discord
+Comment=All-in-one voice and text chat for gamers that's free, secure, and works on both your desktop and phone.
+GenericName=Internet Messenger
+Exec=/usr/bin/discord --enable-gpu-rasterization --enable-features=VaapiVideoDecodeLinuxGL,VaapiVideoDecoder,CanvasOopRasterization --url -- %u
+Icon=discord
+Type=Application
+Categories=Network;InstantMessaging;
+MimeType=x-scheme-handler/discord;
+Path=/usr/bin

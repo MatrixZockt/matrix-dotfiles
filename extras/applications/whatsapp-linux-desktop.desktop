@@ -1,0 +1,15 @@
+[Desktop Entry]
+Name=WhatsApp Desktop
+# User-level override of /usr/share/applications/whatsapp-linux-desktop.desktop.
+# Only Exec differs: it goes through ~/.local/bin/whatsapp-desktop, which adds
+# the XWayland/GPU flags (see the header of that script). A user entry with the
+# same file name shadows the system one for every launcher, dock and autostart
+# entry, so the app always starts accelerated -- no system file was touched.
+Exec=/home/matrix/.local/bin/whatsapp-desktop %U
+Terminal=false
+Type=Application
+Icon=whatsapp-linux-desktop
+StartupWMClass=WhatsApp Desktop
+MimeType=x-scheme-handler/whatsapp-linux-desktop
+Comment=An unofficial WhatsApp Linux Desktop application
+Categories=Network;Office;GTK;GNOME;

@@ -1,0 +1,36 @@
+#!/bin/sh
+# discord -- launch Discord with the same GPU flags every other Chromium/Electron
+# app on this desk gets.
+#
+# WHY THIS EXISTS, given ~/.local/share/applications/discord.desktop already
+# carries the same switches: the .desktop entry only covers launches that go
+# THROUGH it. Measured 2026-10-26: the Discord that was actually running had
+# been started with a bare `/home/matrix/.config/discord/app-1.0.166/Discord`
+# -- no flags at all -- so page tiles were rasterised and video decoded on the
+# CPU while its GPU process sat on the iGPU doing compositing only. Discord has
+# no flags file of its own (/usr/bin/discord is a bootstrap script that execs
+# the downloaded binary), so a wrapper on PATH is the only way to make EVERY
+# launch path carry them: the shell's launcher (`bash -c discord`), typing
+# `discord` in a terminal, an x-scheme-handler handoff.
+#
+# `--url --` is how Discord's own launcher forwards deep links; the wrapper
+# keeps the same shape by passing "$@" through untouched.
+#
+# The switches: tile rasterisation and zero-copy on the GPU, plus VA-API video
+# decoding (off by default in every Electron build on Linux). Deliberately NO
+# --ignore-gpu-blocklist and no --ozone-platform: the latter would override the
+# app's own backend choice, and XWayland -- the platform Discord already picks
+# here -- is the one where its GPU process actually comes up on this machine.
+#
+# One pointer, every app (2026-10-28): an X11/Electron client that misses the
+# theme draws the stock arrow and changes artwork at the window edge. Forced
+# here so every path -- terminal, launcher, deep-link handoff -- gives
+# Discord the same pair the rest of the desktop runs.
+export XCURSOR_THEME=Bibata-Modern-Ice
+export XCURSOR_SIZE="${XCURSOR_SIZE:-24}"
+# Shim path so Chromium's hardcoded "Adwaita" cursor request resolves to Bibata.
+export XCURSOR_PATH=~/.local/share/cursor-shims:~/.local/share/icons:~/.icons:/usr/share/icons:/usr/share/pixmaps
+exec /usr/bin/discord \
+    --enable-gpu-rasterization \
+    --enable-features=VaapiVideoDecodeLinuxGL,VaapiVideoDecoder,CanvasOopRasterization \
+    --url -- "$@"

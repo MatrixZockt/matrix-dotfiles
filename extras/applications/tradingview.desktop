@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=TradingView
+Exec=tradingview %U
+Terminal=false
+Type=Application
+Icon=tradingview
+StartupWMClass=TradingView
+MimeType=x-scheme-handler/tradingview;
+Categories=Office;Finance;

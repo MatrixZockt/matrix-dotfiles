@@ -56,34 +56,54 @@ find_x_display() {
     return 1
 }
 
-# The scale the compositor is actually running, so a fractional desktop gets its
-# own value instead of whatever the app guesses. 1 is the neutral fallback.
+# The scale the compositor is actually running, so a fractional panel (this one
+# is 2560x1600 at 1.5) gets its own value instead of whatever the app guesses.
 panel_scale() {
     local s
     s=$(hyprctl monitors -j 2>/dev/null | python3 -c '
 import json,sys
 try: print(json.load(sys.stdin)[0]["scale"])
 except Exception: print("")' 2>/dev/null)
-    case "$s" in ''|*[!0-9.]*) s=1 ;; esac
+    case "$s" in ''|*[!0-9.]*) s=1.5 ;; esac
     printf '%s' "$s"
 }
+
+# Same pointer fix as the other wrappers, but placed BEFORE the display
+# branch so BOTH exits of this script carry it: an X11 client does not
+# inherit the compositor's XCURSOR_THEME, and without this the pointer
+# switches to the stock X artwork -- the ugly black one -- the moment it
+# crosses into the window.
+export XCURSOR_THEME=Bibata-Modern-Ice
+export XCURSOR_SIZE="${XCURSOR_SIZE:-24}"
+# Shim path so Chromium's hardcoded "Adwaita" cursor request resolves to Bibata.
+export XCURSOR_PATH=~/.local/share/cursor-shims:~/.local/share/icons:~/.icons:/usr/share/icons:/usr/share/pixmaps
 
 if xdisp=$(find_x_display); then
     export DISPLAY="$xdisp"
     [ -z "${XAUTHORITY:-}" ] && [ -f "$HOME/.Xauthority" ] && export XAUTHORITY="$HOME/.Xauthority"
-    # Same pointer fix as the other two wrappers: an X11 client does not inherit
-    # the compositor's XCURSOR_THEME, so without this the pointer switches to
-    # the stock X artwork the moment it crosses into the window.
-    export XCURSOR_THEME=Bibata-Modern-Ice
-    export XCURSOR_SIZE="${XCURSOR_SIZE:-24}"
     # GPU raster + zero-copy + VA-API: the same set the desktop entry used to
     # pass by hand, now owned by this file alone so there is one place to
     # change. A launch from a terminal (or another app's "open with") gets the
     # same window as a click on the icon.
+    # GPU raster yes, feature switches NO. Measured 2026-11-14 with the real
+    # night-reef scene plus its glass layer, 2560x1600, on this laptop's Intel
+    # iGPU: 60 fps with --enable-gpu-rasterization alone, but 30 fps as soon as
+    # ANY --enable-features= appears on the command line -- including a no-op
+    # one (GlobalShortcutsPortal). Repeating the plain run three times gave
+    # 58.7 / 60 / 60.2, so it is the switch, not the machine warming up. That
+    # list used to name VaapiVideoDecodeLinuxGL, VaapiVideoDecoder and
+    # CanvasOopRasterization: video decode Claude does not play, and canvas
+    # raster it does not draw, for half the frame rate on everything else.
+    #
+    # The three --disable-* throttles are here because Chromium throttles a
+    # window it believes is hidden or unfocused, which is indistinguishable
+    # from "the theme animates at 2 fps".
     exec "$APP" --ozone-platform=x11 \
         --force-device-scale-factor="$(panel_scale)" \
-        --enable-gpu-rasterization --enable-zero-copy \
-        --enable-features=VaapiVideoDecodeLinuxGL,VaapiVideoDecoder,CanvasOopRasterization \
+        --enable-gpu-rasterization \
+        --disable-background-timer-throttling \
+        --disable-backgrounding-occluded-windows \
+        --disable-renderer-backgrounding \
         "$@"
 fi
 

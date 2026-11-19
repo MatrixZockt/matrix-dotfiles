@@ -58,23 +58,21 @@ Item {
 
     // ── The app's notification switches ───────────────────────────────────
     //
-    // Two switches that belong to THIS desktop rather than to the app, at the
-    // place the app is: mute its notifications entirely, or mute only the
-    // chime for an app that already plays a notification sound of its own.
+    // One switch that belongs to THIS desktop rather than to the app, at the
+    // place the app is: mute its notifications. The desktop's chime is not a
+    // per-app setting -- muting drops the app's notice (and the default chime
+    // it plays with it) and the PC chime keeps playing.
     //
-    // Both are the config lists services/Notifications.qml reads, matched by
-    // the same normalized identity the daemon uses, so the menu, the Settings
-    // page and the daemon cannot disagree about which app was meant. Writing
-    // from here needs no IPC: the launcher and the daemon are one process.
+    // It is the config list services/Notifications.qml reads, matched by the
+    // same normalized identity the daemon uses, so the menu, the Settings page
+    // and the daemon cannot disagree about which app was meant. Writing from
+    // here needs no IPC: the launcher and the daemon are one process.
     readonly property var entryIdentities: [
         root.entry?.name ?? "", root.entry?.id ?? "", root.entry?.icon ?? ""
     ]
     readonly property var mutedApps: Config?.options.notifications.mutedApps ?? []
-    readonly property var soundMutedApps: Config?.options.notifications.soundMutedApps ?? []
     readonly property bool notificationsMuted: NotificationUtils.isIdentityMuted(
         root.entryIdentities, root.mutedApps)
-    readonly property bool chimeMuted: NotificationUtils.isIdentityMuted(
-        root.entryIdentities, root.soundMutedApps)
 
     readonly property int menuWidth: 348
     readonly property int rowHeight: 40
@@ -170,16 +168,6 @@ Item {
                 icon: root.notificationsMuted ? "notifications_off" : "notifications",
                 destructive: false
             });
-            notify.push({
-                key: "n:chime",
-                kind: "notify",
-                actionId: "toggle-chime",
-                label: root.chimeMuted
-                    ? Translation.tr("Turn the notification sound back on")
-                    : Translation.tr("Mute the notification sound"),
-                icon: root.chimeMuted ? "volume_off" : "volume_up",
-                destructive: false
-            });
         }
         const sections = [
             { title: Translation.tr("Launch"), rows: buckets.run },
@@ -243,9 +231,6 @@ Item {
             if (row.actionId === "toggle-mute") {
                 Config.options.notifications.mutedApps = NotificationUtils.withAppMuted(
                     root.mutedApps, name, !root.notificationsMuted);
-            } else if (row.actionId === "toggle-chime") {
-                Config.options.notifications.soundMutedApps = NotificationUtils.withAppMuted(
-                    root.soundMutedApps, name, !root.chimeMuted);
             }
             return;
         }

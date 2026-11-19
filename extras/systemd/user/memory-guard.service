@@ -9,10 +9,13 @@
 # (docs/FEATURES.md); this unit is the backstop for anything started outside it.
 #
 # It is also the reason the OOM protection had to be arranged the way it was:
-# systemd-oomd is disarmed for this session (it killed two whole sessions on
-# 2026-11-12), so the kernel's OOM killer is the only other thing left, and it
-# fires only after reclaim has already frozen the desktop. Hence one process at
+# systemd-oomd is masked system-wide (it killed two whole sessions on 2026-11-12),
+# so the kernel's OOM killer is the only other thing left, and it fires only after
+# reclaim has already frozen the desktop. Hence one process at
 # a time, chosen here, with a notification.
+#
+# 2026-11-19: swap is no longer zram alone. /swapfile (32 GiB, priority 10, in
+# /etc/fstab) sits behind zram, so a full zram spills to disk instead of freezing.
 [Unit]
 # 2026-11-19: "never close anything on its own". The guard is an OBSERVER now:
 # it still samples memory and logs what it would close, but DRY_RUN=1 below

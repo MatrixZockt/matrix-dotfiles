@@ -109,19 +109,30 @@ heavy-run -- make -j32
 
 The Blender desktop entry already goes through `heavy-run`, so a GUI session — the
 thing an agent drives — is inside the budget too. Anything started some other way
-is what `memory-guard.service` is for: it samples free memory every two seconds and,
-when it falls under 10% of RAM (or zram is full and memory pressure is high), closes
-the process that is actually growing — RSS slope over the last twelve seconds, not
-plain size — and says so in a notification and in
-`journalctl --user -u memory-guard`. The editor, Claude and the browser are ranked
-behind everything else, so a render is what goes and the tools you are working in
-are only touched when nothing else is left.
+is what `memory-guard.service` is for: it samples memory every two seconds and
+names what it *would* close when memory falls under 10% of RAM or zram is full —
+RSS slope over the last twelve seconds, not plain size — in a notification and in
+`journalctl --user -u memory-guard`. It closes nothing: killing was turned off on
+2026-11-19 at the owner's request, and the unit ships with `DRY_RUN=1`.
 
-Swap here is zram, which is RAM: once RAM and zram are both full the kernel reclaims
-for minutes before it OOM-kills anything, so the machine freezes rather than losing
-one process. That is the failure these two exist to stop. Check either of them with
-`memory-guard --check` (readings, trigger state, who would be chosen) or
-`systemctl --user show heavy.slice`.
+### Swap: zram in front, disk behind it
+
+Swap is two tiers. `/dev/zram0` is compressed RAM (`ram / 2`, priority 100) and
+absorbs hot pages cheaply; `/swapfile` is 32 GiB on the NVMe (priority 10, held in
+`/etc/fstab`) and only fills once zram is full.
+
+That second tier is the fix for 2026-11-19: with zram as the *only* swap it reached
+100% while 21 GiB of RAM was in use, the kernel spent its time reclaiming, and the
+desktop froze for minutes until the OOM killer closed a process. Overflow now goes
+to disk instead, so the same pressure makes the machine slow but not dead, and
+nothing is closed for you.
+
+`systemd-oomd` is masked on purpose (2026-11-19). It killed two whole sessions on
+2026-11-12, which from the outside looks exactly like a crash; the kernel's own OOM
+killer, which takes one process rather than the session, is the last resort.
+
+Check the tiers with `cat /proc/swaps`, the guard with `memory-guard --check`, and
+the budget with `systemctl --user show heavy.slice`.
 
 **Not in this repo, on purpose:** wallpapers and other third-party art, anything
 specific to one machine's hardware, and every secret, hostname or personal path.

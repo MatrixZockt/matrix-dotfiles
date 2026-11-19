@@ -38,7 +38,24 @@ OUT = os.path.dirname(os.path.abspath(__file__))
 # notification.wav -- the file services/Notifications.qml loads for a chime and
 # PolkitService.qml loads for an auth prompt -- so `python3 generate.py` and
 # the shipped sound can never drift apart.
-CHOSEN = "notify-arch3-b6-damped"
+CHOSEN = "notify-tone-warm-a"
+
+# What the preview page offers: the main voices, one per character, plus the warm
+# take's two register neighbours and the two low-arch takes that were liked.
+# Every other design above is still in SOUNDS -- main() skips it and deletes its
+# wav -- so bringing one back on another day is adding its slug here, not
+# rewriting the design.
+KEEP = (
+    "notify-tone-warm-a",
+    "notify-tone-warm-g",
+    "notify-tone-warm-c",
+    "notify-tone-marimba",
+    "notify-tone-bell",
+    "notify-tone-pluck",
+    "notify-tone-deep-wood",
+    "notify-low-a5",
+    "notify-low-c5",
+)
 
 
 # ── Building blocks ──────────────────────────────────────────────────────
@@ -341,6 +358,76 @@ def design_arch_pitch(freqs, levels_db=(-16.0, 0.0, -12.0), spacing=40):
                         offsets=offsets, freqs=freqs)
 
 
+def design_tone(freqs, partials, attack_ms, taus, tick_amp=0.0,
+                tick_center=2600.0, spacing=80, levels_db=(-6.0, 0.0, -4.0),
+                cutoff_hz=5500.0, durs=(44, 48, 76)):
+    """The three-step gesture with the CHARACTER left as a parameter.
+
+    `design_arch_damped` fixes the woodblock character: a hard-ish toast of a
+    contact tick and a sine body with two weak upper partials. This keeps its
+    timing, its level arch and its spacing and lets three things move:
+
+      * `freqs` -- the register;
+      * `partials` -- what the note is made of, so a sine, a marimba bar, a
+        bell and a string stop being the same instrument;
+      * `tick_amp` -- whether there is a contact transient at all. A warm
+        sine reads as a soft confirmation precisely because it has none.
+
+    Notes are placed on the same offsets and shaped by the same envelope
+    family, so every take is the same gesture in a different voice.
+    """
+    offsets = (0.0, float(spacing), 2.0 * float(spacing))
+    total_ms = int(2 * spacing + max(durs) + 24)
+    events = []
+    for index, (level_db, offset, dur, freq, tau) in enumerate(
+            zip(levels_db, offsets, durs, freqs, taus)):
+        amp = 10 ** (level_db / 20.0)
+        events.append((offset, tone(freq, dur, tau_ms=tau,
+                                    attack_ms=attack_ms,
+                                    partials=partials) * amp))
+        if tick_amp > 0:
+            events.append((offset, click(1.6, tick_center, 0.35,
+                                         tick_amp * amp,
+                                         seed=41 + index * 7)))
+    return lowpass(place(total_ms, *events), cutoff_hz)
+
+
+def ks_pluck(freq, dur_ms, decay=0.9955, seed=0):
+    """A plucked string: Karplus-Strong, so the note has a body that dies.
+
+    A sine with an exponential envelope is a beep that fades; a string is many
+    partials that fade at different rates. This is the cheapest way to get the
+    second out of the same three-step timing, and it is why the take sounds
+    "heard" rather than "generated".
+    """
+    n = int(SR * dur_ms / 1000.0)
+    size = max(2, int(round(SR / freq)))
+    rng = np.random.default_rng(seed)
+    line = rng.uniform(-1.0, 1.0, size)
+    out = np.zeros(n)
+    index = 0
+    for i in range(n):
+        out[i] = line[index]
+        nxt = (index + 1) % size
+        line[index] = decay * 0.5 * (line[index] + line[nxt])
+        index = nxt
+    peak = max(np.abs(out).max(), 1e-9)
+    return out / peak
+
+
+def design_tone_pluck(freqs, spacing=80, levels_db=(-6.0, 0.0, -4.0),
+                      durs=(90, 90, 130)):
+    """Three plucked steps, no contact tick: the gesture in a string voice."""
+    offsets = (0.0, float(spacing), 2.0 * float(spacing))
+    total_ms = int(2 * spacing + max(durs) + 20)
+    events = []
+    for index, (level_db, offset, dur, freq) in enumerate(
+            zip(levels_db, offsets, durs, freqs)):
+        amp = 10 ** (level_db / 20.0)
+        events.append((offset, ks_pluck(freq, dur, seed=53 + index * 11) * amp))
+    return lowpass(place(total_ms, *events), 5200.0)
+
+
 SOUNDS = [
     ("notify-arch-low", "Arch, low start",
      "G4 - D5 - A5: starts an octave and a half down, lands on top",
@@ -369,6 +456,80 @@ SOUNDS = [
      "same climb, softened edges: softer attack, duller tick, top rolled off",
      lambda: design_arch_damped((587.3, 1077.0, 1975.5),
                                 damp=0.35, cutoff_hz=5500.0)),
+    # ── Low arch: the damped design, a register down and opened up ──
+    # The shipped take climbs 587 - 1077 - 1976 Hz with its steps 48 ms
+    # apart. Two things follow from that: the top two steps land close enough
+    # to fuse into one gesture, and the top note is high enough to read as a
+    # signal rather than as news. These keep the design exactly -- 2-3 ms
+    # attack, 55 % quieter contact tick, upper partials pulled back, the
+    # two-pole roll-off -- and move only the notes and the spacing.
+    ("notify-low-a5", "Low arch &mdash; A4 / E5 / B5",
+     "the damped design a register down: 440 - 659 - 988 Hz, steps 80 ms apart",
+     lambda: design_arch_damped((440.0, 659.3, 987.8), spacing=80)),
+    ("notify-low-g5", "Low arch &mdash; G4 / D5 / A5",
+     "a whole tone lower again: 392 - 587 - 880 Hz, still climbing",
+     lambda: design_arch_damped((392.0, 587.3, 880.0), spacing=80)),
+    ("notify-low-f5", "Low arch &mdash; F4 / C5 / G5",
+     "349 - 523 - 784 Hz: the calmest of the set",
+     lambda: design_arch_damped((349.2, 523.3, 784.0), spacing=80)),
+    ("notify-low-c5", "Low arch &mdash; C4 / G4 / D5",
+     "262 - 392 - 587 Hz: the deepest, closest to a soft knock",
+     lambda: design_arch_damped((261.6, 392.0, 587.3), spacing=80)),
+    ("notify-low-a5-64", "Low arch, A4 / E5 / B5 &mdash; steps 64 ms",
+     "the same low notes, closer: still three arrivals, less air between",
+     lambda: design_arch_damped((440.0, 659.3, 987.8), spacing=64)),
+    ("notify-low-a5-96", "Low arch, A4 / E5 / B5 &mdash; steps 96 ms",
+     "the same low notes, widest: each step lands on its own",
+     lambda: design_arch_damped((440.0, 659.3, 987.8), spacing=96)),
+    ("notify-low-g5-soft", "Low arch, G4 / D5 / A5 &mdash; softer edges",
+     "the low G climb with the damping taken further: 3.8 kHz roll-off",
+     lambda: design_arch_damped((392.0, 587.3, 880.0), damp=0.65,
+                                cutoff_hz=3800.0, spacing=80)),
+    ("notify-arch3-b6-damped-80", "Control &mdash; B6 take, steps 80 ms",
+     "the shipped notes and damping, only the spacing opened up",
+     lambda: design_arch_damped((587.3, 1077.0, 1975.5),
+                                damp=0.35, spacing=80)),
+    # ── Tone: the same gesture, changing what the notes are made of ──
+    # The three-step timing and the -6 / 0 / -4 dB arch are held; only the
+    # register and the voice move. `warm` has no contact tick at all, which is
+    # what makes it read as confirmation rather than as an alert; `marimba`
+    # has odd partials and a short body; `bell` is inharmonic; `pluck` is a
+    # string. The last one is the woodblock a register below anything tried.
+    ("notify-tone-warm-a", "Warm &mdash; A4 / E5 / B5",
+     "soft sine, no contact tick: a confirmation, not an alert",
+     lambda: design_tone((440.0, 659.3, 987.8),
+                         ((1.0, 1.0), (2.0, 0.22), (3.0, 0.08)),
+                         attack_ms=3.5, taus=(16, 16, 20), cutoff_hz=4200.0)),
+    ("notify-tone-warm-g", "Warm &mdash; G4 / D5 / A5",
+     "the same soft sine a tone lower",
+     lambda: design_tone((392.0, 587.3, 880.0),
+                         ((1.0, 1.0), (2.0, 0.22), (3.0, 0.08)),
+                         attack_ms=3.5, taus=(16, 16, 20), cutoff_hz=4200.0)),
+    ("notify-tone-warm-c", "Warm &mdash; C4 / G4 / D5 (deepest)",
+     "the same soft sine down at the bottom of the useful range",
+     lambda: design_tone((261.6, 392.0, 587.3),
+                         ((1.0, 1.0), (2.0, 0.20), (3.0, 0.07)),
+                         attack_ms=4.0, taus=(18, 18, 22), cutoff_hz=3600.0)),
+    ("notify-tone-marimba", "Marimba &mdash; D4 / A4 / E5",
+     "odd partials and a short body: wooden, but a struck bar not a beep",
+     lambda: design_tone((293.7, 440.0, 659.3),
+                         ((1.0, 1.0), (3.0, 0.35), (5.0, 0.10)),
+                         attack_ms=1.2, taus=(10, 10, 13),
+                         tick_amp=0.10, tick_center=2400.0,
+                         cutoff_hz=6000.0)),
+    ("notify-tone-bell", "Bell &mdash; A4 / E5 / B5",
+     "inharmonic partials, no tick: quieter than a chime, still soft",
+     lambda: design_tone((440.0, 659.3, 987.8),
+                         ((1.0, 1.0), (2.76, 0.30), (5.4, 0.10)),
+                         attack_ms=2.5, taus=(18, 18, 24),
+                         cutoff_hz=7000.0)),
+    ("notify-tone-pluck", "Plucked string &mdash; A4 / E5 / B5",
+     "Karplus-Strong: many partials dying at different rates",
+     lambda: design_tone_pluck((440.0, 659.3, 987.8))),
+    ("notify-tone-deep-wood", "Deeper wood &mdash; G3 / D4 / A4",
+     "the shipped character taken a full register below the low arch",
+     lambda: design_arch_damped((196.0, 293.7, 440.0), damp=0.35,
+                                cutoff_hz=4000.0, spacing=80)),
     ("notify-arch3-d7-damped", "D7 even steps, damped",
      "587 / 1175 / 2349 Hz with the same soft edges",
      lambda: design_arch_damped((587.3, 1174.7, 2349.3),
@@ -447,31 +608,13 @@ SOUNDS = [
 ]
 
 GROUPS = [
-    ("Damped &mdash; edges softened, nothing else moved",
-     ("notify-arch3-b6-damped", "notify-arch3-d7-damped",
-      "notify-arch3-d7-softer")),
-    ("Arch soft &mdash; even (linear) pitch ramp",
-     ("notify-arch3-top-b6-linear", "notify-arch3-top-d7-linear",
-      "notify-arch3-top-e7-linear")),
-    ("Arch soft &mdash; final note pitched up",
-     ("notify-arch3-soft-top-a6", "notify-arch3-soft-top-b6",
-      "notify-arch3-soft-top-d7")),
-    ("Arch &mdash; three audible steps, 48 ms apart",
-     ("notify-arch3-soft", "notify-arch3-mid", "notify-arch3-deep")),
-    ("Arch &mdash; same levels, notes now climbing (155 ms)",
-     ("notify-arch-low", "notify-arch-octave", "notify-arch-fifth",
-      "notify-arch-wide", "notify-arch-land")),
-    ("Three-step &mdash; unmistakable level direction (155 ms)",
-     ("notify-steps-up", "notify-steps-down", "notify-steps-arch",
-      "notify-steps-valley")),
-    ("Three-step &mdash; the first attempt, gentler (120 ms)",
-     ("notify-triad-rise", "notify-triad-fall", "notify-triad-arch",
-      "notify-triad-dip")),
-    ("Two-step &mdash; the longer takes",
-     ("notify-pair-long", "notify-pair-high", "notify-triad")),
-    ("The original five",
-     ("notify-pair", "notify-tick", "notify-glass", "notify-bubble",
-      "notify-drip")),
+    ("The chime in use &mdash; warm, and its register neighbours",
+     ("notify-tone-warm-a", "notify-tone-warm-g", "notify-tone-warm-c")),
+    ("The other voices &mdash; same three steps, different instrument",
+     ("notify-tone-marimba", "notify-tone-bell", "notify-tone-pluck",
+      "notify-tone-deep-wood")),
+    ("Low arch &mdash; the damped woodblock, lower, steps 80 ms apart",
+     ("notify-low-a5", "notify-low-c5")),
 ]
 
 
@@ -481,8 +624,13 @@ GROUPS = [
 def measure(signal):
     peak = float(np.abs(signal).max())
     rms = float(np.sqrt((signal ** 2).mean()))
-    spectrum = np.abs(np.fft.rfft(signal * np.hanning(len(signal)), 8192))
-    freq = np.fft.rfftfreq(8192, 1 / SR)
+    # Pad to the next power of two, never truncate: rfft(x, 8192) CUTS a longer
+    # signal to its first 8192 samples, and cutting a windowed signal leaves a
+    # step that splatters energy across the spectrum -- which read a low take
+    # as brighter than a higher one, depending on where the cut landed.
+    size = 1 << int(np.ceil(np.log2(max(len(signal), 2))))
+    spectrum = np.abs(np.fft.rfft(signal * np.hanning(len(signal)), size))
+    freq = np.fft.rfftfreq(size, 1 / SR)
     centroid = float((freq * spectrum).sum() / max(spectrum.sum(), 1e-9))
     return {
         "duration_ms": round(1000.0 * len(signal) / SR, 1),
@@ -525,7 +673,7 @@ def svg_wave(signal, width=520, height=64):
 
 def main():
     rows = []
-    for slug, name, blurb, design in SOUNDS:
+    for slug, name, blurb, design in [e for e in SOUNDS if e[0] in KEEP]:
         signal = design()
         # Peak-normalise to -3 dBFS: loud enough to survive a busy mix, with
         # headroom so nothing clips on a phone speaker or a cheap DAC.
@@ -544,6 +692,16 @@ def main():
         print("%-14s %-11s %5.1f ms  peak %5.1f dBFS  centroid %4d Hz  %5.1f kB"
               % (slug, name, info["duration_ms"], info["peak_dbfs"],
                  info["centroid_hz"], info["bytes"] / 1024))
+
+    # Archived takes keep their design but not their file: the folder is what
+    # the preview page is, so anything outside KEEP is removed rather than left
+    # behind as an orphan nobody remembers choosing.
+    for entry in SOUNDS:
+        if entry[0] not in KEEP:
+            stale = os.path.join(OUT, entry[0] + ".wav")
+            if os.path.exists(stale):
+                os.remove(stale)
+                print("archived %s (design kept in generate.py)" % entry[0])
 
     with open(os.path.join(OUT, "preview.html"), "w", encoding="utf-8") as handle:
         handle.write(preview_html(rows))
@@ -616,7 +774,24 @@ def preview_html(rows):
 <body>
 <main>
   <h1>Notification sounds</h1>
-  <p class="sub">Top group: the even-step B6 and D7, damped &mdash; same notes, same timing, softer attack and a duller top. Below them, the crisp versions for comparison.</p>
+  <p class="sub">Nine chimes, one gesture: three notes, 80 ms apart, &minus;6 / 0 / &minus;4 dB. The desktop plays
+  <b>warm, A4 / E5 / B5</b>. The rest are here so it can be changed on another day.</p>
+
+  <div class="spec">
+    <b>Tone, not timing:</b> the gesture is fixed at three notes, 80 ms apart, &minus;6 / 0 / &minus;4 dB, peak
+    &minus;3 dBFS. What moves is the voice: the warm takes are a soft sine with the contact tick removed
+    entirely (3.5&ndash;4 ms attack, roll-off at 4.2 or 3.6 kHz), the marimba keeps odd partials (1, 3, 5) on a
+    short body, the bell uses inharmonic ones (2.76, 5.4), the pluck is a Karplus-Strong string, and the
+    deep wood is the shipped character at G3&ndash;A4 &mdash; a register below every low take tried so far.
+  </div>
+
+  <div class="spec">
+    <b>Low arch:</b> the shipped take climbs 587 / 1077 / 1976 Hz, 48 ms apart, which is why its top
+    two steps fuse and why it reads as a signal rather than as news. The two below keep every part of
+    that design &mdash; 2&ndash;3 ms attack, contact tick 55 % quieter and lower, upper partials pulled
+    back, two-pole roll-off at 5.5 kHz, &minus;6 / 0 / &minus;4 dB arch, peak &minus;3 dBFS &mdash; and move
+    only the notes (A4&ndash;B5 down to C4&ndash;D5) and the spacing (80 ms, so each note has room).
+  </div>
 
   <div class="spec">
     <b>Damping is the edges, not the gesture:</b> the three takes below are the even-step B6 and D7

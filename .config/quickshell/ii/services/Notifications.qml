@@ -600,12 +600,12 @@ Singleton {
     // not be heard over music, and the only way to raise it is to raise the
     // SAMPLE -- the player cannot go past 100 %.
     //
-    // The file is a three-step arch synthesised in assets/sounds/notify/ (see
-    // generate.py): 587 - 1077 - 1976 Hz, 48 ms apart, 172 ms in total, peak
-    // -3 dBFS. It is damped on purpose -- a 2 ms attack, a dull contact tick
-    // and a rolled-off top -- so a chime arrives as a soft three-note rise
-    // rather than a piercing beep. Regenerating the sounds rewrites this file
-    // from the take named CHOSEN in that script.
+    // The file is a three-step chime synthesised in assets/sounds/notify/ (see
+    // generate.py): A4 - E5 - B5 (440 / 659 / 988 Hz), 80 ms apart, 260 ms in
+    // total, peak -3 dBFS. It has no contact tick at all and its attack is a
+    // 3.5 ms ramp, so a notification arrives as a soft three-note rise -- an
+    // acceptance rather than an alert. Regenerating the sounds rewrites this
+    // file from the take named CHOSEN in that script (notify-tone-warm-a).
     readonly property string defaultNotifSound: Quickshell.shellPath("assets/sounds/notification.wav")
 
     // ── How loud the chime is, and why the gain is 1.0 ──────────────────────
@@ -618,14 +618,13 @@ Singleton {
     // exactly the mixer row while the code claimed +5.1 dB. That is the
     // "music is too loud and the notifications are too quiet" report.
     //
-    // Measured on the system file: message.oga peaks at -5.9 dBFS with an RMS
+    // Measured on the system file: message.oga peaked at -5.9 dBFS with an RMS
     // of -26.7 dB -- a soft, short drop (311 ms), and music (a full-scale
     // master, RMS around -10 dB) simply plays over it. A stream volume above
     // 100 % is not available to this player, so the level has to live in the
-    // audio itself: assets/sounds/notification.oga is that same chime at
-    // +4.9 dB, peaking at -0.9 dBFS with an RMS of -21.7 dB. That is the most
-    // that can be given to it without clipping, and it is ~5 dB above where
-    // the chime used to play.
+    // audio itself: the generated chime peaks at -3 dBFS. The louder .oga that
+    // used to carry that level is gone -- the generated file carries it now,
+    // and generate.py is the only thing that writes the sound.
     //
     // So the gain is 1.0 here, and the file carries the level -- which is also
     // why Volumes.qml's device click no longer asks for a factor above one.

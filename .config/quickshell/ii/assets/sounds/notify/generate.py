@@ -46,6 +46,13 @@ CHOSEN = "notify-tone-warm-a"
 # wav -- so bringing one back on another day is adding its slug here, not
 # rewriting the design.
 KEEP = (
+    "notify-wood-g3-clear",
+    "notify-wood-g3-muffled",
+    "notify-wood-g3-wide",
+    "notify-wood-g3-soft-landing",
+    "notify-wood-f3",
+    "notify-wood-d3",
+    "notify-wood-c4",
     "notify-tone-warm-a",
     "notify-tone-warm-g",
     "notify-tone-warm-c",
@@ -530,6 +537,40 @@ SOUNDS = [
      "the shipped character taken a full register below the low arch",
      lambda: design_arch_damped((196.0, 293.7, 440.0), damp=0.35,
                                 cutoff_hz=4000.0, spacing=80)),
+    # ── Deeper wood, changed one axis at a time ──
+    # The deep wood is the damped woodblock at G3 / D4 / A4 with a 4 kHz
+    # roll-off. These keep its gesture and move one thing each: the register
+    # (down to D3, up to C4), how muffled the edges are, how far apart the
+    # steps sit, and whether the top note lands soft.
+    ("notify-wood-f3", "Wood, F3 / C4 / G4 &mdash; a step lower",
+     "the same wood a tone down: 175 - 262 - 392 Hz",
+     lambda: design_arch_damped((174.6, 261.6, 392.0), damp=0.35,
+                                cutoff_hz=3600.0, spacing=80)),
+    ("notify-wood-d3", "Wood, D3 / A3 / E4 &mdash; the deepest",
+     "147 - 220 - 330 Hz: as low as the range stays audible on a laptop",
+     lambda: design_arch_damped((146.8, 220.0, 329.6), damp=0.35,
+                                cutoff_hz=3400.0, spacing=80)),
+    ("notify-wood-c4", "Wood, C4 / G4 / D5 &mdash; a step up",
+     "262 - 392 - 587 Hz: the same voice for comparison against the warm take",
+     lambda: design_arch_damped((261.6, 392.0, 587.3), damp=0.35,
+                                cutoff_hz=4400.0, spacing=80)),
+    ("notify-wood-g3-clear", "Wood, G3 &mdash; clearer edges",
+     "damping down to 0.15 and a 5.2 kHz roll-off: the same notes, defined",
+     lambda: design_arch_damped((196.0, 293.7, 440.0), damp=0.15,
+                                cutoff_hz=5200.0, spacing=80)),
+    ("notify-wood-g3-muffled", "Wood, G3 &mdash; muffled edges",
+     "damping up to 0.6 and a 3 kHz roll-off: softer, almost felt",
+     lambda: design_arch_damped((196.0, 293.7, 440.0), damp=0.60,
+                                cutoff_hz=3000.0, spacing=80)),
+    ("notify-wood-g3-wide", "Wood, G3 &mdash; steps 96 ms apart",
+     "the same notes and edges, each step given more air (268 ms)",
+     lambda: design_arch_damped((196.0, 293.7, 440.0), damp=0.35,
+                                cutoff_hz=4000.0, spacing=96)),
+    ("notify-wood-g3-soft-landing", "Wood, G3 &mdash; soft landing",
+     "the top note at &minus;9 dB instead of &minus;4: it settles rather than lands",
+     lambda: design_arch_damped((196.0, 293.7, 440.0),
+                                levels_db=(-6.0, 0.0, -9.0),
+                                damp=0.35, cutoff_hz=4000.0, spacing=80)),
     ("notify-arch3-d7-damped", "D7 even steps, damped",
      "587 / 1175 / 2349 Hz with the same soft edges",
      lambda: design_arch_damped((587.3, 1174.7, 2349.3),
@@ -608,11 +649,15 @@ SOUNDS = [
 ]
 
 GROUPS = [
+    ("Deeper wood &mdash; one axis moved at a time (the original first)",
+     ("notify-tone-deep-wood", "notify-wood-g3-clear", "notify-wood-g3-muffled",
+      "notify-wood-g3-wide", "notify-wood-g3-soft-landing")),
+    ("Deeper wood &mdash; the same voice a register down, and one up",
+     ("notify-wood-f3", "notify-wood-d3", "notify-wood-c4")),
     ("The chime in use &mdash; warm, and its register neighbours",
      ("notify-tone-warm-a", "notify-tone-warm-g", "notify-tone-warm-c")),
     ("The other voices &mdash; same three steps, different instrument",
-     ("notify-tone-marimba", "notify-tone-bell", "notify-tone-pluck",
-      "notify-tone-deep-wood")),
+     ("notify-tone-marimba", "notify-tone-bell", "notify-tone-pluck")),
     ("Low arch &mdash; the damped woodblock, lower, steps 80 ms apart",
      ("notify-low-a5", "notify-low-c5")),
 ]
@@ -774,8 +819,9 @@ def preview_html(rows):
 <body>
 <main>
   <h1>Notification sounds</h1>
-  <p class="sub">Nine chimes, one gesture: three notes, 80 ms apart, &minus;6 / 0 / &minus;4 dB. The desktop plays
-  <b>warm, A4 / E5 / B5</b>. The rest are here so it can be changed on another day.</p>
+  <p class="sub">Sixteen takes, one gesture: three notes, &minus;6 / 0 / &minus;4 dB, the steps given room. The
+  desktop plays <b>warm, A4 / E5 / B5</b>; the deeper wood is the same damped character a register lower,
+  with each variant below it changing one thing only.</p>
 
   <div class="spec">
     <b>Tone, not timing:</b> the gesture is fixed at three notes, 80 ms apart, &minus;6 / 0 / &minus;4 dB, peak

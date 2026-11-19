@@ -160,6 +160,26 @@ hl.unbind("SUPER + mouse:273")
 -- verified with hyprctl binds).
 hl.bind("SUPER + mouse:273", hl.dsp.window.resize(), { mouse = true, description = "Window: Resize" })
 
+-- ...and MOVING one, for the windows that are no longer attached. Attached
+-- windows stay fixed here (the unbind above, and the note in custom/general.lua
+-- about the three-finger move gesture), but once SUPER+D has detached a window
+-- there is nothing to be fixed TO -- and a floating window that cannot be put
+-- where you want it is the one thing that makes floating useless. So SUPER +
+-- left-drag moves a window, and only a floating one: the guard reads the
+-- window's own state at press time, not a remembered mode.
+--
+-- The bind is UNCONDITIONAL and the guard is what keeps the old rule intact --
+-- measured with a synthetic relative mouse (ydotool's own device advertises
+-- absolute axes and warps the pointer to a corner, so that one cannot test
+-- this): SUPER + left-drag moved a floating kitty 804px -> 909px, and the same
+-- drag over a TILED window left it exactly where it was.
+hl.bind("SUPER + mouse:272", function()
+    local w = hl.get_active_window()
+    if w and w.floating then
+        hl.dispatch(hl.dsp.window.drag())
+    end
+end, { mouse = true, description = "Window: Move (floating windows only)" })
+
 -- ═══ The middle button never reaches an application ═════════════════════
 --
 -- A THREE-finger tap was pasting a large blob into text boxes. What that
@@ -899,13 +919,17 @@ end
 
 hl.unbind("SUPER + D")
 hl.bind("SUPER + D", function()
-    -- REVERSED (requested): SUPER+D now opens the DESKTOPS OVERVIEW -- the
-    -- zoomed-out grid every desktop drawn to scale -- which the 4-finger tap
-    -- used to own; the tap took showDesktop over instead (routing in
-    -- shell.qml). Both live in custom/popup.lua next to each other so the
-    -- shared popup guard stays in one file. Plain navigation, no edit mode.
-    popup.desktopsOverview()
-end, { description = "Shell: Desktops overview (SUPER+D, was the 4-finger tap)" })
+    -- REVERSED AGAIN (requested 2026-11-19): SUPER+D is now "float everything on
+    -- THIS desktop" -- the movable/resizable, unattached version of the apps
+    -- you already have open here, never fullscreen, and never a window on
+    -- another desktop. Pressing it again puts back exactly what it floated
+    -- (see toggleWorkspaceFloat in custom/general.lua).
+    --
+    -- The desktops overview it used to open is unchanged and still reachable:
+    -- SUPER+Tab opens it (the grid of every desktop), and the 4-finger tap is
+    -- its own route (see custom/popup.lua).
+    toggleWorkspaceFloat()
+end, { description = "Windows: Float/tile everything on this desktop" })
 
 hl.bind("SUPER + ALT + D", hl.dsp.window.fullscreen({ mode = "maximized", action = "toggle" }),
     { description = "Window: Maximize" })

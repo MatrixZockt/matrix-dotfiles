@@ -3,7 +3,7 @@
 Auto-generated from the **running** Hyprland instance (`hyprctl binds -j`),
 so this is what your keys actually do right now.
 
-Total binds: **327**
+Total binds: **329**
 
 Regenerate with:
 
@@ -83,6 +83,7 @@ make keybinds
 | Keys | Action |
 | --- | --- |
 | `ALT + SUPER + A` | SUPER chord (cancels the bare-SUPER action) — (lua action) |
+| `ALT + SUPER + B` | Hard restart the desktop shell — (lua action) |
 | `ALT + SUPER + D` | SUPER chord (cancels the bare-SUPER action) — (lua action) |
 | `ALT + SUPER + Down` | SUPER chord (cancels the bare-SUPER action) — (lua action) |
 | `ALT + SUPER + Equal` | SUPER chord (cancels the bare-SUPER action) — (lua action) |
@@ -178,7 +179,6 @@ make keybinds
 | `SUPER + BracketLeft` | SUPER chord (cancels the bare-SUPER action) — (lua action) |
 | `SUPER + BracketRight` | SUPER chord (cancels the bare-SUPER action) — (lua action) |
 | `SUPER + C` | SUPER chord (cancels the bare-SUPER action) — (lua action) |
-| `SUPER + D` | Desktops overview (SUPER+D, was the 4-finger tap) — (lua action) |
 | `SUPER + D` | SUPER chord (cancels the bare-SUPER action) — (lua action) |
 | `SUPER + Down` | SUPER chord (cancels the bare-SUPER action) — (lua action) |
 | `SUPER + E` | SUPER chord (cancels the bare-SUPER action) — (lua action) |
@@ -296,12 +296,19 @@ make keybinds
 | `SHIFT + SUPER + Up` | Move window — (lua action) |
 | `SUPER + Down` | Resize Down — (lua action) |
 | `SUPER + F` | Fill the screen (bar yields its strip; app keeps its chrome) — (lua action) |
+| `SUPER + LMB` | Move (floating windows only) — (lua action) |
 | `SUPER + Left` | Resize Left — (lua action) |
 | `SUPER + Q` | Close — (lua action) |
 | `SUPER + RMB` | Resize — (lua action) |
 | `SUPER + Right` | Resize Right — (lua action) |
 | `SUPER + Side2` | Controls menu (mouse) — (lua action) |
 | `SUPER + Up` | Resize Up — (lua action) |
+
+## Windows
+
+| Keys | Action |
+| --- | --- |
+| `SUPER + D` | Float/tile everything on this desktop — (lua action) |
 
 ## Workspace
 

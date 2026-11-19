@@ -3133,6 +3133,169 @@ function setFloat(addr, on)
     return isFloating(addr) == on
 end
 
+-- ═══ Float everything on THIS desktop (SUPER + D) ═════════════════════
+--
+-- REQUESTED (2026-11-19): SUPER + D makes every app on the CURRENT desktop
+-- floating -- movable, resizable, attached to nothing -- without going
+-- fullscreen, and without touching any other desktop. Pressing it again puts
+-- back exactly the windows it floated.
+--
+-- WHY THE ADDRESSES ARE REMEMBERED instead of "unfloat everything": a dialog,
+-- a picture-in-picture or a portal prompt is floating because a RULE said so,
+-- and tiling one of those would be a bug this keybind caused. Only what this
+-- keybind floated is put back. On a desktop that was floated by hand (no
+-- record) the second press still does the useful thing and re-tiles every
+-- ordinary floating window -- dialogs and pinned windows stay as they are.
+--
+-- THE `window = <object>` FORM, NOT an address. Measured 2026-11-19 on a
+-- workspace holding two kitty windows, one at a time:
+--
+--   float({ action = "set", address = "0x..." })   → answers ok, floats the
+--                                                    FOCUSED window instead.
+--                                                    The address is ignored;
+--                                                    with an empty address it
+--                                                    still floats the focus.
+--   float({ action = "set", window  = <object> })  → floats THAT window. ✔
+--
+-- "ok" is not evidence of anything here: `hyprctl dispatch` wraps the argument
+-- as `return hl.dispatch(<expr>)`, so an unknown field is dropped in silence
+-- and the dispatcher falls back to the focused window. That is also why this
+-- has to live in the config: the window OBJECT only exists in here (the same
+-- reason FIELD_SWIPE is Lua, see the note above it).
+floated_by_me = floated_by_me or {}
+
+-- ── The tiny tell ──────────────────────────────────────────────────────
+--
+-- SUPER + D is a mode with no other sign: the windows look exactly as they did
+-- and simply start following the pointer. So the shell draws a 7px dot for as
+-- long as the desktop is in float mode (modules/ii/floatMode/FloatModeBadge.qml
+-- in the Quickshell config), and this is the line that tells it. Keyed by the
+-- workspace id, because the mode is per desktop -- the shell only draws the dot
+-- for the desktop you are on.
+--
+-- Fire-and-forget on purpose: `hl.dsp.exec_cmd` is a dispatcher, so a shell that
+-- happens to be restarting cannot fail a keypress. It is not a notification --
+-- nothing to read, nothing to dismiss, no text at all.
+function floatModeTell(ws_id, on)
+    hl.dispatch(hl.dsp.exec_cmd(
+        "qs -c ii ipc call floatMode set " .. tostring(ws_id) .. (on and " 1" or " 0")))
+end
+
+function toggleWorkspaceFloat()
+    local ws = hl.get_active_workspace()
+    if not ws then return false end
+    -- `hl.get_workspace_windows(id)` is the LIST; `hl.get_workspace(id).windows`
+    -- is only a count (learned the hard way, see the note near the workspace
+    -- layout code).
+    local wins = hl.get_workspace_windows(ws.id) or {}
+    local tiled, floating, live = {}, {}, {}
+    for _, w in ipairs(wins) do
+        if not w.hidden then
+            live[w.address] = true
+            if w.floating then
+                table.insert(floating, w)
+            elseif not w.pinned then
+                table.insert(tiled, w)
+            end
+        end
+    end
+
+    local record = floated_by_me[ws.id] or {}
+    for addr in pairs(record) do          -- windows closed since the last press
+        if not live[addr] then record[addr] = nil end
+    end
+
+    if #tiled > 0 then
+        -- Three passes on purpose -- read all rectangles, detach all windows,
+        -- then place them. The order is load-bearing in both directions:
+        -- floating one window hands its space to the ones still tiled, so a
+        -- rectangle read after the first float is already wrong, and a
+        -- resize/move sent in the same breath as the float can land while the
+        -- window is still tiled, where it is dropped. Both were measured here:
+        -- two kitty windows side by side at 845x1010, one collapsed into a
+        -- single pass, ended up 1695x1010 wide -- i.e. one full desktop's
+        -- worth of width, which is the "fullscreen, but not really" state.
+        local place = {}
+        for _, w in ipairs(tiled) do
+            -- FIRST pass: read every rectangle before anything is detached.
+            -- Floating one window hands its space to its tiled neighbours, so a
+            -- rectangle read after the first float is already the enlarged one
+            -- (measured: with two kitty windows side by side at 845x1010, the
+            -- second one read 1695x1010 once the first had floated). Geometry
+            -- is `size.x`/`size.y` (w/h) and `at.x`/`at.y` (x/y) in LAYOUT
+            -- pixels -- measured: size.x 1695, size.y 1010, at.x 6, at.y 51 on
+            -- a 2560x1600 monitor at scale 1.5. (`size.w` and `w.width` are
+            -- nil; that is the naming this API uses.)
+            -- A fullscreen/maximised window is measured at its screen-filling
+            -- rectangle, so its geometry is deliberately not reused: it floats
+            -- at whatever size it had before it went fullscreen instead.
+            local keep_rect = (w.fullscreen or 0) == 0
+            local sw = keep_rect and w.size and w.size.x or nil
+            local sh = keep_rect and w.size and w.size.y or nil
+            local sx = keep_rect and w.at and w.at.x or nil
+            local sy = keep_rect and w.at and w.at.y or nil
+            place[#place + 1] = { w = w, sw = sw, sh = sh, sx = sx, sy = sy }
+        end
+
+        -- SECOND pass: detach them all.
+        for _, p in ipairs(place) do
+            local w = p.w
+            -- A fullscreen window has to leave fullscreen to become a free
+            -- one; floating it while it still fills the screen is the
+            -- "attached but not resizable" state this keybind exists to end.
+            if (w.fullscreen or 0) ~= 0 then
+                hl.dispatch(hl.dsp.window.fullscreen({
+                    mode = ((w.fullscreen or 0) == 1) and "maximized" or "fullscreen",
+                    action = "unset",
+                    window = w,
+                }))
+            end
+            hl.dispatch(hl.dsp.window.float({ action = "set", window = w }))
+            record[w.address] = true
+        end
+
+        -- THIRD pass: ...and STAY where they were, at the size they had.
+        -- Detaching on its own restores each window's remembered float
+        -- geometry, which for an app that has never floated is the whole
+        -- monitor -- floating but screen-sized, the "fullscreen, but not
+        -- really" reading this keybind is meant to avoid. Measured: a kitty
+        -- tiled at 1695x1010+6+51 came up 1707x1067+-1+-1 without this.
+        for _, p in ipairs(place) do
+            if p.sw and p.sh then
+                hl.dispatch(hl.dsp.window.resize({ window = p.w, x = p.sw, y = p.sh }))
+            end
+            if p.sx and p.sy then
+                hl.dispatch(hl.dsp.window.move({ window = p.w, x = p.sx, y = p.sy }))
+            end
+        end
+        floated_by_me[ws.id] = record
+        floatModeTell(ws.id, true)
+        return true
+    end
+
+    -- ONLY what this keybind floated goes back. A window that was already
+    -- floating when it was pressed (an app that asks to float, a picture-in-
+    -- picture, a dialog) is not this keybind's to tile -- on a desktop whose
+    -- only window is one of those, a second press is a no-op rather than a
+    -- surprise. Measured on this desktop: ws4 holds one always-floating window,
+    -- and tiling it would have been exactly that surprise.
+    local restored = 0
+    for _, w in ipairs(floating) do
+        if record[w.address] then
+            hl.dispatch(hl.dsp.window.float({ action = "unset", window = w }))
+            record[w.address] = nil
+            restored = restored + 1
+        end
+    end
+    if next(record) == nil then floated_by_me[ws.id] = nil else floated_by_me[ws.id] = record end
+    -- What is LEFT, not what this press did: a desktop whose windows were all
+    -- closed is no longer in float mode either, and the dot has to go out with
+    -- the last of them rather than stay lit over an empty desktop.
+    local left = floated_by_me[ws.id]
+    floatModeTell(ws.id, left ~= nil and next(left) ~= nil)
+    return restored > 0
+end
+
 -- ═══ "This float was not meant to be one" ═════════════════════════════
 --
 -- REQUESTED: a three-finger swipe in ANY direction, or four fingers up,

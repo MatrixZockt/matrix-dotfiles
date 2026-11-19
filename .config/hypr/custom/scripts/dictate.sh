@@ -247,20 +247,62 @@ focused_is_xwayland() {
 # marker without the file list -- a copied video came back as nothing at all,
 # which is exactly the report "my copied file is gone after a dictation".
 #
-# So: the picture, else the file list, else whatever is first. One type is all
-# wl-copy can own with one payload, and these are the ones that paste.
+# So: the picture, else the file list, else TEXT, and only then whatever is
+# first that X11 is not using for protocol bookkeeping. One type is all wl-copy
+# can own with one payload, and these are the ones that paste.
+#
+# THE PSEUDO-TARGETS ARE THE BUG (2026-11-19). An XWayland selection -- Discord,
+# WhatsApp, any Electron app -- advertises TARGETS, MULTIPLE, TIMESTAMP and
+# SAVE_TARGETS BEFORE the content. They are not content: TARGETS is the list of
+# formats the owner supports. Saving it stored an atom list, putting it back put
+# that atom list back, and the verify below compared TARGETS with TARGETS and
+# called it a success -- so the clipboard was "restored" to something no app can
+# paste. Reported as: copy text, dictate, then Ctrl+V pastes nothing and the text
+# has to be pulled out of the clipboard history by hand.
 clipboard_payload_type() {
-    local types="${1:-}" t
-    for t in image/png image/jpeg text/uri-list; do
-        printf '%s\n' "$types" | grep -qx "$t" && { printf '%s' "$t"; return 0; }
+    local types="${1:-}" t first=""
+    local pseudo=" TARGETS MULTIPLE TIMESTAMP SAVE_TARGETS DELETE INSERT_SELECTION LOST_SELECTION "
+    for t in image/png image/jpeg text/uri-list \
+             text/plain 'text/plain;charset=utf-8' UTF8_STRING TEXT STRING text/html; do
+        printf '%s\n' "$types" | grep -qxF -- "$t" && { printf '%s' "$t"; return 0; }
     done
-    printf '%s\n' "$types" | head -n1
+    while IFS= read -r t; do
+        [ -n "$t" ] || continue
+        case "$pseudo" in *" $t "*) continue ;; esac
+        first="$t"
+        break
+    done <<< "$types"
+    printf '%s' "$first"
+}
+
+# Is the payload that was borrowed actually back on the selection, byte for byte?
+#
+# The check used to compare the FIRST advertised type with the saved one, which
+# says nothing about the data and is wrong in both directions: a restore of a
+# pseudo-target looked successful while holding an atom list, and a clipboard
+# manager or XWayland that advertises something else first made a correct restore
+# look failed -- which then CLEARED the clipboard, the other way a copied sentence
+# disappeared. Reading the payload back and comparing it is the question that
+# matters: does Ctrl+V get the user's own text again?
+clipboard_payload_intact() {   # $1 = type, $2 = backup file
+    local type="$1" file="$2" probe="$STATE/clipboard-probe"
+    rm -f "$probe"
+    if wl-paste -n -t "$type" >"$probe" 2>/dev/null && cmp -s "$file" "$probe"; then
+        rm -f "$probe"
+        return 0
+    fi
+    rm -f "$probe"
+    return 1
 }
 
 restore_clipboard() {
-    local prev_file prev_type type_file
+    local prev_file prev_type type_file borrowed=""
     prev_file="$STATE/clipboard-backup"
     type_file="$STATE/clipboard-backup.type"
+    # What was said out loud, so a restore that fails can tell "the sentence is
+    # still on the selection" (clear it) from "something else is on it" (leave
+    # it alone -- clearing there destroys the user's own copy).
+    [ -r "$STATE/clipboard-borrowed" ] && borrowed="$(cat "$STATE/clipboard-borrowed" 2>/dev/null)"
     if command -v flock >/dev/null 2>&1; then
         exec 8>"$STATE/restore.lock" 2>/dev/null || true
         flock -w 3 8 2>/dev/null || true
@@ -286,24 +328,31 @@ restore_clipboard() {
         # the type it owns afterwards is checked, retried once, and if it still
         # will not take, the clipboard is CLEARED: an empty clipboard is a
         # missing paste, a stale sentence is a wrong one.
-        local attempt=1 back_type=""
+        local attempt=1 ok=0 on_clip=""
         while [ "$attempt" -le 2 ]; do
             sleep 0.05
-            back_type="$(wl-paste --list-types 2>/dev/null | head -n1)"
-            [ "$back_type" = "$prev_type" ] && break
+            clipboard_payload_intact "$prev_type" "$prev_file" && { ok=1; break; }
             wl-copy -t "$prev_type" < "$prev_file" 8>&- 9>&- 2>/dev/null
             attempt=$(( attempt + 1 ))
         done
-        if [ "$back_type" = "$prev_type" ]; then
+        if [ "$ok" = 1 ]; then
             say "clipboard restored ($prev_type, $(wc -c < "$prev_file") bytes)"
         else
-            say "clipboard restore FAILED for $prev_type (saw '${back_type:-nothing}'); clearing it so the sentence cannot be pasted"
-            wl-copy --clear 8>&- 9>&- 2>/dev/null || true
+            # Clearing is only right when the thing left behind is the SENTENCE.
+            # Deciding that from the first advertised type is how a good restore
+            # became an empty clipboard; ask what the text actually is.
+            on_clip="$(wl-paste -n -t text/plain 2>/dev/null || true)"
+            if [ -n "$borrowed" ] && [ "$on_clip" = "$borrowed" ]; then
+                say "clipboard restore could not be verified for $prev_type and the sentence is still on the selection; clearing it"
+                wl-copy --clear 8>&- 9>&- 2>/dev/null || true
+            else
+                say "clipboard restore could not be verified for $prev_type; leaving the selection alone"
+            fi
         fi
     fi
-    rm -f "$prev_file"
-    PASTE_STAGED=0
-    exec 8>&- 2>/dev/null
+            rm -f "$prev_file" "$STATE/clipboard-borrowed"
+        PASTE_STAGED=0
+        exec 8>&- 2>/dev/null
     return 0
 }
 
@@ -388,12 +437,13 @@ paste_text() {
     local types prev_type prev_file
     prev_file="$STATE/clipboard-backup"
     if [ "${PASTE_STAGED:-0}" != 1 ]; then
-        rm -f "$prev_file" "$STATE/clipboard-backup.type"
+        rm -f "$prev_file" "$STATE/clipboard-backup.type" "$STATE/clipboard-borrowed"
         types="$(wl-paste --list-types 2>/dev/null | grep -vi 'x-kde-passwordManagerHint')"
         prev_type="$(clipboard_payload_type "$types")"
         if command -v wl-paste >/dev/null && [ -n "$prev_type" ] \
                 && wl-paste -n -t "$prev_type" > "$prev_file" 2>/dev/null; then
             printf '%s' "$prev_type" > "$STATE/clipboard-backup.type"
+            printf '%s' "$1" > "$STATE/clipboard-borrowed" 2>/dev/null || true
             say "clipboard borrowed ($prev_type, $(wc -c < "$prev_file") bytes)"
         else
             # An empty clipboard is recorded too (`empty`), not left as "no

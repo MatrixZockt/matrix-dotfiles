@@ -25,6 +25,7 @@ Exit: 0 if at least one stream was muted, 1 if nothing matched.
 """
 
 import json
+import os
 import re
 import select
 import subprocess
@@ -44,8 +45,17 @@ STREAM_KEYS = (
     "application.process.name",
     "application.desktop",
     "application.id",
+    "application.icon_name",
     "node.name",
 )
+
+# Where a run leaves its evidence. The app's identity in a notification and the
+# identity it puts on its audio stream are two different strings, and when they
+# do not meet nothing is muted and nothing is reported -- which is exactly the
+# report this log exists to end (2026-11-19: "WhatsApp is marked sound off and I
+# still hear its sound"). One line per run, no audio data, no secrets.
+LOG_NAME = "ii-notification-silence.log"
+LOG_MAX_BYTES = 256 * 1024
 
 
 def normalize(value):
@@ -80,9 +90,68 @@ def sink_inputs():
         return []
 
 
+def proc_words(stream):
+    """Words from the process that owns the stream, not from its own labels.
+
+    Measured 2026-11-19 on this machine: a Chromium-family stream carries
+    `application.process.id` alongside `application.name`, and Electron apps do
+    NOT always put their own name in `application.name` -- WhatsApp reports
+    itself as "Chromium" there. Matching only the text properties therefore
+    missed it entirely. /proc is authoritative: the executable it points at is
+    the app, whatever the stream decided to call itself.
+    """
+    props = stream.get("properties") or {}
+    pid = props.get("application.process.id")
+    out = set()
+    if not pid:
+        return out
+    for path in (f"/proc/{pid}/comm", f"/proc/{pid}/cmdline"):
+        try:
+            with open(path, "rb") as handle:
+                raw = handle.read(4096)
+        except OSError:
+            continue
+        out.update(words(raw.replace(b"\0", b" ").decode("utf-8", "replace")))
+    try:
+        exe = os.readlink(f"/proc/{pid}/exe")
+    except OSError:
+        exe = ""
+    if exe:
+        out.update(words(os.path.basename(exe)))
+        out.update(words(os.path.dirname(exe)))
+    return out
+
+
 def owned_words(stream):
     props = stream.get("properties") or {}
-    return set(words(" ".join(str(props.get(key, "")) for key in STREAM_KEYS)))
+    blob = " ".join(str(props.get(key, "")) for key in STREAM_KEYS)
+    return set(words(blob)) | proc_words(stream)
+
+
+def note(message):
+    """Append one line to the run log; never fail the caller over it."""
+    try:
+        base = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+        path = os.path.join(base, LOG_NAME)
+        try:
+            if os.path.getsize(path) > LOG_MAX_BYTES:
+                os.replace(path, path + ".1")
+        except OSError:
+            pass
+        with open(path, "a") as handle:
+            handle.write(time.strftime("%H:%M:%S ") + message + "\n")
+    except OSError:
+        pass
+
+
+def describe(stream):
+    props = stream.get("properties") or {}
+    return "#%s name=%r bin=%r pid=%s" % (
+        stream.get("index"),
+        props.get("application.name"),
+        props.get("application.process.binary"),
+        props.get("application.process.id"),
+    )
 
 
 def set_mute(index, muted):
@@ -102,7 +171,9 @@ def main():
         window = 2.0
     want = wanted(sys.argv[2:])
     if not want:
+        note("skip: no usable words in %r" % (sys.argv[2:],))
         return 1
+    note("run window=%ss want=%s ids=%s" % (window, sorted(want), sys.argv[2:]))
 
     ours = set()
     # Streams that were already muted BEFORE we did anything: that is the user's
@@ -166,7 +237,10 @@ def main():
 
     if ours:
         print(f"silenced app sound on {len(ours)} stream(s): {sorted(ours)}")
+        note("muted %s" % sorted(ours))
         return 0
+    seen = [describe(stream) for stream in sink_inputs()]
+    note("no match; streams seen: %s" % ("; ".join(seen) if seen else "none"))
     return 1
 
 

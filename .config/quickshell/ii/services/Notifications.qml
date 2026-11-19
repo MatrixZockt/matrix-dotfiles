@@ -599,7 +599,14 @@ Singleton {
     // below: the system file peaks at -5.9 dBFS, which is why the chime could
     // not be heard over music, and the only way to raise it is to raise the
     // SAMPLE -- the player cannot go past 100 %.
-    readonly property string defaultNotifSound: Quickshell.shellPath("assets/sounds/notification.oga")
+    //
+    // The file is a three-step arch synthesised in assets/sounds/notify/ (see
+    // generate.py): 587 - 1077 - 1976 Hz, 48 ms apart, 172 ms in total, peak
+    // -3 dBFS. It is damped on purpose -- a 2 ms attack, a dull contact tick
+    // and a rolled-off top -- so a chime arrives as a soft three-note rise
+    // rather than a piercing beep. Regenerating the sounds rewrites this file
+    // from the take named CHOSEN in that script.
+    readonly property string defaultNotifSound: Quickshell.shellPath("assets/sounds/notification.wav")
 
     // ── How loud the chime is, and why the gain is 1.0 ──────────────────────
     //

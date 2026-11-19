@@ -663,7 +663,7 @@ Timer {
     // way to make one sound louder than the row (see the clamp note in the
     // body). Making a sound louder than music is the SAMPLE's job, and both
     // sounds that needed it now carry their level in the file
-    // (assets/sounds/notification.oga is the chime at -0.9 dBFS peak). The
+    // (assets/sounds/notification.wav is the chime at -3 dBFS peak). The
     // row still scales gains in every direction -- a row at zero or muted
     // spawns nothing at all -- and the sink is applied once, by the sink.
     // Measured in the log line below as `row x gain`, so the identity is
@@ -701,7 +701,7 @@ Timer {
         // and an unmarked stream would appear in the volume mixer as a
         // flickering "paplay" row -- the bug isSystemSoundNode exists to
         // prevent. So the level lives in the SAMPLE instead
-        // (assets/sounds/notification.oga is the chime at +4.9 dB), and the
+        // (assets/sounds/notification.wav is the chime, peaking at -3 dBFS), and the
         // factor is clamped here so no caller can silently believe in a boost
         // that the player throws away.
         const factor = (isNaN(gain) || gain <= 0) ? 1.0 : Math.min(1, gain);

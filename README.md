@@ -113,7 +113,10 @@ is what `memory-guard.service` is for: it samples memory every two seconds and
 names what it *would* close when memory falls under 10% of RAM or zram is full —
 RSS slope over the last twelve seconds, not plain size — in a notification and in
 `journalctl --user -u memory-guard`. It closes nothing: killing was turned off on
-2026-11-19 at the owner's request, and the unit ships with `DRY_RUN=1`.
+2026-11-19 at the owner's request, and the unit ships with `DRY_RUN=1`. It also
+writes one reading line a minute (`HEARTBEAT`, 0 turns it off), so pressure that
+never trips a threshold still leaves a trace; it is a *user* unit, so read it with
+`systemctl --user status memory-guard` — the system-bus form reports not-found.
 
 ### Swap: zram in front, disk behind it
 

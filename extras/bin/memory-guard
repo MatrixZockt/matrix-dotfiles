@@ -91,6 +91,14 @@ TESTING
                            candidates (growth per second, kept/last resort, and
                            which one would be closed) and change nothing.
   DRY_RUN=1 or --dry-run   run the normal loop but only log what it would kill.
+  HEARTBEAT (60 s, 0 = off) logs one reading line per interval -- available
+                           memory, swap, pressure, drain and the top candidate.
+                           Without it the guard is silent until it fires, so a
+                           pressure event that never triggers leaves no trace;
+                           with it, `journalctl --user -u memory-guard` has the
+                           curve that led up to the next one.
+  NOTE: this is a USER unit. `systemctl --user status memory-guard`, not
+  `systemctl status memory-guard` -- the latter reports not-found.
   FLOOR / INTERVAL / WINDOW / MAX_KILLS / MIN_RSS_MB / COOLDOWN / TERM_GRACE read
   the environment, but only as validated positive integers -- see env_int().
 """
@@ -670,6 +678,37 @@ def episode(reason, tracker):
     return killed
 
 
+def reading(tracker):
+    """One line describing what the guard sees right now.
+
+    The loop is silent by design until it fires, which is fine for the machine
+    and useless for the morning after: a freeze that never tripped a threshold
+    leaves nothing behind. This is the periodic trace.
+    """
+    state = meminfo()
+    total_mb = state["MemTotal"] // 1024
+    used_swap = (state["SwapTotal"] - state["SwapFree"]) // 1024
+    fired, reason = trigger(state)
+    parts = [
+        "%d MB available of %d MB" % (state["MemAvailable"] // 1024, total_mb),
+        "swap %d/%d MB" % (used_swap, state["SwapTotal"] // 1024),
+        "pressure full avg10 %.1f%%" % pressure_full_avg10(),
+        "drain %d MB/s" % round(drain_mb_s()),
+        "trigger %s" % (reason if fired else "no"),
+    ]
+    chosen, last_resort = victim(tracker.sample())
+    qualifies = chosen is not None and (
+        chosen["rss"] >= MIN_RSS_MB * 1024
+        or (chosen["growth"] or 0.0) >= FAST_GROWTH_MB * 1024)
+    if qualifies:
+        parts.append("top candidate %s (pid %d, %d MB%s)"
+                     % (chosen["name"], chosen["pid"], chosen["rss"] // 1024,
+                        ", keep list" if last_resort else ""))
+    else:
+        parts.append("nothing above %d MB to close" % MIN_RSS_MB)
+    return "; ".join(parts)
+
+
 def check():
     tracker = Tracker()
     tracker.sample()
@@ -741,6 +780,8 @@ def main():
            ("%d MB" % FLOOR_MB) if FLOOR_MB else "10% of RAM",
            TREND_FLOOR_MB, DRAIN_MB, warmup, DRY_RUN))
     cooldown_until = 0.0
+    heartbeat = env_int("HEARTBEAT", 60, 0, 3600)
+    next_report = time.monotonic() + heartbeat if heartbeat else 0.0
     while True:
         tracker.sample()
         if time.monotonic() - started < warmup:
@@ -771,6 +812,9 @@ def main():
         elif once:
             log("nothing to do: memory is inside the limit")
             return 0
+        elif heartbeat and time.monotonic() >= next_report:
+            log(reading(tracker))
+            next_report = time.monotonic() + heartbeat
         time.sleep(INTERVAL)
 
 

@@ -838,7 +838,20 @@ Singleton {
         const appName = String(notification.appName ?? "");
         const desktopEntry = String(notification.desktopEntry ?? "");
         const appIcon = String(notification.appIcon ?? "");
-        if (!root.isAppSoundMuted(appName, desktopEntry, appIcon))
+        // ── Every notification, not only the muted apps (2026-11-19) ─────
+        //
+        // REQUESTED: "the administration prompt's chime sounds stronger and
+        // higher quality -- make sure the rest of the notifications are also
+        // this way". They already are: the mixer log shows the same file at
+        // the same level for all 341 plays, including the prompt's. What the
+        // prompt does NOT have is an app playing its own chime at the same
+        // instant -- and two sounds arriving together read as one muddy one,
+        // which is the whole difference that was heard. So the sender's own
+        // sound is silenced by default for EVERY notification, and the chime
+        // is heard alone, exactly as at the prompt. The per-app Sound switch
+        // still silences one app on its own when this is switched off.
+        const everyApp = Config?.options.notifications.silenceAppSounds ?? true;
+        if (!everyApp && !root.isAppSoundMuted(appName, desktopEntry, appIcon))
             return false;
         console.log("[Notifications] silencing the app's own sound: " + appName);
         const identities = root.identitiesOf(appName, desktopEntry, appIcon)

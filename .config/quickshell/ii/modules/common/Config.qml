@@ -689,6 +689,17 @@ Singleton {
                 // before (nothing in the shell ever asked for a sound), which
                 // read as "the audio stack is broken" while YouTube played fine.
                 property bool sound: true
+                // ── One chime, with nothing playing under it ──
+                // Every delivered notification silences the SENDER's own sound
+                // for a moment, so the desktop chime is heard alone. Asked for
+                // 2026-11-19: "the administration prompt's chime sounds stronger
+                // and higher quality" -- and it is the same file at the same
+                // level (measured: 341 plays, all 1.000); the prompt simply has
+                // no app playing a second sound over it. This makes every
+                // notification sound the way that one does.
+                // Off means only the apps in soundMutedApps are silenced, which
+                // is how this behaved before.
+                property bool silenceAppSounds: true
                 // ── Apps the user has muted ──
                 // A list of names, not a JsonObject: the config adapter DROPS
                 // any key inside a JsonObject that is not declared here (see the

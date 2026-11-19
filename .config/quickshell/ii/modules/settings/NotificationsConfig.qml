@@ -373,9 +373,18 @@ ContentPage {
             }
         }
 
+        ConfigSwitch {
+            buttonIcon: "music_off"
+            text: Translation.tr("Only the desktop chime (silence each app's own notification sound)")
+            checked: Config.options.notifications.silenceAppSounds ?? true
+            onCheckedChanged: {
+                Config.options.notifications.silenceAppSounds = checked;
+            }
+        }
+
         StyledText {
             Layout.fillWidth: true
-            text: Translation.tr("Popup timing and the monitor to show notifications on are in Bluetooth & devices. Sound off silences the app's own notification sound for a moment while its notification still appears; the PC notification sound is not affected and always plays. Muted stops the app's notifications from appearing at all.")
+            text: Translation.tr("Popup timing and the monitor to show notifications on are in Bluetooth & devices. The app's own notification sound is silenced for a moment by default, so every notification is heard as the desktop chime alone -- the same sound an administration prompt makes. Sound off silences that app's own sound while its notification still appears; the PC notification sound is not affected and always plays. Muted stops the app's notifications from appearing at all.")
             color: Appearance.colors.colSubtext
             font.pixelSize: Appearance.font.pixelSize.smaller
             wrapMode: Text.Wrap

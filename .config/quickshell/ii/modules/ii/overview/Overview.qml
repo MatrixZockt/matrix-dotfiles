@@ -197,16 +197,28 @@ Scope {
 
         // The search panel: the field, the recently-used row, nothing else.
         function toggle() {
-            // SUPER-tap now opens the app search overlay (the card under the
-            // centre island); this IPC path follows it so every entry point
-            // lands on the same launcher.
-            GlobalStates.appSearchOverlayOpen = !GlobalStates.appSearchOverlayOpen;
+            // One launcher, whichever one the setting names: the classic bar
+            // or the app card under the centre island (GlobalStates.toggleSuperMenu).
+            GlobalStates.toggleSuperMenu();
         }
         // Diagnostics: what the live app database says about a name (ids,
         // categories, "advanced" demotion) -- entry visibility decidable
         // from a terminal.
         function debugApps(substr: string): string {
             return LauncherSearch.debugApps(substr);
+        }
+        // Which launcher the SUPER tap would open right now, in words. The
+        // setting is read by GlobalStates.toggleSuperMenu; this answers what
+        // that function sees, so a switch that looks set but does nothing is
+        // distinguishable from a config file that never reached the shell.
+        function superMenuStyle(): string {
+            return JSON.stringify({
+                classic: GlobalStates.classicSuperMenu,
+                config: Config?.options.search.classicSuperMenu ?? null,
+                overlayOpen: GlobalStates.appSearchOverlayOpen,
+                overviewOpen: GlobalStates.overviewOpen,
+                mode: GlobalStates.overviewMode
+            });
         }
         // What a query actually resolves to on the overview search surface (the
         // SUPER overlay has its own `type` diagnostic). Answers with the result
@@ -226,8 +238,7 @@ Scope {
             GlobalStates.overviewOpen = false;
         }
         function open() {
-            GlobalStates.overviewMode = "search";
-            GlobalStates.overviewOpen = true;
+            GlobalStates.openSuperMenu();
         }
         // Opens the multi-desktop grid specifically (never the single-desktop
         // variant), and never toggles: SUPER+Tab is a hold, so pressing it when
@@ -374,10 +385,12 @@ Scope {
                 GlobalStates.superReleaseMightTrigger = true;
                 return;
             }
-            // A plain SUPER tap: the app search overlay -- the card under the
-            // bar's centre island (the approved preview design) -- never the
-            // desktop grid.
-            GlobalStates.appSearchOverlayOpen = !GlobalStates.appSearchOverlayOpen;
+            // A plain SUPER tap: the launcher the user chose -- the classic
+            // search bar or the app card under the bar's centre island -- and
+            // never the desktop grid. The decision lives in
+            // GlobalStates.toggleSuperMenu so this release and the IPC calls
+            // cannot disagree about which card a tap opens.
+            GlobalStates.toggleSuperMenu();
         }
     }
     GlobalShortcut {

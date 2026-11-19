@@ -120,6 +120,23 @@ ContentPage {
         icon: "search"
         title: Translation.tr("Search")
 
+        // ── Which card the SUPER tap opens ──────────────────────────────
+        // REQUESTED (2026-11-19): "a switch which allows me to switch between
+        // the old and the new one". One boolean, read by
+        // GlobalStates.toggleSuperMenu -- the same path the bare-SUPER release
+        // and the IPC toggle use, so this switch changes what the key does
+        // rather than only what a settings page believes.
+        ConfigSwitch {
+            text: Translation.tr("Use the classic SUPER menu")
+            checked: Config.options.search.classicSuperMenu
+            onCheckedChanged: {
+                Config.options.search.classicSuperMenu = checked;
+            }
+            StyledToolTip {
+                text: Translation.tr("The old compact search bar, with a Recently used row of icons.\nOff, the SUPER tap opens the app card: Apps and Advanced tabs,\nthe all-apps grid, and the right-click menu for each app.")
+            }
+        }
+
         ConfigSwitch {
             text: Translation.tr("Use Levenshtein distance-based algorithm instead of fuzzy")
             checked: Config.options.search.sloppy

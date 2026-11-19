@@ -2182,6 +2182,16 @@ property bool loadingFailFlash: false
             superHoldTimer.stop();
             return;
         }
+        // The classic card lives on the overview surface, and it is the same
+        // promise: a press while it is up puts it away on the press, not a
+        // beat later on the release.
+        if (root.classicSuperMenu && root.overviewOpen && root.overviewMode === "search") {
+            root.overviewOpen = false;
+            root.superReleaseMightTrigger = false;
+            root.superDismissedOnPress = true;
+            superHoldTimer.stop();
+            return;
+        }
         if (fromHoldChord) {
             // ── The toggle half, on the PRESS edge ─────────────────────────
             //
@@ -2238,6 +2248,45 @@ property bool loadingFailFlash: false
         root.superHoldFromChord = false;
         root.superDismissedOnPress = false;
         superHoldTimer.restart();
+    }
+
+    // ── Which SUPER menu is in use ──────────────────────────────────────────
+    //
+    // REQUESTED (2026-11-19): "give the old one ... a switch which allows me to
+    // switch between the old and the new one". One setting, one pair of
+    // functions, and every door goes through them: the bare-SUPER release, the
+    // `search toggle`/`search open` IPC calls, and the switch itself in
+    // Settings > Services > Search.
+    //
+    // The two cards are different surfaces, which is why this cannot be a flag
+    // read by one of them: the classic bar lives on the overview panel
+    // (overviewOpen, mode "search") and the app card is its own overlay
+    // (appSearchOverlayOpen). Opening the wrong one for the setting is exactly
+    // the bug this function exists to make impossible.
+    readonly property bool classicSuperMenu: Config?.options.search.classicSuperMenu ?? false
+
+    function openSuperMenu() {
+        if (root.classicSuperMenu) {
+            root.overviewMode = "search";
+            root.overviewOpen = true;
+            return;
+        }
+        root.appSearchOverlayOpen = true;
+    }
+
+    function toggleSuperMenu() {
+        if (root.classicSuperMenu) {
+            // Only a search card is closed here: with the desktop grid up, a
+            // SUPER tap is a request for the search card, not a dismissal of
+            // the grid (the press edge above already put the grid away).
+            if (root.overviewOpen && root.overviewMode === "search") {
+                root.overviewOpen = false;
+                return;
+            }
+            root.openSuperMenu();
+            return;
+        }
+        root.appSearchOverlayOpen = !root.appSearchOverlayOpen;
     }
 
     // The falling edge is either the tap or the end of the hold. If the hold

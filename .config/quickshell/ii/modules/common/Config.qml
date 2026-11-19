@@ -853,6 +853,21 @@ Singleton {
             }
 
             property JsonObject search: JsonObject {
+                // ── Which card a SUPER tap opens ────────────────────────────
+                // true: the classic compact search bar (the old super menu,
+                // Overview.qml's SearchWidget) with its recently-used row.
+                // false: the app card under the centre island -- tabs, the
+                // app grid, and the right-click menu.
+                //
+                // REQUESTED (2026-11-19): "add a switch which allows me to
+                // switch between the old and the new one". Read by
+                // GlobalStates.openSuperMenu/toggleSuperMenu, which is the one
+                // place the bare-SUPER release, the IPC calls and the switch
+                // all go through -- so the card that opens is the same
+                // whichever door the request came from.
+                //
+                // Settings > Services > Search draws the switch.
+                property bool classicSuperMenu: false
                 property int nonAppResultDelay: 30 // This prevents lagging when typing
                 property string engineBaseUrl: "https://www.google.com/search?q="
                 property list<string> excludedSites: ["quora.com", "facebook.com"]

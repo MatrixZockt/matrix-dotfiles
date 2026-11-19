@@ -3102,6 +3102,11 @@ Item {
     // into a remount loop.
     property var mtpEmpty: ({})
     property var mtpRetried: ({})
+    // One revive per mount point: a session that died while its phone is still
+    // on the bus is remounted once (see the dead-mount branch in parseMtpDevices).
+    // Kept until the device itself leaves, so a phone that dies again in the
+    // same plug cannot turn the scan into a remount loop.
+    property var mtpRevived: ({})
     readonly property string mtpRoot: (Quickshell.env("XDG_RUNTIME_DIR") ?? "/tmp") + "/mtp"
     readonly property string mtpScanScript: Quickshell.shellPath("scripts/system/mtp-devices.sh")
     Process {
@@ -3136,6 +3141,7 @@ Item {
     function parseMtpDevices(text) {
         const mounts = {};
         const refusing = {};
+        const dead = {};
         const devices = [];
         for (const raw of String(text ?? "").split("\n")) {
             const line = raw.trim();
@@ -3156,7 +3162,14 @@ Item {
                 // not "not mounted" -- that is the sentence the person already
                 // read before they opened this app.
                 mounts[dir] = true;
-                if (Number(String(parts[2] ?? "-1")) <= 0) refusing[dir] = true;
+                // Three answers, three states, and the newest one is why this
+                // branch has two: 0 is a live session the phone refused
+                // storages for (unlock it and open it again), -1 is a session
+                // nothing is listening to at all -- the phone was unplugged,
+                // or its FUSE daemon went with it.
+                const entries = Number(String(parts[2] ?? "-1"));
+                if (entries < 0) dead[dir] = true;
+                else if (entries === 0) refusing[dir] = true;
                 continue;
             }
             if (!line.startsWith("dev|")) continue;
@@ -3219,8 +3232,36 @@ Item {
                 root.markMtpSilent(dir);
                 root.statusNote = root.mtpUnlockHint(d);
                 root.scheduleMtpRetry(d);
-            } else {
+            } else if (!dead[dir]) {
                 root.markMtpAnswering(dir);
+            }
+        }
+        // ── The mount that died under us ────────────────────────────────
+        // A dead session is not a phone refusing access: nothing is listening,
+        // yet it still owns the directory. Read as a healthy mount it becomes
+        // a row that claims the phone is open, and -- the part that makes the
+        // next plug useless -- an aft-mtp-mount onto that path fails on a
+        // mount point that is still in use, so the phone never comes back.
+        // So it is taken down here: a fresh session when the phone is on the
+        // bus, a freed directory when it is not (an unplugged phone's mount is
+        // exactly that: nobody's, but still in the way).
+        const liveDev = {};
+        for (const d of devices) liveDev[root.mtpMountPoint(d)] = true;
+        const revived = {};
+        for (const at in root.mtpRevived) {
+            if (liveDev[at]) revived[at] = true;
+        }
+        root.mtpRevived = revived;
+        for (const dir in dead) {
+            let owner = null;
+            for (const d of devices) {
+                if (root.mtpMountPoint(d) === dir) owner = d;
+            }
+            if (owner && !root.mtpRevived[dir]) {
+                root.mtpRevived = Object.assign({}, root.mtpRevived, { [dir]: true });
+                root.remountMtp(owner);
+            } else {
+                root.dropMtpMount(dir);
             }
         }
     }
@@ -3255,6 +3296,20 @@ Item {
         root.statusNote = Translation.tr("Ejecting") + " " + root.mtpLabel(d) + "…";
         root.sh("fusermount3 -u " + root.shq(dir) + " 2>&1 || fusermount -u " + root.shq(dir)
             + " 2>&1 || umount " + root.shq(dir) + " 2>&1", "mtp-unmount", d.name);
+    }
+    // Taking down a session that no longer answers. No status line and no
+    // complaint: the person did not ask for this, and there is nothing they
+    // could do about it. The leftover process has to go with the mount, for
+    // the same reason remountMtp kills it -- a survivor keeps the phone's
+    // single MTP interface claimed, and then the mount that follows claims
+    // nothing and comes up empty.
+    function dropMtpMount(dir) {
+        const at = String(dir ?? "");
+        if (at.length === 0) return;
+        root.sh("fusermount3 -u " + root.shq(at) + " >/dev/null 2>&1 || fusermount -u "
+            + root.shq(at) + " >/dev/null 2>&1 || umount " + root.shq(at) + " >/dev/null 2>&1; "
+            + "pkill -x -f " + root.shq("aft-mtp-mount " + at) + " >/dev/null 2>&1; true",
+            "mtp-unmount", "");
     }
     // Is the phone actually showing its files? Asked of the mount itself, which
     // is the only honest source: an MTP mount that has been refused access looks

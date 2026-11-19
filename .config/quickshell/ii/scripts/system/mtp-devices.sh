@@ -47,10 +47,25 @@ found=0
 # before it decides anything about them.
 while read -r mtp_mnt; do
     [ -n "$mtp_mnt" ] || continue
-    # `ls -A` distinguishes the two failures by its EXIT STATUS: a live but
-    # refused session lists nothing and succeeds, a dead one fails. Bounded by
-    # a timeout, because a FUSE session whose daemon is wedged blocks a read
-    # instead of failing it -- and this script is on the hotplug path.
+    # A DEAD session first, because listing cannot tell it apart from a live
+    # one. Measured on this machine with the phone long unplugged: the mount
+    # was still in /proc/self/mounts, `ls -A` printed the two storages it
+    # remembered ("Internal storage", "Internal storage (Dual Messenger)") and
+    # exited 0, while every stat on them failed with "Transport endpoint is not
+    # connected". Reported as a live, answering session, that is a phone the
+    # caller offers to open -- and the mount still owning the directory is what
+    # makes the next aft-mtp-mount on that path fail, so the phone never comes
+    # back after it is plugged in again. Which is the report this check is for.
+    # The mount point's own root is the cheapest question a live session must
+    # answer and a dead one cannot.
+    if ! timeout 5 stat -L "$mtp_mnt" >/dev/null 2>&1; then
+        printf 'mounts|%s|-1\n' "$mtp_mnt"
+        continue
+    fi
+    # ...and for a session that is still alive: `ls -A` distinguishes a live
+    # but refused session (lists nothing, succeeds) from a wedged one (blocks
+    # instead of failing, so it is bounded -- this script is on the hotplug
+    # path).
     if mtp_out="$(timeout 5 ls -A "$mtp_mnt" 2>/dev/null)"; then
         mtp_n="$(printf '%s\n' "$mtp_out" | grep -c '[^[:space:]]')"
     else

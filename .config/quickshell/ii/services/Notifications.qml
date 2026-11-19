@@ -795,6 +795,63 @@ Singleton {
         return Config.options.notifications.mutedApps;
     }
 
+    // ── Per-app sound: the APP's sound, not this desktop's ───────────────
+    //
+    // REQUESTED (2026-11-19): "I want to see the notification but not hear the
+    // desktop app sound and only hear the PC chime with the notification".
+    // The first attempt got this backwards twice: it silenced the shell's own
+    // chime, then it dropped the app's notification. Neither is the sound the
+    // user is complaining about -- apps like Discord and WhatsApp play their
+    // own notification sound themselves, entirely outside the notification
+    // daemon, so a notification hint cannot reach it and blocking the
+    // notification does not stop it either.
+    //
+    // What IS reachable is their audio: every playing program owns a PipeWire
+    // stream. An app on this list has its streams muted for the couple of
+    // seconds around its notification (scripts/audio/
+    // silence-app-notification-sound.py), which takes its default chime and
+    // leaves the popup, the card and this desktop's chime exactly as they are.
+    //
+    // Only the app's own streams are touched, and only unmuted ones, so a mute
+    // set in the mixer survives.
+    readonly property var soundMutedApps: Config?.options.notifications.soundMutedApps ?? []
+
+    function isAppSoundMuted(appName, desktopEntry, appIcon) {
+        return NotificationUtils.isIdentityMuted(
+            root.identitiesOf(appName, desktopEntry, appIcon), root.soundMutedApps);
+    }
+
+    function setAppSoundMuted(appName, muted) {
+        Config.options.notifications.soundMutedApps = NotificationUtils.withAppMuted(
+            root.soundMutedApps, appName, muted);
+        return Config.options.notifications.soundMutedApps;
+    }
+
+    // How long the app's audio is muted as its notification lands. Long enough
+    // to swallow a default chime (a few hundred ms) and not one second more:
+    // the same streams carry its calls, its music and the video it is playing.
+    readonly property string appSoundSilenceSeconds: "2"
+
+    function silenceOwnAppSound(notification) {
+        if (!notification)
+            return false;
+        const appName = String(notification.appName ?? "");
+        const desktopEntry = String(notification.desktopEntry ?? "");
+        const appIcon = String(notification.appIcon ?? "");
+        if (!root.isAppSoundMuted(appName, desktopEntry, appIcon))
+            return false;
+        console.log("[Notifications] silencing the app's own sound: " + appName);
+        const identities = root.identitiesOf(appName, desktopEntry, appIcon)
+            .map((identity) => String(identity ?? "").trim())
+            .filter((identity) => identity.length > 0);
+        // Detached: the helper lives for its whole window and this must not
+        // block the daemon (or be cancelled by a second notification).
+        Quickshell.execDetached(["python3",
+            Quickshell.shellPath("scripts/audio/silence-app-notification-sound.py"),
+            root.appSoundSilenceSeconds].concat(identities));
+        return true;
+    }
+
     // ── What each app was allowed, and what was blocked ─────────────────
     //
     // Keyed by normalized identity, and PERSISTED, because the Settings page is
@@ -907,6 +964,10 @@ Singleton {
             // notification is gone (dismiss watches the DBus
             // NotificationClosed signal) instead of being left to believe a
             // card is waiting to be read.
+            // The app's own sound goes first, before any branch can return:
+            // whether the notification is shown or muted, an app whose sound
+            // is switched off must not be heard while its notification lands.
+            root.silenceOwnAppSound(notification);
             if (root.isMuted(notification.appName ?? "", notification.desktopEntry ?? "", notification.appIcon ?? "")) {
                 root.recordApp(notification.appName, notification.appIcon, notification.summary, "blocked");
                 root.playNotificationSound(notification);
@@ -1242,6 +1303,7 @@ Singleton {
                 return "no apps recorded";
             keys.sort((a, b) => (root.appStats[b].lastTime || 0) - (root.appStats[a].lastTime || 0));
             return `muted=${root.mutedApps.length ? root.mutedApps.join(", ") : "(none)"}\n`
+                + `app sound off=${root.soundMutedApps.length ? root.soundMutedApps.join(", ") : "(none)"}\n`
                 + keys.map((k) => {
                     const s = root.appStats[k];
                     return `${s.name}${root.isAppMuted(s.name) ? " [muted]" : ""}: allowed=${s.allowed ?? 0} blocked=${s.blocked ?? 0} last=\"${(s.lastSummary || "").slice(0, 40)}\"`;
@@ -1276,12 +1338,24 @@ Singleton {
         // `notifications sound <appName> [desktopEntry] [appIcon]` -- what a
         // notification from this sender would sound like, without sending one.
         //
-        // Every app gets the same chime, and muting an app never takes it away
-        // (it takes the app's notification instead), so all that is left to
-        // answer is the level it plays at.
+        // Every app gets the same chime, and nothing per-app can take it away.
+        // What a sender can have taken away is its OWN sound, by muting its
+        // audio streams around the notification -- so that is what is printed.
         function sound(appName: string, desktopEntry: string, appIcon: string): string {
             const id = `${appName} / ${desktopEntry || "-"} / ${appIcon || "-"}`;
-            return `${id} -> shell chime at ${root.notificationGain}x row ${Audio.systemSoundVolume().toFixed(3)}`;
+            const own = root.isAppSoundMuted(appName, desktopEntry, appIcon)
+                ? `the app's own sound is muted for ${root.appSoundSilenceSeconds}s as its notification lands`
+                : "the app's own sound is left alone";
+            return `${id} -> shell chime at ${root.notificationGain}x row ${Audio.systemSoundVolume().toFixed(3)}; ${own}`;
+        }
+
+        // `notifications appSound <appName> <true|false>` -- the switch, from a
+        // script. Writes the same config key the Settings page and the launcher
+        // menu write.
+        function appSound(appName: string, muted: string): string {
+            const on = String(muted).toLowerCase() === "true" || String(muted) === "1";
+            const list = root.setAppSoundMuted(appName, on);
+            return `${appName} -> app sound ${on ? "off" : "on"}; list: ${list.length ? list.join(", ") : "(none)"}`;
         }
     }
 }

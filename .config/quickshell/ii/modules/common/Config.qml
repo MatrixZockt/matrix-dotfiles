@@ -701,6 +701,23 @@ Singleton {
                 // Written from Settings > Notifications, read by
                 // services/Notifications.qml in the shell process.
                 property list<string> mutedApps: []
+                // ── Apps whose OWN notification sound is switched off ──
+                // Same shape and the same normalized matching as mutedApps,
+                // but it silences the sound the APP plays for itself -- its
+                // audio streams are muted for a couple of seconds as the
+                // notification lands (see services/Notifications.qml and
+                // scripts/audio/silence-app-notification-sound.py). The popup,
+                // the card and this desktop's own chime are untouched.
+                //
+                // That is the answer for Discord, WhatsApp and the like: they
+                // play their own chime outside the notification system, so the
+                // only way to remove it without losing the notification is to
+                // silence their audio for the moment it plays.
+                //
+                // Written from Settings > Notifications and from the SUPER
+                // launcher's right-click menu, read by
+                // services/Notifications.qml.
+                property list<string> soundMutedApps: []
                 // ── Do not disturb ──
                 // The whole-desktop switch, stored HERE rather than in
                 // services/Notifications.qml, because Settings is a separate

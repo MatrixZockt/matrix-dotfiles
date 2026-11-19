@@ -148,6 +148,17 @@ ContentPage {
         Config.options.notifications.mutedApps = list;
     }
 
+    // The sound switch is about the APP's sound, never this desktop's: the app
+    // keeps popping up and the PC chime keeps playing, but the app's own audio
+    // streams are muted for a moment as the notification lands. Same config
+    // shape as the mute list, so the daemon's matching is the same identity.
+    function setSoundMuted(identities, muted) {
+        let list = Config.options.notifications.soundMutedApps ?? [];
+        for (const identity of identities)
+            list = NotificationUtils.withAppMuted(list, identity, muted);
+        Config.options.notifications.soundMutedApps = list;
+    }
+
     // ── One row per app ─────────────────────────────────────────────────
     //
     // Muted first (the ones the user just acted on stay under the cursor),
@@ -163,6 +174,7 @@ ContentPage {
     // ("whatsapp-linux-desktop") and those are not the same string.
     readonly property var rows: {
         const mutedList = Config.options.notifications.mutedApps ?? [];
+        const soundMutedList = Config.options.notifications.soundMutedApps ?? [];
         const merged = {};
         const known = {};
 
@@ -188,7 +200,7 @@ ContentPage {
         // A name that only exists in a list -- muted here, muted from the
         // launcher's right-click menu -- still gets a row. A switch the user
         // cannot find is a switch they cannot undo.
-        for (const name of mutedList) {
+        for (const name of mutedList.concat(soundMutedList)) {
             const key = NotificationUtils.normalizeAppIdentity(name);
             if (key.length === 0 || merged[key])
                 continue;
@@ -245,9 +257,11 @@ ContentPage {
                 "lastTime": entry.lastTime ?? 0,
                 "lastSummary": entry.lastSummary ?? "",
                 "muted": NotificationUtils.isIdentityMuted(identities, mutedList),
+                "soundMuted": NotificationUtils.isIdentityMuted(identities, soundMutedList),
             });
         }
         out.sort((a, b) => (Number(b.muted) - Number(a.muted))
+            || (Number(b.soundMuted) - Number(a.soundMuted))
             || ((b.lastTime || 0) - (a.lastTime || 0))
             || a.name.localeCompare(b.name));
         return out;
@@ -361,7 +375,7 @@ ContentPage {
 
         StyledText {
             Layout.fillWidth: true
-            text: Translation.tr("Popup timing and the monitor to show notifications on are in Bluetooth & devices. Muting an app stops its popup and card -- and the app's own notification, with whatever default chime it plays -- while the PC notification sound still plays for it. The chime is never per-app.")
+            text: Translation.tr("Popup timing and the monitor to show notifications on are in Bluetooth & devices. Sound off silences the app's own notification sound for a moment while its notification still appears; the PC notification sound is not affected and always plays. Muted stops the app's notifications from appearing at all.")
             color: Appearance.colors.colSubtext
             font.pixelSize: Appearance.font.pixelSize.smaller
             wrapMode: Text.Wrap
@@ -448,15 +462,31 @@ ContentPage {
                         }
                     }
 
-                    // ── One switch, and it is about the app ────────────
-                    // Muting drops the app's notification (popup, card, and
-                    // the notice its own chime comes with) and leaves this
-                    // desktop's chime alone. There is no per-app chime switch:
-                    // asked for 2026-11-19, "sound turned off drops the
-                    // Notification of the app and not the PC chime".
+                    // ── Two switches, two different silences ────────────
+                    // Sound silences the APP's own sound (its streams are muted
+                    // for the moment its notification lands) and changes
+                    // nothing about this desktop's chime. Muted stops the app's
+                    // popup and card. Asked for 2026-11-19: "I want to see the
+                    // notification but not hear the desktop app sound and only
+                    // hear the PC chime".
                     RowLayout {
                         Layout.fillWidth: false
                         spacing: 8
+
+                        StyledText {
+                            Layout.fillWidth: false
+                            text: Translation.tr("Sound")
+                            color: appRow.modelData.soundMuted
+                                ? Appearance.colors.colError
+                                : Appearance.colors.colSubtext
+                            font.pixelSize: Appearance.font.pixelSize.smaller
+                        }
+
+                        StyledSwitch {
+                            checked: !appRow.modelData.soundMuted
+                            onClicked: root.setSoundMuted(appRow.modelData.identities,
+                                !appRow.modelData.soundMuted)
+                        }
 
                         StyledText {
                             Layout.fillWidth: false

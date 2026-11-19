@@ -774,10 +774,16 @@ Item {
     //
     // The Convert rows are built from the converter's own table rather than a
     // copy of it: one place decides that a PNG can become a PDF and an MP4 can
-    // become an MP3, so a row can never offer something the script refuses.
+    // become an MP3, so a row can never offer something the converter refuses.
     // Read ONCE, at start -- the table is static, and asking per right-click
     // would be a process per click.
-    readonly property string convertScript: Quickshell.shellPath("scripts/system/convert-file.sh")
+    //
+    // The converter is the Linux port of Convert (newtonstudios/convert,
+    // linux/), installed by its own install.sh -- the same program its
+    // right-click entries and its window call, not a second implementation in
+    // this repo. Its command is `convert-file`, not `convert`: that name is
+    // ImageMagick's on every distribution.
+    readonly property string convertCommand: (Quickshell.env("HOME") ?? "") + "/.local/bin/convert-file"
     property var convertMatrix: ({})
     // ── The conversion that is running ────────────────────────────────────
     // Its own state, and its own process (convertProc below), because a
@@ -810,7 +816,7 @@ Item {
     Process {
         id: convertFormatsProc
         running: true
-        command: ["bash", root.convertScript, "--list-json"]
+        command: [root.convertCommand, "--matrix-json"]
         stdout: StdioCollector {
             onStreamFinished: {
                 const text = String(this.text ?? "").trim();
@@ -5009,36 +5015,57 @@ Item {
     }
     // ── Convert to ──────────────────────────────────────────────────────
     //
-    // The target list is the helper's own table, read once at start
-    // (convertMatrix). A menu that offers a format the script would refuse is
-    // the one bug worth designing out here, and the way out is to have one
-    // table: scripts/system/convert-file.sh --list-json. Its conversions are
-    // reached from the same table, so the row and the work cannot disagree.
+    // The target list is the converter's own table, read once at start
+    // (convertMatrix) from `convert-file --matrix-json`. A menu that offers a
+    // format the converter would refuse is the one bug worth designing out
+    // here, and the way out is to have one table: the installed port answers
+    // both the menu and the conversion, so the row and the work cannot
+    // disagree.
     function convertTargets(p) {
         if (root.isDirPath(p)) return [];
         const m = root.convertMatrix || {};
         const list = m[root.suffixOf(root.baseName(String(p ?? "")))];
         return Array.isArray(list) ? list : [];
     }
-    // The formats, in the shape the menu rows take. The label is the format's
-    // own name as a person writes it (PNG, JPG, TAR.GZ) -- never a translated
-    // noun, because "JPG" is what the file will be called.
+    // The formats, in the shape the menu rows take. Each entry of the table is
+    // [id, label], and the label is the format's own name as the converter
+    // writes it ("MP4 (H.264)", "Plain Text") -- never a translated noun,
+    // because that name is what the format is called everywhere else and what
+    // the new file will be.
     function convertMenuItems(p) {
         const want = String(p ?? "");
-        return root.convertTargets(want).map(ext => ({
-            id: "convert:" + ext,
-            label: Translation.tr("Convert to") + " " + String(ext).toUpperCase(),
-            icon: root.convertIcon(ext),
-            enabled: true
-        }));
+        return root.convertTargets(want).map(entry => {
+            const target = String((entry && entry[0]) ?? "");
+            const label = String((entry && entry[1]) ?? target);
+            return {
+                id: "convert:" + target,
+                label: Translation.tr("Convert to") + " " + label,
+                icon: root.convertIcon(target),
+                enabled: true
+            };
+        });
     }
-    function convertIcon(ext) {
-        if (ext === "gif") return "gif_box";
-        if (ext === "pdf") return "picture_as_pdf";
-        if (ext === "zip" || ext === "tar.gz") return "folder_zip";
-        if (root.imageExts.indexOf(ext) !== -1) return "image";
-        if (root.videoExts.indexOf(ext) !== -1) return "movie";
-        if (["mp3", "flac", "wav", "ogg", "opus", "m4a", "aac"].indexOf(ext) !== -1) return "music_note";
+    // What a format is called, for the line that says what is running.
+    function convertTargetLabel(target) {
+        const m = root.convertMatrix || {};
+        for (const ext in m) {
+            const list = m[ext] || [];
+            for (let i = 0; i < list.length; i++)
+                if (list[i] && list[i][0] === target) return String(list[i][1] ?? target);
+        }
+        return String(target ?? "");
+    }
+    // An icon per format, by the target id the converter uses.
+    function convertIcon(target) {
+        const id = String(target ?? "");
+        if (id === "gif" || id === "gif-img") return "gif_box";
+        if (id === "pdf-img" || id === "pdf-doc") return "picture_as_pdf";
+        if (id.indexOf("pdf-") === 0) return "description";
+        if (["mp3", "m4a", "he-aac", "wav", "aiff", "flac", "alac", "opus", "ogg",
+             "wma", "ac3", "wv", "mp2"].indexOf(id) !== -1) return "music_note";
+        if (["mp4-h264", "mp4-hevc", "mov-prores", "webm", "mkv", "mp4-av1"].indexOf(id) !== -1) return "movie";
+        if (["jpg", "png", "heic", "avif", "webp", "tiff", "bmp"].indexOf(id) !== -1) return "image";
+        if (id.indexOf("font-") === 0) return "font_download";
         return "transform";
     }
     // One file at a time, and the file the pointer is on: a conversion is a
@@ -5050,9 +5077,9 @@ Item {
     // work, and starting a second would either fight it for the GPU or (worse)
     // quietly replace it. The line above the pane says which file is still
     // going, and its Cancel is one press away.
-    function convertFile(p, ext) {
+    function convertFile(p, target) {
         const path = String(p ?? "");
-        const to = String(ext ?? "").toLowerCase();
+        const to = String(target ?? "");
         if (path.length === 0 || to.length === 0) return;
         if (root.convertRunning) {
             root.statusNote = Translation.tr("Already converting") + " " + root.convertLabel
@@ -5060,19 +5087,20 @@ Item {
             root.ipcSignalToast(Translation.tr("Already converting"), "hourglass_top");
             return;
         }
-        root.convertLabel = root.baseName(path) + " → " + to.toUpperCase();
+        root.convertLabel = root.baseName(path) + " → " + root.convertTargetLabel(to);
         root.convertPercent = 0;
         root.convertResult = "";
         root.convertError = "";
         root.convertCancelled = false;
         root.convertRunning = true;
         root.statusNote = "";
-        convertProc.command = ["bash", root.convertScript, path, to];
+        convertProc.command = [root.convertCommand, "--machine", to, path];
         convertProc.running = false;
         convertProc.running = true;
     }
-    // What the helper says while it works: `PROGRESS <percent>`, `ERROR <why>`,
-    // and the finished path. Anything else is ignored rather than displayed.
+    // What the converter says while it works (its --machine output):
+    // `PROGRESS <percent>`, `ERROR <why>`, and the finished path. Anything else
+    // is ignored rather than displayed.
     function readConvertLine(line) {
         const s = String(line ?? "").trim();
         if (s.length === 0) return;
@@ -5088,8 +5116,9 @@ Item {
         }
         root.convertResult = s;
     }
-    // Cancel is a signal to the helper, and the helper is what actually stops
-    // the encoder (see its trap): killing the shell alone would leave ffmpeg
+    // Cancel is SIGTERM to the converter, and the converter is what actually
+    // stops the encoder: its own handler kills the tool it started and removes
+    // what was half written. Killing this process alone would leave ffmpeg
     // writing, and killing ffmpeg alone would leave half a file behind.
     function cancelConvert() {
         if (!root.convertRunning) return;

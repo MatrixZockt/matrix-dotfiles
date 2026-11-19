@@ -1983,6 +1983,34 @@ Item {
           if (p.length === 0) return;
           root.navigateTo(p);
       }
+    // ── The first frame shows the folder, not the ghost of one ─────────
+    //
+    // A preloaded copy (filemanager.qml's `visible: false`) reads its folder
+    // with no window on screen. Two things follow from that, and both were
+    // reported as "I open Files and the folder's contents are not there until I
+    // press the tab": the model streams a large folder in chunks, so what the
+    // spare holds at the instant it is claimed can be PART of the folder (25 of
+    // 64 rows is a state actually measured on a claim of Home), and a read that
+    // was still in flight is not heard at all -- FolderListModel does not
+    // announce a read it never finished. Pressing the tab works because a tab
+    // press navigates, and navigating reads the folder again.
+    //
+    // So the folder on screen is read once, at the one moment it has to be
+    // right: the first time this window is put on screen. A cold start never
+    // gets here -- its window was visible from the first frame, so the read it
+    // began at construction is the one that answers -- and a claim that already
+    // named a folder skips it, because openPath is doing that read.
+    property bool shownOnce: false
+    function whenShown() {
+        if (root.shownOnce) return;
+        root.shownOnce = true;
+        if (root.atThisPc) return;
+        // Unconditionally, including when the model still calls itself Loading:
+        // a read that never came back leaves exactly that state behind, and it
+        // is the case this has to rescue. Nothing else is competing for the
+        // read here -- this is only reached on a claim that named no folder.
+        root.refresh();
+    }
     function refresh() {
         // Re-assigning the same URL is a no-op, so the re-read is forced with
         // a trailing slash that comes and goes. The directory is the SAME one
@@ -6387,7 +6415,7 @@ Item {
             Layout.fillWidth: true
             // A bit of air above the strip (asked 2026-10-27): at 8 the chips
             // read as part of the window's frame rather than as their own row.
-            Layout.topMargin: 12
+            Layout.topMargin: 10
             Layout.leftMargin: 6
             Layout.rightMargin: 6
             spacing: 4
@@ -6395,11 +6423,13 @@ Item {
             Flickable {
                 id: tabLane
                 Layout.fillWidth: true
-                // 34: the chips were 26 px with 12 px text, which read as a
-                // hairline row above the address bar rather than as tabs.
-                Layout.preferredHeight: 34
+                // 28: 34 was the step after 26, and it overshot -- the strip
+                // stood taller than the command row under it and read as a
+                // second title bar. 28 with a 13 px label is the size of the
+                // chips in every other window chrome on this desktop.
+                Layout.preferredHeight: 28
                 contentWidth: Math.max(width, tabsRow.implicitWidth)
-                contentHeight: 34
+                contentHeight: 28
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
                 flickableDirection: Flickable.HorizontalFlick
@@ -6422,13 +6452,14 @@ Item {
                             // this Row is a plain Row inside the lane, and a
                             // plain Row sizes its children from their
                             // implicit size.
-                            implicitHeight: 34
+                            implicitHeight: 28
                             // Room for the title, the air before the glyph, the
-                            // glyph and the right margin: 14 left + title + 10
-                            // of air + the 16 px glyph + 10 right. The 210 cap
-                            // is wider than before so a normal folder name is
-                            // not elided down to a stub.
-                            implicitWidth: Math.min(210, tabText.implicitWidth + 50)
+                            // glyph and the right margin: 11 left + title + 8
+                            // of air + the 14 px glyph + 7 right. Down from 34
+                            // and 210: the strip at that size stood half again
+                            // as tall as the command row under it, which is
+                            // chrome the folder could be using.
+                            implicitWidth: Math.min(176, tabText.implicitWidth + 40)
                             radius: Appearance.rounding.small
                             // Tabs you can SEE: the chips are mixed LIGHTER
                             // than the window's own grey (colTerminalSurfaceSolid,
@@ -6494,33 +6525,35 @@ Item {
                             CutLabel {
                                 id: tabText
                                 anchors.left: parent.left
-                                // 12, not 8: the open tab's bar lives down the
+                                // 11, not 8: the open tab's bar lives down the
                                 // left edge now, and the title needs air between
-                                // itself and it. The same 14 on EVERY chip, so a
+                                // itself and it. The same 11 on EVERY chip, so a
                                 // tab's width does not jump when it is the one
                                 // that is open.
-                                anchors.leftMargin: 14
+                                anchors.leftMargin: 11
                                 anchors.verticalCenter: parent.verticalCenter
-                                // parent.width - 50 = 14 of left margin, 10 of
-                                // right, the 16 px glyph, and 10 px of AIR
+                                // parent.width - 40 = 11 of left margin, 7 of
+                                // right, the 14 px glyph, and 8 px of AIR
                                 // between the title and the glyph. The old -39
                                 // left the text ending one pixel from the X, so
                                 // a long name ran straight into the close button.
-                                width: parent.width - 50
+                                width: parent.width - 40
                                 text: root.tabLabel(modelData)
-                                // 12 px read as fine print at arm's length; the
-                                // chips carry one of a small set of words, so
-                                // they step up to the small body size.
-                                font.pixelSize: Appearance.font.pixelSize.small
+                                // 12 px read as fine print at arm's length and
+                                // 15 (the small body size) then ran the strip
+                                // into the command bar's scale; 13 is the step
+                                // between them, and the strip's own chips are
+                                // short nouns, not sentences.
+                                font.pixelSize: Appearance.font.pixelSize.smallie
                                 color: Appearance.colors.colOnLayer0
                             }
                             MaterialSymbol {
                                 id: tabCloseGlyph
                                 anchors.right: parent.right
-                                anchors.rightMargin: 8
+                                anchors.rightMargin: 7
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: "close"
-                                iconSize: 16
+                                iconSize: 14
                                 // The glyph stays on the neutral tone for every
                                 // chip -- the open one is told apart by its bar
                                 // and its join to the bar below, not by
@@ -6548,10 +6581,10 @@ Item {
                                 anchors.leftMargin: 4
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: 3
-                                // 26 - 10: the chip's own height less 5 px of
+                                // 28 - 8: the chip's own height less 4 px of
                                 // air at each end, never so short that it reads
                                 // as a dot.
-                                height: Math.max(6, parent.height - 10)
+                                height: Math.max(6, parent.height - 8)
                                 radius: 1.5
                                 color: Appearance.colors.colPrimary
                             }
@@ -6583,7 +6616,7 @@ Item {
                                 anchors.right: parent.right
                                 anchors.top: parent.top
                                 anchors.bottom: parent.bottom
-                                width: 28
+                                width: 22
                                 hoverEnabled: true
                                 acceptedButtons: Qt.LeftButton
                                 cursorShape: Qt.PointingHandCursor
@@ -6602,7 +6635,7 @@ Item {
                     // lane's contentWidth (built from this Row's implicit
                     // width) already accounts for it.
                     //
-                    // 34x34, the chips' own height: in a plain Row the button
+                    // 28x28, the chips' own height: in a plain Row the button
                     // keeps its own size, and a shorter default would leave the
                     // "+" floating against taller chips or clipped by the lane.
                     IconButton {
@@ -6610,8 +6643,8 @@ Item {
                         symbol: "add"
                         tip: Translation.tr("New tab")
                         visible: root.tabsAvailable
-                        width: 34
-                        height: 34
+                        width: 28
+                        height: 28
                         onActivated: root.newTab("")
                     }
                 }

@@ -258,7 +258,17 @@ Window {
             if (root.visible) return "already";
             const start = String(path ?? "").trim();
             root.visible = true;
+            // Mapping the window is the one moment the listing has to be the
+            // truth: this copy read its folder with no window anywhere (see
+            // `preloaded` above), so it can hold part of the folder, or none of
+            // it. A claim that NAMED a folder is already reading it (openPath);
+            // every other claim asks the content to make good on what it shows.
+            //
+            // This is called here rather than from a `visible` change handler:
+            // Quickshell's Window does not deliver one, which was measured -- a
+            // trace in whenShown stayed silent across a claim.
             if (start.length > 0 && start !== "-") content.openPath(start);
+            else content.whenShown();
             return "ok";
         }
         // A path, which may be a FOLDER (open it) or a FILE (the desktop's "show

@@ -1660,13 +1660,6 @@ Scope {
                 Cliphist.paste(entryRoot.entry);
                 root.close();
             }
-            onEntered: {
-                // Hovering a row is also selecting it: the keyboard and the
-                // pointer then always agree about what RETURN would paste.
-                const idx = root.entryRowIndices.indexOf(entryRoot.rowIndex);
-                if (idx !== -1)
-                    root.cursor = idx;
-            }
         }
 
         // Latched hover: the action buttons reveal on hover and STAY revealed

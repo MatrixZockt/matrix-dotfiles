@@ -195,6 +195,23 @@ Item {
             for (const row of section.rows)
                 out.push(row);
         }
+        // A probe that found no action must not leave an empty card: the entry
+        // itself still knows how to open the app (the launcher launches it),
+        // so that is the one row a menu can always offer. Without this, an
+        // entry the helper could not classify opened a menu with a header, a
+        // source label and nothing to click -- which reads as "this app cannot
+        // be right-clicked" even though the menu did open.
+        if (out.length === 0) {
+            out.push({ key: "h:fallback", header: Translation.tr("Launch") });
+            out.push({
+                key: "f:open",
+                kind: "entry",
+                actionId: "entry-open",
+                label: Translation.tr("Open"),
+                icon: "play_arrow",
+                destructive: false
+            });
+        }
         return out;
     }
 
@@ -207,6 +224,12 @@ Item {
             root.dismiss();
             if (action)
                 root.appActionRequested(action);
+            return;
+        }
+        if (row.kind === "entry") {
+            // The last-resort Open row: no helper result to get in the way.
+            root.dismiss();
+            root.launchRequested(root.entry);
             return;
         }
         if (row.kind === "notify") {
@@ -614,6 +637,25 @@ Item {
     }
 
     // ── Little readings of the plan, kept together ───────────────────────
+    // ── What this menu says, in words ──────────────────────────────────
+    //
+    // The menu is a layer surface: a synthetic pointer can hover it but never
+    // press it, so every reading below is only checkable by asking the menu
+    // itself. `appSearch menuFor <app>` opens it and this answers what the
+    // open menu would draw -- the subtitle AND the rows, because "source
+    // unknown" with an empty list is a different bug from a short menu.
+    function report() {
+        if (!root.open || !root.entry)
+            return "closed";
+        if (!AppAdmin.plan)
+            return "probing" + (AppAdmin.probeError.length > 0
+                ? " error=" + AppAdmin.probeError : "");
+        const labels = root.rows.filter(r => r.header === undefined)
+            .map(r => String(r.label ?? ""));
+        return `id=${root.entry.id} kind=${AppAdmin.kind} subtitle="${root.subtitle()}"`
+            + ` rows=${labels.join(" | ")}`;
+    }
+
     function subtitle() {
         if (!AppAdmin.plan)
             return "";
@@ -624,15 +666,22 @@ Item {
             bits.push(String(plan.package));
         if (plan.version)
             bits.push(String(plan.version));
-        else if (kind !== "unknown" && kind !== "local" && kind !== "appimage")
+        else if (kind !== "unknown" && kind !== "local" && kind !== "appimage"
+                && kind !== "unpacked")
             bits.push(kind);
+        // REQUESTED (2026-11-19): "they get an error message saying 'source
+        // unknown'". Nothing here is an error any more: an app the helper
+        // cannot attribute to a package manager is described as exactly that.
+        // "source unknown" was a shrug printed where a fact belongs, and it
+        // read as the menu being broken.
         switch (kind) {
         case "pacman": bits.push("pacman"); break;
         case "flatpak": bits.push("flatpak"); break;
         case "snap": bits.push("snap"); break;
         case "appimage": bits.push(Translation.tr("AppImage")); break;
         case "local": bits.push(Translation.tr("not from a package")); break;
-        default: bits.push(Translation.tr("source unknown")); break;
+        case "unpacked": bits.push(Translation.tr("unpacked install")); break;
+        default: bits.push(Translation.tr("outside a package manager")); break;
         }
         if (AppAdmin.dataPaths.length > 0)
             bits.push(Translation.tr("%1 data paths").arg(AppAdmin.dataPaths.length));

@@ -57,6 +57,12 @@ XDG_CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".conf
 XDG_CACHE_HOME = os.environ.get("XDG_CACHE_HOME") or os.path.join(HOME, ".cache")
 XDG_STATE_HOME = os.environ.get("XDG_STATE_HOME") or os.path.join(HOME, ".local", "state")
 
+# Where a vendor installer unpacks an app when it does not use a package
+# manager. `/opt` is the common one; `/usr/local` is where a hand-built install
+# lands. Both are checked only AFTER pacman has had its say, so a package that
+# happens to live there is still a package.
+UNPACKED_ROOTS = ("/opt/", "/usr/local/")
+
 # Where a .desktop file may live, in the order a lookup should prefer: the
 # user's own copy wins over the system's, which is exactly how the desktop
 # entry spec resolves a duplicate id -- and it is also how "the user
@@ -461,6 +467,19 @@ def resolve(app_id, exec_override):
         if binary.startswith(HOME + os.sep) and os.path.isfile(binary):
             result["kind"] = "appimage" if binary.endswith(".AppImage") else "local"
 
+    # ── Unpacked installs outside the package manager ───────────────────────
+    # Vendor installers that unpack themselves into /opt (WhatsApp Desktop,
+    # Claude, many Electron builds) are not a package and do not live under
+    # $HOME, so every branch above misses them -- and the menu then fell back
+    # to "source unknown" with nothing to offer, on an app the user can plainly
+    # see installed. It is a real installation in a real directory; naming it
+    # is what lets the menu describe it honestly instead of shrugging.
+    if result["kind"] == "unknown" and binary and os.path.isfile(binary) \
+            and binary.startswith(UNPACKED_ROOTS):
+        result["kind"] = "unpacked"
+        result["manager"] = "unpacked"
+        result["detail"] = "Unpacked installation in " + os.path.dirname(binary)
+
     if not result["detail"]:
         if result["kind"] == "pacman":
             result["detail"] = pacman_info(result["package"]).get("Description", "")
@@ -619,6 +638,11 @@ def build_actions(res):
             "label": "Uninstall and delete all data", "icon": "delete_forever",
             "detail": "Removes the app and its ~/.var/app data",
             "destructive": True, "needsRoot": False})
+    elif kind == "unpacked":
+        # No manager can repair or remove this, and the delete action below
+        # only covers what the app wrote into the home directory -- the
+        # installation itself would need root, so no uninstall row is claimed.
+        pass
     elif kind == "snap":
         add({
             "id": "reinstall", "group": "maintain",

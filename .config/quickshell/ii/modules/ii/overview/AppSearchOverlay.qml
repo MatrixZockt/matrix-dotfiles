@@ -520,6 +520,27 @@ Scope {
 
         // Drive the typing state without a keyboard: injects the query into
         // the field and reports what the pipeline produced.
+        // `appSearch menuFor <app>` / `appSearch menuReport` -- the right-click
+        // menu's own reading for a named app. The menu is a layer surface, so
+        // a synthetic pointer can hover it but never press it; opening it from
+        // here is the only way its subtitle and rows can be asserted from a
+        // terminal rather than by hand.
+        function menuFor(q: string): string {
+            const needle = String(q ?? "").toLowerCase();
+            const entry = root.allApps.find(a =>
+                String(a.name ?? "").toLowerCase().includes(needle)
+                || String(a.id ?? "").toLowerCase().includes(needle));
+            if (!entry)
+                return "no app matches " + q;
+            appMenu.entry = entry;
+            appMenu.open = true;
+            return "menu for " + String(entry.id ?? "?");
+        }
+
+        function menuReport(): string {
+            return appMenu.report();
+        }
+
         function type(q: string): string {
             if (!GlobalStates.appSearchOverlayOpen)
                 GlobalStates.appSearchOverlayOpen = true;

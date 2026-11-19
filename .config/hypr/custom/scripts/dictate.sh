@@ -237,6 +237,26 @@ focused_is_xwayland() {
 # just correctly restored. So the type file is written for every borrow --
 # `empty` when there was nothing on the clipboard -- and only whoever finds it
 # still there does the work and removes it. The lock makes the check atomic.
+# Which advertised type is the PAYLOAD, i.e. the one an app pastes.
+#
+# Not "the first one", which is what this used to save. A clipboard is a list
+# of flavours and several apps put a marker first: a file copy in Dolphin
+# advertises `application/x-kde-cutselection` (a one-byte "0"/"1" saying
+# whether it was a cut) BEFORE `text/uri-list`, and a browser copy can put
+# `text/html` before `text/plain`. Saving the first type then put back the
+# marker without the file list -- a copied video came back as nothing at all,
+# which is exactly the report "my copied file is gone after a dictation".
+#
+# So: the picture, else the file list, else whatever is first. One type is all
+# wl-copy can own with one payload, and these are the ones that paste.
+clipboard_payload_type() {
+    local types="${1:-}" t
+    for t in image/png image/jpeg text/uri-list; do
+        printf '%s\n' "$types" | grep -qx "$t" && { printf '%s' "$t"; return 0; }
+    done
+    printf '%s\n' "$types" | head -n1
+}
+
 restore_clipboard() {
     local prev_file prev_type type_file
     prev_file="$STATE/clipboard-backup"
@@ -256,8 +276,30 @@ restore_clipboard() {
         # a child holding this lock would make every later restore wait out its
         # full flock timeout before giving the clipboard back.
         wl-copy --clear 8>&- 9>&- 2>/dev/null || true
+        say "clipboard restored (it was empty)"
     else
         wl-copy -t "$prev_type" < "$prev_file" 8>&- 9>&- 2>/dev/null
+        # READ IT BACK. A restore that quietly fails leaves the SENTENCE on the
+        # selection, and the next Ctrl+V anywhere pastes a dictation nobody
+        # copied -- the one thing this whole borrow exists to prevent. wl-copy
+        # can lose the selection to a competing owner or a display hiccup, so
+        # the type it owns afterwards is checked, retried once, and if it still
+        # will not take, the clipboard is CLEARED: an empty clipboard is a
+        # missing paste, a stale sentence is a wrong one.
+        local attempt=1 back_type=""
+        while [ "$attempt" -le 2 ]; do
+            sleep 0.05
+            back_type="$(wl-paste --list-types 2>/dev/null | head -n1)"
+            [ "$back_type" = "$prev_type" ] && break
+            wl-copy -t "$prev_type" < "$prev_file" 8>&- 9>&- 2>/dev/null
+            attempt=$(( attempt + 1 ))
+        done
+        if [ "$back_type" = "$prev_type" ]; then
+            say "clipboard restored ($prev_type, $(wc -c < "$prev_file") bytes)"
+        else
+            say "clipboard restore FAILED for $prev_type (saw '${back_type:-nothing}'); clearing it so the sentence cannot be pasted"
+            wl-copy --clear 8>&- 9>&- 2>/dev/null || true
+        fi
     fi
     rm -f "$prev_file"
     PASTE_STAGED=0
@@ -348,10 +390,11 @@ paste_text() {
     if [ "${PASTE_STAGED:-0}" != 1 ]; then
         rm -f "$prev_file" "$STATE/clipboard-backup.type"
         types="$(wl-paste --list-types 2>/dev/null | grep -vi 'x-kde-passwordManagerHint')"
-        prev_type="$(printf '%s' "$types" | head -n1)"
+        prev_type="$(clipboard_payload_type "$types")"
         if command -v wl-paste >/dev/null && [ -n "$prev_type" ] \
                 && wl-paste -n -t "$prev_type" > "$prev_file" 2>/dev/null; then
             printf '%s' "$prev_type" > "$STATE/clipboard-backup.type"
+            say "clipboard borrowed ($prev_type, $(wc -c < "$prev_file") bytes)"
         else
             # An empty clipboard is recorded too (`empty`), not left as "no
             # type file": the difference between "there was nothing to put

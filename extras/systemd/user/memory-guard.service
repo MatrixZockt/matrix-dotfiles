@@ -14,7 +14,12 @@
 # fires only after reclaim has already frozen the desktop. Hence one process at
 # a time, chosen here, with a notification.
 [Unit]
-Description=Memory guard (closes the fastest-growing process before the desktop freezes)
+# 2026-11-19: "never close anything on its own". The guard is an OBSERVER now:
+# it still samples memory and logs what it would close, but DRY_RUN=1 below
+# makes killing impossible. It had closed an IDE/Gradle JVM four times in five
+# minutes during a normal build. Closing requires editing this unit to
+# Environment=DRY_RUN=0 and re-enabling it.
+Description=Memory guard (reports memory pressure; never closes anything)
 After=default.target
 PartOf=default.target
 # A guard that is down is a machine that can freeze unattended, so come back
@@ -23,6 +28,8 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
+# Kills are opt-in, and this unit does not opt in.
+Environment=DRY_RUN=1
 ExecStart=/usr/bin/python3 %h/.local/bin/memory-guard
 Restart=always
 RestartSec=3

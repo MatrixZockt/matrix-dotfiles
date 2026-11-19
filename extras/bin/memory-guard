@@ -16,16 +16,32 @@ WHY THIS EXISTS
 WHAT IT DOES
   Samples /proc/meminfo every INTERVAL seconds (default 2) and fires when either
 
-    A) MemAvailable falls below FLOOR -- default 10% of RAM, at least 2 GiB. 10%
-       is about where the kernel's own reclaim starts to be felt as stalls, so
-       it is the last moment with room to choose a victim instead of having one
-       chosen for us.
-    B) swap is SWAP_PCT full (default 92%) and memory pressure's "full avg10"
-       is at least PRESSURE (default 10%) -- full zram plus visible stalls.
+    A) MemAvailable falls below HARD_FLOOR (default 1 GiB, or 2% of RAM) -- low
+       enough that reclaim itself is stalling tasks, so nothing is left to be
+       careful about; or
+    B) MemAvailable is below FLOOR (default 10% of RAM, at least 2 GiB) AND the
+       memory-pressure "full avg10" is at least PRESSURE (default 10%) -- low,
+       and the desktop is actually waiting on memory; or
+    C) swap is SWAP_PCT full (default 92%) and pressure is at least PRESSURE; or
+    D) MemAvailable is below TREND_FLOOR (default 3 GiB) and FALLING at DRAIN
+       (default 40 MB/s) -- a heavy run taking the machine to the wall. This is
+       the one that has to exist: PSI on a zram-only machine reports "tasks are
+       stalling" at about the same moment the OOM killer fires, so waiting for
+       pressure means waiting until it is too late (see drain_mb_s()).
+
+  Sitting at a third of RAM free with a full zram is what a working machine
+  looks like; treating it as an emergency is how this guard used to close an
+  IDE's build JVM every ten minutes while nothing was wrong (2026-11-19).
+
+  IT DOES NOT CLOSE ANYTHING BY DEFAULT (2026-11-19). The loop runs and logs
+  what it WOULD close, but killing requires DRY_RUN=0. Closing was enabled by
+  default when the guard was written and it took an IDE's build JVM four times
+  in five minutes during an ordinary Gradle build -- exactly the "why did my
+  build daemon die" failure the picker was written to avoid.
 
   When it fires it takes one process, sends SIGTERM, waits TERM_GRACE (3 s), and
   sends SIGKILL only if that process is still there. Then it re-checks memory and
-  either stops or takes the next one, up to MAX_KILLS (3). One line per action
+  either stops or takes the next one, up to MAX_KILLS (1). One line per action
   goes to the journal, and the same line is sent as a notification, so "why did
   my render vanish" has an answer on screen and in
   `journalctl --user -u memory-guard`.
@@ -36,10 +52,10 @@ WHAT IT PICKS (and what it never picks)
   taking the machine down. So every pid's RSS is sampled each tick, the slope
   over the last WINDOW seconds (default 12) is the primary key, and resident
   size only breaks ties between processes that are growing equally: the victim
-  is the fastest-growing one above MIN_RSS_MB. If nothing is growing any more
-  (already-past-the-limit memory, a process parked at 10 GB), the slope is zero
-  for everyone and the tie-break picks the largest -- the right answer then,
-  because a process that grew to that size and stayed is still what has to go.
+  is the fastest-growing one above MIN_RSS_MB. A process that has STOPPED
+  growing is left alone: parked memory is not what freezes a machine, and closing
+  it is the "why did my build daemon die" bug. Only below HARD_FLOOR does size
+  alone decide.
 
   Never the first choice, whatever they weigh:
     * the editor      -- code, zed, neovim, emacs, JetBrains, ...
@@ -94,7 +110,10 @@ PROTECTED = {
     "dictate-daemon", "llama-server",
     "NetworkManager", "wpa_supplicant", "iio-sensor-prox", "upowerd",
 }
-PROTECTED_PREFIXES = ("xdg-desktop-portal", "xdg-document-portal", "xdg-permission-store")
+# "systemd-" covers every helper of systemd's own: systemd-sleep was closed
+# once by an older version of this guard, which does not suspend, it hangs.
+PROTECTED_PREFIXES = ("systemd-", "xdg-desktop-portal", "xdg-document-portal",
+                      "xdg-permission-store")
 
 # The user's tools. Ranked last, killed only if nothing else is left.
 FAMILY_NAMES = {
@@ -131,7 +150,9 @@ FAMILY_PATHS = (
 # says which tool it belongs to.
 FAMILY_CMDLINE = (
     ("editor", ("-Didea.home.path", "/android-studio/", "/JetBrains/",
-                "studio.sh", "-Didea.config.path")),
+                "studio.sh", "-Didea.config.path", "-Didea.vendor.name",
+                "org.gradle.launcher", "GradleDaemon", "gradle-daemon",
+                "kotlin-daemon", "JetBrains")),
     ("claude", ("claude-code", "/.config/Claude/")),
     ("agent", ("orchestrator.js", "resources/bun/", "freebuff")),
 )
@@ -174,14 +195,23 @@ FLOOR_MB = env_int("FLOOR", 0, 0, 1 << 20)              # 0 = 10% of RAM, min 20
 INTERVAL = env_int("INTERVAL", 2, 1, 300)
 WINDOW = env_int("WINDOW", 12, 2, 300)                  # seconds of RSS history
 TERM_GRACE = env_int("TERM_GRACE", 3, 1, 60)
-MAX_KILLS = env_int("MAX_KILLS", 3, 0, 10)
+MAX_KILLS = env_int("MAX_KILLS", 1, 0, 10)            # one at a time, then re-measure
 MIN_RSS_MB = env_int("MIN_RSS_MB", 512, 16, 1 << 20)
 FAST_GROWTH_MB = env_int("FAST_GROWTH", 64, 1, 100000)  # MB/s that needs no size
 COOLDOWN = env_int("COOLDOWN", 60, 0, 3600)
 SWAP_PCT = env_int("SWAP_PCT", 92, 50, 100)
 PRESSURE = env_int("PRESSURE", 10, 1, 100)
+HARD_FLOOR_MB = env_int("HARD_FLOOR", 1536, 64, 1 << 20)   # 0 = 2% of RAM
+GROWTH_FLOOR_MB = env_int("GROWTH_FLOOR", 2, 1, 4096)      # MB/s that counts as growing
+TREND_FLOOR_MB = env_int("TREND_FLOOR", 3072, 256, 1 << 20)  # 0 = 10% of RAM
+DRAIN_MB = env_int("DRAIN", 40, 1, 100000)                # MB/s of fall = heading for the wall
 
-DRY_RUN = os.environ.get("DRY_RUN", "") == "1" or "--dry-run" in sys.argv
+# DRY RUN BY DEFAULT (2026-11-19). The guard closed an IDE build JVM four
+# times in five minutes while an ordinary Gradle build was running, which is
+# not a machine in trouble -- it is a machine doing what it was asked. The
+# owner's rule is now "never close anything on its own", so closing is opt-in:
+# set DRY_RUN=0 in the unit (or pass --allow-close) when the guard should kill.
+DRY_RUN = os.environ.get("DRY_RUN", "1") != "0" or "--dry-run" in sys.argv
 
 
 def log(message):
@@ -281,9 +311,47 @@ def protected(pid, name):
     return ""
 
 
+JVM_NAMES = {"java", "javaw", "java.exe"}
+
+
+def jvm_family(pid, name):
+    """Which tool a JVM belongs to: its own command line, or the process that started it.
+
+    An IDE runs its build and language work in `java` children, so the name says
+    nothing at all -- the command line (-Didea..., org.gradle..., kotlin-daemon)
+    or the ancestor (studio, idea) is what identifies it. Without this the guard
+    sees "java, 1.8 GB, growing" and closes the user's build.
+    """
+    if name not in JVM_NAMES:
+        return ""
+    text = cmdline(pid)
+    for family_name, needles in FAMILY_CMDLINE:
+        if any(needle in text for needle in needles):
+            return family_name
+    parent = status_field(pid, "PPid")
+    for _ in range(4):
+        if not parent or parent <= 1:
+            break
+        parent_name = comm(parent)
+        found = NAME_FAMILY.get(parent_name, "")
+        if not found and parent_name in JVM_NAMES:
+            parent_text = cmdline(parent)
+            for family_name, needles in FAMILY_CMDLINE:
+                if any(needle in parent_text for needle in needles):
+                    found = family_name
+                    break
+        if found in ("editor", "claude", "browser"):
+            return found
+        parent = status_field(parent, "PPid")
+    return ""
+
+
 def family(pid, name):
     """editor / claude / browser / agent, or "" for an ordinary process."""
     found = NAME_FAMILY.get(name, "")
+    if found:
+        return found
+    found = jvm_family(pid, name)
     if found:
         return found
     path = exe_path(pid)
@@ -379,19 +447,85 @@ class Tracker:
         return rows
 
 
+def hard_floor_mb(total_mb):
+    """Where reclaim itself starts to stall, not merely where memory is low."""
+    return max(HARD_FLOOR_MB, total_mb // 50)
+
+
+# ── How fast available memory is falling ────────────────────────────────
+#
+# PSI is the kernel saying tasks are ALREADY stalling, and on this machine
+# (zram swap with no disk behind it) that arrives at about the same moment the
+# OOM killer does. Measured 2026-11-19: a heavier-than-usual run took
+# MemAvailable from ~3 GB to under 1 GB within seconds, PSI full avg10 read
+# 0.0 % the whole way, the guard fired on its 1 GB hard floor, killed one java,
+# and then its 60 s cooldown kept it quiet while the kernel OOM killer closed
+# java and the shell's watchdog at 11:33:17 -- the desktop vanished and
+# relaunched. Low memory is not the emergency; memory HEADING for the wall is.
+# 3 GB that is falling 200 MB/s is 10 s from it, and that is the moment to act.
+_AVAIL_HIST = []
+
+
+def note_available(avail_mb):
+    """Keep the last few seconds of MemAvailable, for the slope."""
+    now = time.monotonic()
+    _AVAIL_HIST.append((now, avail_mb))
+    horizon = max(WINDOW, 10)
+    while _AVAIL_HIST and _AVAIL_HIST[0][0] < now - horizon:
+        _AVAIL_HIST.pop(0)
+
+
+def drain_mb_s():
+    """MB/s MemAvailable is falling over the sample window; 0 when flat or rising."""
+    if len(_AVAIL_HIST) < 3:
+        return 0.0
+    (t0, a0), (t1, a1) = _AVAIL_HIST[0], _AVAIL_HIST[-1]
+    span = t1 - t0
+    if span < 4.0:
+        return 0.0
+    return max(0.0, (a0 - a1) / span)
+
+
 def trigger(state):
-    """(bool, reason) for one sample."""
+    """(bool, reason) for one sample.
+
+    Low available memory on its own is not an emergency. A 32 GB machine running
+    an IDE, a browser, a chat app and a local model sits at 3 GB available for
+    hours without a single stalled task, and closing something there is the user
+    seeing their build daemon vanish for no reason. So the floor only fires when
+    the kernel says tasks are waiting on memory (PSI), and there is a lower
+    floor below which no second opinion is needed.
+    """
     total_mb = state["MemTotal"] // 1024
     avail_mb = state["MemAvailable"] // 1024
     floor = FLOOR_MB or max(2048, total_mb // 10)
-    if avail_mb < floor:
-        return True, "available %d MB under floor %d MB" % (avail_mb, floor)
+    trend = TREND_FLOOR_MB or max(2048, total_mb // 10)
+    hard = hard_floor_mb(total_mb)
+    full = pressure_full_avg10()
+    note_available(avail_mb)
+    drain = drain_mb_s()
+    if avail_mb < hard:
+        return True, "available %d MB under the hard floor %d MB" % (avail_mb, hard)
+    if avail_mb < floor and full >= PRESSURE:
+        return True, ("available %d MB under floor %d MB and memory pressure "
+                      "full avg10 %.1f%%" % (avail_mb, floor, full))
+    # D) Heading for the wall: still above the hard floor, but falling fast.
+    if avail_mb < trend and drain >= DRAIN_MB:
+        seconds = int((avail_mb - hard) / drain) if drain > 0 else 0
+        return True, ("available %d MB and falling %d MB/s -- %d s from the hard floor"
+                      % (avail_mb, round(drain), max(0, seconds)))
     swap_total = state["SwapTotal"]
     if swap_total:
         used_pct = 100.0 * (swap_total - state["SwapFree"]) / swap_total
-        full = pressure_full_avg10()
         if used_pct >= SWAP_PCT and full >= PRESSURE:
             return True, "swap %.0f%% used and memory pressure full avg10 %.1f%%" % (used_pct, full)
+        # A saturated zram is the reason there is no second chance: once swap is
+        # full the kernel has nowhere to put a page and goes straight to its
+        # OOM killer. Half the drain bar is enough to act here, because the
+        # headroom that would have absorbed it is already gone.
+        if used_pct >= SWAP_PCT and avail_mb < trend and drain >= max(1, DRAIN_MB // 2):
+            return True, ("swap %.0f%% used and available %d MB falling %d MB/s"
+                          % (used_pct, avail_mb, round(drain)))
     return False, ""
 
 
@@ -429,11 +563,14 @@ def kill(row):
     action = "would close" if DRY_RUN else "closing"
     log("%s %s (pid %d, %s) to keep the desktop alive"
         % (action, row["name"], row["pid"], describe(row)))
-    notify("Closing %s" % row["name"],
-           "%d MB was all that was left of memory; %s is what grew."
-           % (meminfo()["MemAvailable"] // 1024, describe(row)))
+    # A dry run is a report, not an event: journal only, so an observer that
+    # runs for a week cannot spam the desktop with "Closing java" cards for
+    # something it is not going to close.
     if DRY_RUN:
         return True
+    notify("Closing %s" % row["name"],
+           "%s, and memory was running out (%d MB free)."
+           % (describe(row), meminfo()["MemAvailable"] // 1024))
     pid = row["pid"]
     try:
         os.kill(pid, signal.SIGTERM)
@@ -455,21 +592,31 @@ def kill(row):
     return True
 
 
-def victim(rows, skip=()):
+def victim(rows, skip=(), desperate=False):
     """Fastest-growing ordinary process; families only when none is left.
 
     Size floor MIN_RSS_MB, or a slope above FAST_GROWTH: a process climbing at
     200 MB/s is the threat long before it is 512 MB.
 
+    `desperate` is memory already below the hard floor, where the kernel is about
+    to choose for us. Below it, size decides and anything may go; above it, only a
+    process that is actually growing is a candidate.
+
     Returns (row, last_resort) or (None, False).
     """
     floor_kb = MIN_RSS_MB * 1024
     fast_kb = FAST_GROWTH_MB * 1024
+    growing_kb = GROWTH_FLOOR_MB * 1024
     fallback = None
     for row in rows:                     # already sorted best-first
         if row["pid"] in skip or row["kept"]:
             continue
-        if row["rss"] < floor_kb and (row["growth"] or 0.0) < fast_kb:
+        growth = row["growth"] or 0.0
+        if row["rss"] < floor_kb and growth < fast_kb:
+            continue
+        if not desperate and growth < growing_kb:
+            # Parked memory. It is not what takes a machine down, and closing it
+            # is exactly the "why did my daemon die" bug this guard used to have.
             continue
         if row["family"]:
             if fallback is None:
@@ -480,21 +627,39 @@ def victim(rows, skip=()):
 
 
 def episode(reason, tracker):
-    """One intervention: up to MAX_KILLS victims, fastest-growing first."""
+    """One intervention: the growing hogs first, and more of them when drowning.
+
+    MAX_KILLS (1) is the normal budget, because closing one growing process
+    normally recovers the machine and anything more is damage. Below the hard
+    floor the kernel is already stalling tasks, and there the episode may take up
+    to three: the machine is not going to get better on its own. The trend floor
+    counts as that state too -- 2 GB available with zram swap full is not
+    "low but fine", it is the next allocation away from reclaim.
+    """
     log("triggered: %s" % reason)
     killed = 0
     done = set()
-    floor = FLOOR_MB or max(2048, meminfo()["MemTotal"] // 1024)
-    while killed < MAX_KILLS:
+    total_mb = meminfo()["MemTotal"] // 1024
+    floor = FLOOR_MB or max(2048, total_mb // 10)
+    while True:
         state = meminfo()
-        if state["MemAvailable"] // 1024 >= floor + 512:
-            log("memory recovered: %d MB available" % (state["MemAvailable"] // 1024))
+        available = state["MemAvailable"] // 1024
+        # Below the trend floor there is no headroom left (zram swap is the
+        # usual reason), so PARKED memory counts too. Waiting there for
+        # something to start growing is what left this machine at 1.1 GB on
+        # 2026-11-19 and handed the next kill to the kernel.
+        desperate = (available < hard_floor_mb(total_mb)
+                     or available < (TREND_FLOOR_MB or max(2048, total_mb // 10)))
+        limit = max(MAX_KILLS, 3) if desperate else MAX_KILLS
+        if killed >= limit:
+            break
+        if available >= floor + 512:
+            log("memory recovered: %d MB available" % available)
             break
         rows = tracker.sample()          # fresh slopes: kill the grower, not the history
-        row, last_resort = victim(rows, done)
+        row, last_resort = victim(rows, done, desperate)
         if row is None:
-            log("nothing left worth closing above %d MB; leaving it to the kernel"
-                % MIN_RSS_MB)
+            log("nothing above %d MB is growing; leaving it to the kernel" % MIN_RSS_MB)
             break
         if last_resort:
             log("only the keep list (editor/Claude/browser) is above %d MB; "
@@ -521,9 +686,13 @@ def check():
         print("swap            %d of %d MB used, pressure full avg10 %.1f%%"
               % ((state["SwapTotal"] - state["SwapFree"]) // 1024,
                  state["SwapTotal"] // 1024, pressure_full_avg10()))
+    print("drain           %d MB/s over the last %ds (trend floor %d MB)"
+          % (round(drain_mb_s()), max(WINDOW, 10),
+             TREND_FLOOR_MB or max(2048, total_mb // 10)))
     print("trigger         %s" % (reason if fired else "no"))
     print("ranked, best victim first; families are last resort:")
-    chosen, last_resort = victim(rows)
+    desperate = state["MemAvailable"] // 1024 < hard_floor_mb(total_mb)
+    chosen, last_resort = victim(rows, desperate=desperate)
     floor_kb = MIN_RSS_MB * 1024
     shown = [row for row in rows
              if row["rss"] >= floor_kb or (row["growth"] or 0.0) >= FAST_GROWTH_MB * 1024][:8]
@@ -546,7 +715,7 @@ def check():
                  ("%+d MB/s" % round(row["growth"] / 1024)) if row["growth"] is not None
                  else "n/a", tag))
     if chosen is None:
-        print("would close     nothing above %d MB" % MIN_RSS_MB)
+        print("would close     nothing above %d MB is growing" % MIN_RSS_MB)
     else:
         print("would close     %s (pid %d, %s)%s"
               % (chosen["name"], chosen["pid"], describe(chosen),
@@ -564,9 +733,13 @@ def main():
     # start (boot, restart) spends a few seconds measuring before it may fire.
     warmup = max(2 * INTERVAL, min(WINDOW // 2, 30))
     started = time.monotonic()
-    log("watching memory every %ds; floor %s; pick fastest-growing process; "
-        "editor/Claude/browser last resort; measuring growth for %ds; dry run %s"
-        % (INTERVAL, ("%d MB" % FLOOR_MB) if FLOOR_MB else "10% of RAM", warmup, DRY_RUN))
+    log("watching memory every %ds; hard floor %d MB; floor %s only with pressure; "
+        "trend floor %d MB with a %d MB/s fall; "
+        "close fastest-growing process, never a parked one; editor/Claude/browser "
+        "last resort; measuring growth for %ds; dry run %s"
+        % (INTERVAL, HARD_FLOOR_MB,
+           ("%d MB" % FLOOR_MB) if FLOOR_MB else "10% of RAM",
+           TREND_FLOOR_MB, DRAIN_MB, warmup, DRY_RUN))
     cooldown_until = 0.0
     while True:
         tracker.sample()
@@ -581,7 +754,18 @@ def main():
                     return 0
             else:
                 episode(reason, tracker)
-                cooldown_until = time.monotonic() + COOLDOWN
+                # The cooldown exists so a burst is not a massacre, but after a
+                # single kill a machine that is STILL falling gets no benefit
+                # from a silent minute -- on 2026-11-19 that minute is what let
+                # the kernel OOM killer take the shell's watchdog. So: no
+                # cooldown while memory is still heading for the wall.
+                after = meminfo()
+                still_falling = (after["MemAvailable"] // 1024 < TREND_FLOOR_MB
+                                 and drain_mb_s() >= DRAIN_MB)
+                if still_falling:
+                    log("still falling %.0f MB/s at %d MB available: no cooldown"
+                        % (drain_mb_s(), after["MemAvailable"] // 1024))
+                cooldown_until = 0.0 if still_falling else time.monotonic() + COOLDOWN
                 if once:
                     return 0
         elif once:

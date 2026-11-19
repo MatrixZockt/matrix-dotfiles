@@ -350,9 +350,9 @@ restore_clipboard() {
             fi
         fi
     fi
-            rm -f "$prev_file" "$STATE/clipboard-borrowed"
-        PASTE_STAGED=0
-        exec 8>&- 2>/dev/null
+    rm -f "$prev_file" "$STATE/clipboard-borrowed"
+    PASTE_STAGED=0
+    exec 8>&- 2>/dev/null
     return 0
 }
 

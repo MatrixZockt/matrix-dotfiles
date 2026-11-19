@@ -167,23 +167,94 @@ Singleton {
 
     // (cycle_count is re-read by the Timer above)
 
-    onIsLowAndNotChargingChanged: {
-        if (!root.available || !isLowAndNotCharging) return;
-        // The corner notification is replaced by the bar itself: the same
-        // "Low battery" words in the extended island, the same warning sound
-        // (the freedesktop message chime -- the notification daemon's own),
-        // and the under-bar line blinking red twice. Nothing enters the
-        // notification history.
+    // ── Low and critical: one message per level ──────────────────────────
+    //
+    // Driven by the LEVEL rather than by the edge. An edge-only handler is
+    // silent when the machine comes up already at 15% -- a boot, a resume, a
+    // shell restart -- which is exactly a moment a person needs telling.
+    //
+    // `notifiedLevel` is what keeps it to ONE message per level instead of one
+    // per report: UPower republishes the percentage every few seconds, and at
+    // 5% BOTH isLow and isCritical are true -- critical wins and returns
+    // first, so a crossing can never send two messages for one level.
+    property string notifiedLevel: ""   // "", "low", "critical"
+    function checkBatteryLevels() {
+        if (!root.available) return;
+        // Off the charger the ledger resets, so the next drain says so again.
+        if (root.isCharging) {
+            root.notifiedLevel = "";
+            return;
+        }
+        if (root.isCritical) {
+            if (root.notifiedLevel === "critical") return;
+            root.notifiedLevel = "critical";
+            // The bar's own tell, one level up: the longer words, the harsher
+            // sound the old path used, and three red blinks -- plus a CRITICAL
+            // notification: a red card, and an entry the notification panel
+            // keeps until it is dismissed. (The corner card itself still
+            // follows the shell's 2.5 s popup ceiling, like every other one.)
+            if (root.soundEnabled) Audio.playSystemSound("suspend-error");
+            StatusSignal.batteryAlert("Critically low battery", 3);
+            root.notify("Battery critical",
+                Translation.tr("%1% left. The PC will suspend soon unless it is plugged in.")
+                    .arg(Math.round(root.percentage)),
+                true);
+            return;
+        }
+        if (!root.isLow) return;
+        if (root.notifiedLevel !== "")
+            return;
+        root.notifiedLevel = "low";
+        // The bar's own tell -- the words in the extended island, the warning
+        // sound, and the under-bar line blinking red twice -- is kept, but it
+        // is not a MESSAGE: with a fullscreen window up the bar is not on
+        // screen at all, and nothing about it reaches the notification history
+        // either. So the same crossing also sends a real notification, which
+        // the shell's own daemon draws and keeps.
         Notifications.playNotificationSound(null);
         StatusSignal.batteryAlert("Low battery", 2);
+        root.notify("Low battery",
+            Translation.tr("%1% left. Plug in the charger.").arg(Math.round(root.percentage)),
+            false);
     }
-
-    onIsCriticalAndNotChargingChanged: {
-        if (!root.available || !isCriticalAndNotCharging) return;
-        // Same treatment, one level up: longer text, the harsher sound the
-        // old path used, and three red blinks.
-        if (root.soundEnabled) Audio.playSystemSound("suspend-error");
-        StatusSignal.batteryAlert("Critically low battery", 3);
+    onPercentageChanged: root.checkBatteryLevels()
+    onIsChargingChanged: root.checkBatteryLevels()
+    onAvailableChanged: root.checkBatteryLevels()
+    Component.onCompleted: root.checkBatteryLevels()
+    // The message itself.
+    //
+    // `notify-send` is broken on this machine -- it exits 127 with "symbol
+    // lookup error: notify-send: undefined symbol:
+    // notify_notification_get_activation_app_launch_context" -- so the
+    // "Battery full" message above never reaches the daemon either. The daemon
+    // is healthy (it is this shell), so this makes the same D-Bus call by hand,
+    // exactly as the file manager's own sender does: `urgency` 2 is critical
+    // (red, and kept in the panel), 1 is normal, and a critical one lets the
+    // daemon choose the expiry, which this shell bounds to its popup ceiling.
+    // The icon is the shell's own battery glyph, by absolute path: no icon
+    // theme on this machine carries a battery icon name, and a path is what the
+    // daemon loads either way. Resolved from THIS file, so it follows the shell
+    // wherever it is installed.
+    function batteryIcon(critical) {
+        const file = critical ? "battery-0.svg" : "battery-warning.svg";
+        return String(Qt.resolvedUrl("../assets/icons/fluent/" + file)).replace("file://", "");
+    }
+    function notify(title, body, critical) {
+        notifyProc.command = ["gdbus", "call", "--session",
+            "--dest", "org.freedesktop.Notifications",
+            "--object-path", "/org/freedesktop/Notifications",
+            "--method", "org.freedesktop.Notifications.Notify",
+            "Shell", "0", root.batteryIcon(critical),
+            String(title ?? ""), String(body ?? ""),
+            "[]",
+            critical ? "{'urgency': <byte 2>}" : "{'urgency': <byte 1>}",
+            critical ? "0" : "8000"];
+        notifyProc.running = false;
+        notifyProc.running = true;
+    }
+    Process {
+        id: notifyProc
+        running: false
     }
 
     onIsSuspendingAndNotChargingChanged: {

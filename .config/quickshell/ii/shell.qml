@@ -609,8 +609,8 @@ ShellRoot {
     // themselves live once, in custom/popup.lua -- these calls reach them, so
     // every path obeys the same popup guard.
     //   4 fingers -> showDesktop (REVERSED, requested): jump to an empty
-    //     desktop, a second tap comes back. The desktops overview that used
-    //     to live here moved to SUPER+D (custom/keybinds.lua).
+    //     desktop, a second tap comes back. The desktops overview lives on
+    //     SUPER+Tab (SUPER+D was removed on 2026-11-19).
     //   3 fingers -> SILENCE EVERYTHING, then bring back the last. One tap
     //     stops every source that is making sound (a video, the local music,
     //     both); the next tap resumes only the one that was heard last and

@@ -3,7 +3,7 @@
 Auto-generated from the **running** Hyprland instance (`hyprctl binds -j`),
 so this is what your keys actually do right now.
 
-Total binds: **329**
+Total binds: **327**
 
 Regenerate with:
 
@@ -179,7 +179,6 @@ make keybinds
 | `SUPER + BracketLeft` | SUPER chord (cancels the bare-SUPER action) — (lua action) |
 | `SUPER + BracketRight` | SUPER chord (cancels the bare-SUPER action) — (lua action) |
 | `SUPER + C` | SUPER chord (cancels the bare-SUPER action) — (lua action) |
-| `SUPER + D` | SUPER chord (cancels the bare-SUPER action) — (lua action) |
 | `SUPER + Down` | SUPER chord (cancels the bare-SUPER action) — (lua action) |
 | `SUPER + E` | SUPER chord (cancels the bare-SUPER action) — (lua action) |
 | `SUPER + Equal` | SUPER chord (cancels the bare-SUPER action) — (lua action) |
@@ -303,12 +302,6 @@ make keybinds
 | `SUPER + Right` | Resize Right — (lua action) |
 | `SUPER + Side2` | Controls menu (mouse) — (lua action) |
 | `SUPER + Up` | Resize Up — (lua action) |
-
-## Windows
-
-| Keys | Action |
-| --- | --- |
-| `SUPER + D` | Float/tile everything on this desktop — (lua action) |
 
 ## Workspace
 

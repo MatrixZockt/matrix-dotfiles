@@ -162,7 +162,7 @@ hl.bind("SUPER + mouse:273", hl.dsp.window.resize(), { mouse = true, description
 
 -- ...and MOVING one, for the windows that are no longer attached. Attached
 -- windows stay fixed here (the unbind above, and the note in custom/general.lua
--- about the three-finger move gesture), but once SUPER+D has detached a window
+-- about the three-finger move gesture), but once a window is floating
 -- there is nothing to be fixed TO -- and a floating window that cannot be put
 -- where you want it is the one thing that makes floating useless. So SUPER +
 -- left-drag moves a window, and only a floating one: the guard reads the
@@ -884,52 +884,18 @@ hl.bind("SUPER + ALT + Up", hl.dsp.window.resize({ x = 0, y = 40, relative = tru
     { repeating = true, description = "Window: Grow up" })
 
 --#! Window
---# Show desktop
--- First press: you are taken to an empty desktop, so you see the bare desktop.
--- Second press: you are returned to the desktop you came from.
--- NOTHING is moved or resized at any point - the windows are simply left alone on
--- their own workspaces - so they come back exactly as they were, down to the tiling
--- order of every tile. (An earlier version moved every window to a hidden
--- workspace and moved them back, which re-tiled them in a different arrangement.)
--- The base config's maximize action moved to SUPER+ALT+D.
+--# SUPER+D is deliberately UNBOUND (2026-11-19).
 --
--- The pair "workspace you came from" / "the empty desktop we jumped to" is kept in
--- a file so it survives a config reload, and so pressing the key from somewhere
--- else starts a fresh show-desktop instead of jumping to a stale workspace.
-local showDesktopPath = (os.getenv("HOME") or "/tmp") .. "/.cache/hypr-show-desktop"
-
-local function readShowDesktop()
-    local file = io.open(showDesktopPath, "r")
-    if not file then return nil end
-    local content = file:read("*a")
-    file:close()
-    local from, scratch = (content or ""):match("^(%S+)%s+(%S+)$")
-    if not from then return nil end
-    return { from = from, scratch = scratch }
-end
-
-local function writeShowDesktop(from, scratch)
-    local file = io.open(showDesktopPath, "w")
-    if not file then return end
-    if from and scratch then
-        file:write(from .. " " .. scratch .. "\n")
-    end
-    file:close()
-end
-
+-- It briefly toggled "float everything on this desktop", with a 7px dot in the
+-- shell as its only tell. That mode is removed by request: the dot read as a
+-- stray mark, and the second press left windows where they had been dragged
+-- instead of snapping them back into the tiling it had broken. A half-working
+-- mode is worse than no mode, so the chord now does nothing at all.
+--
+-- The unbind has to be explicit: the base config binds SUPER+D to maximize,
+-- and without this line that action would reappear from underneath. Maximize
+-- lives on SUPER+ALT+D below.
 hl.unbind("SUPER + D")
-hl.bind("SUPER + D", function()
-    -- REVERSED AGAIN (requested 2026-11-19): SUPER+D is now "float everything on
-    -- THIS desktop" -- the movable/resizable, unattached version of the apps
-    -- you already have open here, never fullscreen, and never a window on
-    -- another desktop. Pressing it again puts back exactly what it floated
-    -- (see toggleWorkspaceFloat in custom/general.lua).
-    --
-    -- The desktops overview it used to open is unchanged and still reachable:
-    -- SUPER+Tab opens it (the grid of every desktop), and the 4-finger tap is
-    -- its own route (see custom/popup.lua).
-    toggleWorkspaceFloat()
-end, { description = "Windows: Float/tile everything on this desktop" })
 
 hl.bind("SUPER + ALT + D", hl.dsp.window.fullscreen({ mode = "maximized", action = "toggle" }),
     { description = "Window: Maximize" })
@@ -1197,7 +1163,7 @@ SHIFT + SUPER + N, SHIFT + SUPER + P, SHIFT + SUPER + R, SHIFT + SUPER + Right,
 SHIFT + SUPER + S, SHIFT + SUPER + T, SHIFT + SUPER + Up, SHIFT + SUPER + W,
 SHIFT + SUPER + X, SUPER + 0, SUPER + 1, SUPER + 2, SUPER + 3, SUPER + 4, SUPER + 5,
 SUPER + 6, SUPER + 7, SUPER + 8, SUPER + 9, SUPER + A, SUPER + Apostrophe, SUPER + B,
-SUPER + Space, SUPER + BracketLeft, SUPER + BracketRight, SUPER + C, SUPER + D, SUPER + Down,
+SUPER + Space, SUPER + BracketLeft, SUPER + BracketRight, SUPER + C, SUPER + Down,
 SUPER + E, SUPER + Equal, SUPER + Escape, SUPER + F, SUPER + G, SUPER + I, SUPER + J,
 SUPER + K, SUPER + L, SUPER + Left, SUPER + M, SUPER + Minus, SUPER + N, SUPER + O,
 SUPER + P, SUPER + Page_Down, SUPER + Page_Up, SUPER + Period, SUPER + Q, SUPER + R,

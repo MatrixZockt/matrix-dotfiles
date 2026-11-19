@@ -9,7 +9,6 @@ import qs.modules.ii.colorPicker
 import qs.modules.ii.desktopIndicator
 import qs.modules.ii.dock
 import qs.modules.ii.edgeReveal
-import qs.modules.ii.floatMode
 import qs.modules.ii.lock
 import qs.modules.ii.mediaControls
 import qs.modules.ii.notificationPopup
@@ -53,10 +52,6 @@ Scope {
     // The desktops, out of the bar and into a small capsule at the bottom of
     // the screen (see the module: it yields to the dock and to fullscreen).
     PanelLoader { component: DesktopIndicator {} }
-    // The float-mode tell: one 7px dot, bottom centre, for as long as the
-    // desktop SUPER+D detached is the one you are on. Set over IPC by
-    // toggleWorkspaceFloat in custom/general.lua.
-    PanelLoader { component: FloatModeBadge {} }
     PanelLoader { component: LoadingIndicator {} }
     // The fullscreen tell: the same status pulses as the bar's indication
     // line, drawn tiny in the top-right corner while a fullscreen window

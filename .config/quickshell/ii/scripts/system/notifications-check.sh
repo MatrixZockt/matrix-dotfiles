@@ -133,15 +133,19 @@ fi
 sleep 3.2
 boo "the card leaves the corner when the app's time is up" "$(layer)" ""
 
-# ── The chime, and the app that does not get one ──────────────────────────
+# ── One chime, for every sender ───────────────────────────────────────────
 #
-# Two rules that are invisible to every other witness here: a chime that played
-# and a chime that was deliberately skipped look identical from the outside,
-# both being "a card appeared". So this asks PipeWire: `pw-mon` reports the
-# node the shell spawns for a sound, and the shell tags its own chime
-# `ii-system-sound`. One notification from an ordinary app must create one; a
-# notification from an app that sounds its own (Discord, WhatsApp) must create
-# none, because the app has already made the noise.
+# A chime that played and a chime that was skipped look identical from the
+# outside, both being "a card appeared". So this asks PipeWire: `pw-mon`
+# reports the node the shell spawns for a sound, and the shell tags its own
+# chime `ii-system-sound`.
+#
+# REQUESTED (2026-11-19): "make sure the notification sound of every single
+# notification is being inputted with the new chime". So the assertion is the
+# opposite of what it used to be: Discord and WhatsApp used to be skipped for
+# sounding their own notifications, and now every sender must make one. Those
+# two are kept as the cases because they are exactly the senders that used to
+# escape the chime.
 #
 # The BASELINE is checked first and the rest is skipped when it fails: a
 # System Sounds row at zero, or muted, spawns nothing for anything, and that is
@@ -162,32 +166,32 @@ chime_nodes() {   # chime_nodes <app> <summary> -- how many chime streams it mad
 }
 
 if command -v pw-mon >/dev/null 2>&1; then
-    echo "── the chime: played for an app, skipped for one that sounds itself ──"
+    echo "── the chime: the same sound for every sender ────────────────────────"
     BASE="$(chime_nodes Check "the shell's own chime")"
     case "$BASE" in (*[!0-9]*|"") BASE=0 ;; esac
     if [ "$BASE" -ge 1 ]; then
         ok "an ordinary notification plays the shell's chime ($BASE mentions in pw-mon)"
-        case "$(chime_nodes Discord "an app with its own sound")" in
-            (0) ok "a Discord notification does not (Discord sounds it)" ;;
-            (*) bad "a Discord notification does not chime: the shell played one anyway" ;;
+        case "$(chime_nodes Discord "an app that used to sound its own")" in
+            (0) bad "a Discord notification plays the chime: the daemon played nothing" ;;
+            (*) ok "a Discord notification plays the same chime, not its own" ;;
         esac
-        case "$(chime_nodes 'WhatsApp Desktop' "an app with its own sound")" in
-            (0) ok "a WhatsApp notification does not (WhatsApp sounds it)" ;;
-            (*) bad "a WhatsApp notification does not chime: the shell played one anyway" ;;
+        case "$(chime_nodes 'WhatsApp Desktop' "an app that used to sound its own")" in
+            (0) bad "a WhatsApp notification plays the chime: the daemon played nothing" ;;
+            (*) ok "a WhatsApp notification plays the same chime, not its own" ;;
         esac
     else
         echo "  ..    nothing reached PipeWire for an ordinary notification --"
         echo "  ..    the System Sounds row is off or muted; the chime rules are not asserted"
     fi
     # The rule itself, without depending on any audio state: the daemon's own
-    # answer for a sender it has never seen a notification from.
+    # answer for a sender, which no longer depends on what the app might do.
     case "$(qs -c ii ipc call notifications sound Discord '' '' 2>/dev/null)" in
-        (*"no shell chime"*) ok "and the rule says so for Discord, in words" ;;
+        (*"shell chime at"*) ok "and the rule says so for Discord, in words" ;;
         (*) bad "and the rule says so for Discord: '$(qs -c ii ipc call notifications sound Discord '' '')'" ;;
     esac
     case "$(qs -c ii ipc call notifications sound Kitty '' '' 2>/dev/null)" in
-        (*"shell chime at"*) ok "while an app with no sound of its own keeps the shell's" ;;
-        (*) bad "while an app with no sound of its own keeps the shell's" ;;
+        (*"shell chime at"*) ok "and for an app that never had a sound of its own" ;;
+        (*) bad "and for an app that never had a sound of its own: '$(qs -c ii ipc call notifications sound Kitty '' '')'" ;;
     esac
     # These probes are the check's own cards; the suite leaves the bell as it
     # found it.

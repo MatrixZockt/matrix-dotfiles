@@ -745,6 +745,12 @@ Timer {
     // without waiting for the next notification to arrive. So changing it
     // chimes once, at the level just set.
     //
+    // It plays the SAME file a notification plays, and that is the point of the
+    // change: it used to preview `/usr/share/sounds/<theme>/stereo/message`,
+    // which stopped being the notification sound when the generated chime
+    // replaced it -- so moving the row auditioned a sound the desktop no longer
+    // makes.
+    //
     // Two things make this safe to wire to a slider rather than to a button.
     // It is rate-limited, because `onMoved` fires for every pixel of a drag and
     // an unchimed chime per pixel is a machine gun. And it goes through
@@ -761,12 +767,7 @@ Timer {
             return false;
         }
         root.lastSystemSoundPreview = now;
-        const theme = root.audioTheme !== "" ? root.audioTheme : "freedesktop";
-        for (const ext of [".oga", ".ogg"]) {
-            if (root.playSystemSoundFile(`/usr/share/sounds/${theme}/stereo/message${ext}`))
-                return true;
-        }
-        return false;
+        return root.playSystemSoundFile(Quickshell.shellPath("assets/sounds/notification.wav"));
     }
 
     // An event sound from the configured sound theme (battery, timers). Named

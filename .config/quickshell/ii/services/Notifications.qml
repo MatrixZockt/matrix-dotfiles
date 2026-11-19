@@ -585,11 +585,13 @@ Singleton {
     // fine -- the audio stack was never the problem (the sink is up and at 55%),
     // nothing in this shell ever asked for a sound to be played.
     //
-    // The file comes from the freedesktop sound theme and is played through
-    // PipeWire. The notification itself gets the final say, as the spec intends:
-    // an explicit `sound-file` hint is played, `suppress-sound` (Chromium-family
-    // apps set it) or `sound-name: "silent"` keeps it quiet, and a `sound-name`
-    // is used when the theme actually has that sound.
+    // REQUESTED (2026-11-19): "make sure the notification sound of every single
+    // notification is being inputted with the new chime". So the sender's sound
+    // hints are NOT consulted any more: `sound-file` (a file of the app's own),
+    // `sound-name` (a file from the freedesktop theme) and `suppress-sound`
+    // (Chromium-family apps set it -- the browser notifications were silent)
+    // all used to produce a different sound or no sound at all, which read as
+    // the desktop having several notification sounds. One chime, everywhere.
     //
     // Playing is Audio's job, not this file's: the mixer has a System Sounds
     // row, and that row works by handing a level to the player at spawn time.
@@ -634,41 +636,6 @@ Singleton {
     // not a way around the mixer.
     readonly property real notificationGain: 1.0
 
-    // ── Apps that sound their own notifications ─────────────────────────────
-    //
-    // REQUESTED (2026-10-23): "have notification sound not play if the app
-    // making that notification has a sound of its own (like discord or
-    // whatsapp)". Those apps chime themselves the moment a message lands, so
-    // the shell's chime there is not an announcement in a silence -- it is a
-    // SECOND sound, a beat late, over the app's own, which reads as the
-    // desktop duplicating every message.
-    //
-    // The spec has a way to say "I make my own noise" (`sound-name: "silent"`
-    // and `suppress-sound`, both honoured above), but Discord and WhatsApp
-    // publish neither: they assume the notification daemon is quiet, which is
-    // what a desktop normally is. So this is a list of names, and it has to
-    // be: what an app does with its audio is invisible from outside, no sender
-    // publishes an "I already played something" field, and the decision has
-    // to be made before the chime starts rather than after. Everything not
-    // named here keeps the shell's chime.
-    //
-    // The consequence, stated so it is not a surprise: an app that is in this
-    // list AND whose own notification sound is switched off in that app will
-    // be silent here too. That is the trade the request asks for -- one sound
-    // per message -- and the app's own setting is the one place to change it.
-    readonly property var selfSoundingApps: [
-        // Discord and the clients built on it
-        "discord", "discordcanary", "discordptb", "vesktop", "equibop", "armcord", "legcord", "webcord",
-        // WhatsApp, however its Linux client spells itself
-        "whatsapp", "whatsie", "whatsdesk",
-        // messengers that chime for a message themselves
-        "telegram", "slack", "signal", "mattermost", "viber", "zulip",
-        // messenger aggregators, which bring their apps' sounds with them
-        "ferdium", "rambox", "franz",
-        // and the two non-chat ones with a notification sound on by default
-        "steam", "thunderbird"
-    ]
-
     // One comparable spelling of an app: the basename (identities arrive as
     // desktop-file ids and as icon paths), no file extension, lowercase, and
     // every run of punctuation or space collapsed to a single space. So
@@ -676,85 +643,36 @@ Singleton {
     // whatsapp.png" all become words that can be compared -- which is the
     // whole point, because none of those three spellings equals another and a
     // sender picks whichever it likes.
+    //
+    // Shared with the Settings page, which decides what the Mute switch means:
+    // see NotificationUtils.normalizeAppIdentity.
     function identityText(value) {
-        // Shared with the Settings page, which decides what the Mute switch
-        // means: see NotificationUtils.normalizeAppIdentity.
         return NotificationUtils.normalizeAppIdentity(value);
     }
 
-    readonly property var selfSoundingTokens: root.selfSoundingApps.map((a) => root.identityText(a))
-
-    // Does this sender play its own notification sound? Checked against every
-    // spelling the notification carries, plus the window class the tray
-    // registry resolves -- the class is the one identity that survives a
-    // sender with a localised or truncated name (see senderClass).
-    function appSoundsItself(appName, desktopEntry, appIcon) {
-        const texts = [];
-        const add = (v) => {
-            const t = root.identityText(v);
-            if (t.length > 0 && texts.indexOf(t) < 0)
-                texts.push(t);
-        };
-        add(appName);
-        add(desktopEntry);
-        add(appIcon);
-        add(TrayApps.classForNotification({
-            appName: appName,
-            desktopEntry: desktopEntry,
-            appIcon: appIcon,
-        }));
-        for (const text of texts) {
-            for (const token of root.selfSoundingTokens) {
-                if (token.length === 0) continue;
-                // Whole word, not substring: "discord" must match "discord"
-                // and "discord canary", and must not match a longer app name
-                // that merely contains it.
-                if (new RegExp("(^| )" + token + "( |$)").test(text))
-                    return true;
-            }
-        }
-        return false;
-    }
+    // ── The two notices that keep their own sound ───────────────────────────
+    //
+    // Everything an APP sends gets the chime, whatever its hints say. These two
+    // names are the shell speaking about itself, not an app notifying:
+    //
+    //   * a picture or a recording the SHELL copied already has its card in the
+    //     top-right corner, and a chime for something the user did themselves
+    //     -- a snip, a stopped take -- is noise (asked for 2026-11-15: "it
+    //     shouldn't make the notification sound").
+    //   * a drive going in plays its own click, which IS the sound of that
+    //     gesture; adding the chime over it would be two sounds for one event
+    //     (see Volumes.announce).
+    readonly property var ownSoundAppNames: ["Shell", GlobalStates.saveableAppName]
 
     function playNotificationSound(notification) {
         if (!(Config?.options.notifications.sound ?? true)) return;
-        // A picture or a recording the SHELL copied is not news from an app: the
-        // card in the top-right corner already says it, and a chime for something
-        // the user did themselves -- a snip, a stopped take -- is noise (asked for
-        // 2026-11-15: "it shouldn't make the notification sound").
-        if (String(notification?.appName ?? "") === GlobalStates.saveableAppName)
+        const appName = String(notification?.appName ?? "");
+        if (root.ownSoundAppNames.indexOf(appName) >= 0)
             return;
-        const hints = notification?.hints ?? {};
-        if (hints["suppress-sound"] === true) return;
-        const name = hints["sound-name"] ?? "";
-        if (name === "silent") return;
-        // The app makes the announcement itself; a second chime over it is the
-        // duplication this exists to stop. See selfSoundingApps.
-        if (root.appSoundsItself(notification?.appName ?? "",
-                notification?.desktopEntry ?? "", notification?.appIcon ?? "")) {
-            console.log("[Notifications] " + (notification?.appName ?? "?")
-                + " sounds its own notifications -- no chime");
-            return;
-        }
-        const file = hints["sound-file"];
-        let target = "";
-        // A sound the SENDER chose is played at the row's own level: it picked
-        // that file for its own balance, and the gain below is about making
-        // this session's soft default chime survive a music bed.
-        let gain = 1.0;
-        if (typeof file === "string" && file.length > 0) {
-            target = file;
-        } else if (typeof name === "string" && name.length > 0) {
-            target = "/usr/share/sounds/freedesktop/stereo/" + name + ".oga";
-        }
-        if (target.length === 0) {
-            target = root.defaultNotifSound;
-            gain = root.notificationGain;
-        }
         // Detached, not a tracked Process: a tracked one cannot be restarted
         // while it is still running, so a second notification arriving while
         // the first was still playing was silently dropped.
-        Audio.playSystemSoundFile(target, gain);
+        Audio.playSystemSoundFile(root.defaultNotifSound, root.notificationGain);
     }
 
     // ── Per-app mute ────────────────────────────────────────────────────
@@ -1269,15 +1187,11 @@ Singleton {
         // `notifications sound <appName> [desktopEntry] [appIcon]` -- what a
         // notification from this sender would sound like, without sending one.
         //
-        // Whether a chime is silenced by an app's own sound is invisible from
-        // the outside: both answers look like "a card appeared". This answers
-        // it in words, and it goes through the very function the daemon calls,
-        // so a green answer here is the behaviour rather than a copy of it.
+        // Every notification plays the same chime, so what is left to answer
+        // is the level it plays at. The identity is still printed because the
+        // row it reads -- System Sounds -- is shared by every system sound.
         function sound(appName: string, desktopEntry: string, appIcon: string): string {
-            const own = root.appSoundsItself(appName, desktopEntry, appIcon);
             const id = `${appName} / ${desktopEntry || "-"} / ${appIcon || "-"}`;
-            if (own)
-                return `${id} -> app sounds its own notification, no shell chime`;
             return `${id} -> shell chime at ${root.notificationGain}x row ${Audio.systemSoundVolume().toFixed(3)}`;
         }
     }

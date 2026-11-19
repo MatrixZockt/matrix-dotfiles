@@ -161,11 +161,12 @@ Singleton {
     // the check suite asserts that reversal sample for sample.
     //
     // TWO THINGS THIS DELIBERATELY DOES NOT DO:
-    //   * it does not play both. The notification goes out with the
-    //     `suppress-sound` hint -- which the shell's own Notifications service
-    //     honours ("suppress-sound" is the freedesktop hint for exactly this)
-    //     -- so the click IS the sound of the announcement, not a second layer
-    //     on top of the drop.
+    //   * it does not play both. The notification goes out under the shell's
+    //     own app name, and Notifications leaves those alone (see
+    //     ownSoundAppNames) -- so the click IS the sound of the announcement,
+    //     not a second layer on top of the chime. The `suppress-sound` hint is
+    //     still sent, but the daemon no longer reads it: a sender does not get
+    //     to trade the desktop's notification sound for silence.
     //   * it does not add a switch of its own. The click is played through
     //     Audio.playSystemSoundFile, which applies the mixer's "System
     //     Sounds" row: turning that row down or muting it silences the click

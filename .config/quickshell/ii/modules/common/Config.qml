@@ -701,6 +701,17 @@ Singleton {
                 // Written from Settings > Notifications, read by
                 // services/Notifications.qml in the shell process.
                 property list<string> mutedApps: []
+                // ── Apps whose chime is off, while their notifications stay ──
+                // Same shape and the same normalized matching as mutedApps,
+                // but this silences only the sound: the popup and the card
+                // still arrive. That is the answer for an app that already
+                // plays a notification sound of its own (Discord, Telegram,
+                // Steam) -- without it the app's sound and this one overlap.
+                //
+                // Written from Settings > Notifications and from the SUPER
+                // launcher's right-click menu, read by
+                // services/Notifications.qml.
+                property list<string> soundMutedApps: []
                 property JsonObject monitor: JsonObject {
                     property bool enable: false
                     property string name: "" // Name of the monitor to show notifications on, like "eDP-1". Find out with 'hyprctl monitors' command

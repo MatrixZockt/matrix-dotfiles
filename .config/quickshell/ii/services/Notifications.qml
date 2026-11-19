@@ -669,6 +669,14 @@ Singleton {
         const appName = String(notification?.appName ?? "");
         if (root.ownSoundAppNames.indexOf(appName) >= 0)
             return;
+        // ── An app the user has switched the chime off for ──────────────────
+        // REQUESTED (2026-11-19): "manually mute the sound of each desktop app
+        // so that it doesn't double sound". The notification itself is still
+        // drawn and kept -- only this desktop's chime is dropped, so an app
+        // that plays its own sound is heard once instead of twice.
+        if (root.isChimeMuted(notification?.appName ?? "",
+                notification?.desktopEntry ?? "", notification?.appIcon ?? ""))
+            return;
         // Detached, not a tracked Process: a tracked one cannot be restarted
         // while it is still running, so a second notification arriving while
         // the first was still playing was silently dropped.
@@ -719,6 +727,29 @@ Singleton {
         Config.options.notifications.mutedApps = NotificationUtils.withAppMuted(
             root.mutedApps, appName, muted);
         return Config.options.notifications.mutedApps;
+    }
+
+    // ── Per-app chime, a second and narrower switch ───────────────────────
+    //
+    // REQUESTED (2026-11-19): "manually mute the sound of each desktop app so
+    // that it doesn't double sound". Full mute above takes the whole
+    // notification away; this one only takes THIS desktop's chime, and the
+    // popup and history entry still arrive. An app that plays its own
+    // notification sound then makes exactly one sound instead of two.
+    //
+    // Same list shape and same normalized identity as mutedApps, so an app is
+    // the same app whichever switch named it.
+    readonly property var soundMutedApps: Config?.options.notifications.soundMutedApps ?? []
+
+    function isChimeMuted(appName, desktopEntry, appIcon) {
+        return NotificationUtils.isIdentityMuted(
+            root.identitiesOf(appName, desktopEntry, appIcon), root.soundMutedApps);
+    }
+
+    function setAppChimeMuted(appName, muted) {
+        Config.options.notifications.soundMutedApps = NotificationUtils.withAppMuted(
+            root.soundMutedApps, appName, muted);
+        return Config.options.notifications.soundMutedApps;
     }
 
     // ── What each app was allowed, and what was blocked ─────────────────
@@ -1153,6 +1184,7 @@ Singleton {
                 return "no apps recorded";
             keys.sort((a, b) => (root.appStats[b].lastTime || 0) - (root.appStats[a].lastTime || 0));
             return `muted=${root.mutedApps.length ? root.mutedApps.join(", ") : "(none)"}\n`
+                + `chime muted=${root.soundMutedApps.length ? root.soundMutedApps.join(", ") : "(none)"}\n`
                 + keys.map((k) => {
                     const s = root.appStats[k];
                     return `${s.name}${root.isAppMuted(s.name) ? " [muted]" : ""}: allowed=${s.allowed ?? 0} blocked=${s.blocked ?? 0} last=\"${(s.lastSummary || "").slice(0, 40)}\"`;
@@ -1165,6 +1197,15 @@ Singleton {
             const on = String(muted).toLowerCase() === "true" || String(muted) === "1";
             const list = root.setAppMuted(appName, on);
             return `${appName} -> ${on ? "muted" : "allowed"}; muted list: ${list.length ? list.join(", ") : "(none)"}`;
+        }
+
+        // `notifications chimeMute <appName> <true|false>` -- the narrower
+        // switch, from a script. Writes the same config key the two UIs write,
+        // so a check can assert the daemon behaviour and put it back.
+        function chimeMute(appName: string, muted: string): string {
+            const on = String(muted).toLowerCase() === "true" || String(muted) === "1";
+            const list = root.setAppChimeMuted(appName, on);
+            return `${appName} -> chime ${on ? "muted" : "on"}; chime-muted list: ${list.length ? list.join(", ") : "(none)"}`;
         }
 
         function clear(): string {
@@ -1188,10 +1229,13 @@ Singleton {
         // notification from this sender would sound like, without sending one.
         //
         // Every notification plays the same chime, so what is left to answer
-        // is the level it plays at. The identity is still printed because the
-        // row it reads -- System Sounds -- is shared by every system sound.
+        // is the level it plays at -- and whether the app's own chime switch
+        // has taken it away. The identity is still printed because the row it
+        // reads -- System Sounds -- is shared by every system sound.
         function sound(appName: string, desktopEntry: string, appIcon: string): string {
             const id = `${appName} / ${desktopEntry || "-"} / ${appIcon || "-"}`;
+            if (root.isChimeMuted(appName, desktopEntry, appIcon))
+                return `${id} -> chime muted for this app (popup and card still arrive)`;
             return `${id} -> shell chime at ${root.notificationGain}x row ${Audio.systemSoundVolume().toFixed(3)}`;
         }
     }

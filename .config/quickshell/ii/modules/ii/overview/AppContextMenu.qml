@@ -56,6 +56,26 @@ Item {
     // it, and an object that knows how to launch itself cannot be misread.
     signal appActionRequested(var action)
 
+    // ── The app's notification switches ───────────────────────────────────
+    //
+    // Two switches that belong to THIS desktop rather than to the app, at the
+    // place the app is: mute its notifications entirely, or mute only the
+    // chime for an app that already plays a notification sound of its own.
+    //
+    // Both are the config lists services/Notifications.qml reads, matched by
+    // the same normalized identity the daemon uses, so the menu, the Settings
+    // page and the daemon cannot disagree about which app was meant. Writing
+    // from here needs no IPC: the launcher and the daemon are one process.
+    readonly property var entryIdentities: [
+        root.entry?.name ?? "", root.entry?.id ?? "", root.entry?.icon ?? ""
+    ]
+    readonly property var mutedApps: Config?.options.notifications.mutedApps ?? []
+    readonly property var soundMutedApps: Config?.options.notifications.soundMutedApps ?? []
+    readonly property bool notificationsMuted: NotificationUtils.isIdentityMuted(
+        root.entryIdentities, root.mutedApps)
+    readonly property bool chimeMuted: NotificationUtils.isIdentityMuted(
+        root.entryIdentities, root.soundMutedApps)
+
     readonly property int menuWidth: 348
     readonly property int rowHeight: 40
 
@@ -135,9 +155,36 @@ Item {
                 destructive: false
             });
         }
+        // The desktop's own switches. They are rows rather than a settings page
+        // away because this is where the user sees the app whose sound they
+        // want gone. The label states the action, the icon states the state.
+        const notify = [];
+        if (root.entry && String(root.entry.name ?? "").length > 0) {
+            notify.push({
+                key: "n:mute",
+                kind: "notify",
+                actionId: "toggle-mute",
+                label: root.notificationsMuted
+                    ? Translation.tr("Unmute notifications")
+                    : Translation.tr("Mute notifications"),
+                icon: root.notificationsMuted ? "notifications_off" : "notifications",
+                destructive: false
+            });
+            notify.push({
+                key: "n:chime",
+                kind: "notify",
+                actionId: "toggle-chime",
+                label: root.chimeMuted
+                    ? Translation.tr("Turn the notification sound back on")
+                    : Translation.tr("Mute the notification sound"),
+                icon: root.chimeMuted ? "volume_off" : "volume_up",
+                destructive: false
+            });
+        }
         const sections = [
             { title: Translation.tr("Launch"), rows: buckets.run },
             { title: Translation.tr("This app's own options"), rows: own },
+            { title: Translation.tr("Notifications"), rows: notify },
             { title: Translation.tr("Repair"), rows: buckets.maintain },
             { title: Translation.tr("Remove"), rows: buckets.remove }
         ];
@@ -160,6 +207,23 @@ Item {
             root.dismiss();
             if (action)
                 root.appActionRequested(action);
+            return;
+        }
+        if (row.kind === "notify") {
+            // The menu STAYS OPEN: the two switches are read together, and the
+            // row's label and icon change on the spot, which is the receipt
+            // that the click landed. A press beside the menu closes it as
+            // usual.
+            const name = String((root.entry && root.entry.name) || "");
+            if (name.length === 0)
+                return;
+            if (row.actionId === "toggle-mute") {
+                Config.options.notifications.mutedApps = NotificationUtils.withAppMuted(
+                    root.mutedApps, name, !root.notificationsMuted);
+            } else if (row.actionId === "toggle-chime") {
+                Config.options.notifications.soundMutedApps = NotificationUtils.withAppMuted(
+                    root.soundMutedApps, name, !root.chimeMuted);
+            }
             return;
         }
         if (row.destructive === true) {

@@ -97,6 +97,14 @@ ContentPage {
             Config.options.notifications.mutedApps, appName, muted);
     }
 
+    // The narrower switch: this app's notifications still arrive, only the
+    // chime is dropped. Same config shape as the mute list, so the daemon's
+    // matching is the same normalized identity.
+    function setChimeMuted(appName, muted) {
+        Config.options.notifications.soundMutedApps = NotificationUtils.withAppMuted(
+            Config.options.notifications.soundMutedApps, appName, muted);
+    }
+
     // ── One row per app ─────────────────────────────────────────────────
     //
     // Muted first (the ones the user just acted on stay under the cursor),
@@ -105,12 +113,16 @@ ContentPage {
     // cannot undo.
     readonly property var rows: {
         const mutedList = Config.options.notifications.mutedApps ?? [];
+        const chimeMutedList = Config.options.notifications.soundMutedApps ?? [];
         const merged = {};
         for (const key of Object.keys(root.historyApps))
             merged[key] = Object.assign({ allowed: 0, blocked: 0, lastSummary: "" }, root.historyApps[key]);
         for (const key of Object.keys(root.appStats))
             merged[key] = Object.assign({}, merged[key] ?? {}, root.appStats[key]);
-        for (const name of mutedList) {
+        // A name that only exists in a list -- muted here, muted from the
+        // launcher's right-click menu -- still gets a row. A switch the user
+        // cannot find is a switch they cannot undo.
+        for (const name of mutedList.concat(chimeMutedList)) {
             const key = NotificationUtils.normalizeAppIdentity(name);
             if (key.length === 0)
                 continue;
@@ -129,9 +141,11 @@ ContentPage {
                 "lastTime": entry.lastTime ?? 0,
                 "lastSummary": entry.lastSummary ?? "",
                 "muted": NotificationUtils.isIdentityMuted([name, entry.appIcon ?? ""], mutedList),
+                "chimeMuted": NotificationUtils.isIdentityMuted([name, entry.appIcon ?? ""], chimeMutedList),
             });
         }
         out.sort((a, b) => (Number(b.muted) - Number(a.muted))
+            || (Number(b.chimeMuted) - Number(a.chimeMuted))
             || ((b.lastTime || 0) - (a.lastTime || 0))
             || a.name.localeCompare(b.name));
         return out;
@@ -152,7 +166,7 @@ ContentPage {
 
         StyledText {
             Layout.fillWidth: true
-            text: Translation.tr("Popup timing and the monitor to show notifications on are in Bluetooth & devices. An app muted below gets no popup, no sound and no card in the notification centre, but is still counted here.")
+            text: Translation.tr("Popup timing and the monitor to show notifications on are in Bluetooth & devices. An app muted below gets no popup, no sound and no card in the notification centre, but is still counted here. Sound off takes only the chime and keeps the notification -- use it for an app that already plays its own notification sound, so you hear one sound instead of two.")
             color: Appearance.colors.colSubtext
             font.pixelSize: Appearance.font.pixelSize.smaller
             wrapMode: Text.Wrap
@@ -229,17 +243,43 @@ ContentPage {
                         }
                     }
 
-                    StyledText {
+                    // ── Two switches, two different silences ────────────
+                    // Sound drops only this desktop's chime; Muted takes the
+                    // whole notification. Both labels are always drawn: two
+                    // bare switches side by side would not say which is which.
+                    RowLayout {
                         Layout.fillWidth: false
-                        visible: appRow.modelData.muted
-                        text: Translation.tr("Muted")
-                        color: Appearance.colors.colError
-                        font.pixelSize: Appearance.font.pixelSize.smaller
-                    }
+                        spacing: 8
 
-                    StyledSwitch {
-                        checked: appRow.modelData.muted
-                        onClicked: root.setMuted(appRow.modelData.name, !appRow.modelData.muted)
+                        StyledText {
+                            Layout.fillWidth: false
+                            text: Translation.tr("Sound")
+                            color: appRow.modelData.chimeMuted
+                                ? Appearance.colors.colError
+                                : Appearance.colors.colSubtext
+                            font.pixelSize: Appearance.font.pixelSize.smaller
+                        }
+
+                        StyledSwitch {
+                            checked: !appRow.modelData.chimeMuted
+                            onClicked: root.setChimeMuted(appRow.modelData.name,
+                                !appRow.modelData.chimeMuted)
+                        }
+
+                        StyledText {
+                            Layout.fillWidth: false
+                            text: Translation.tr("Muted")
+                            color: appRow.modelData.muted
+                                ? Appearance.colors.colError
+                                : Appearance.colors.colSubtext
+                            font.pixelSize: Appearance.font.pixelSize.smaller
+                        }
+
+                        StyledSwitch {
+                            checked: appRow.modelData.muted
+                            onClicked: root.setMuted(appRow.modelData.name,
+                                !appRow.modelData.muted)
+                        }
                     }
                 }
             }

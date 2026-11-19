@@ -179,6 +179,24 @@ if command -v pw-mon >/dev/null 2>&1; then
             (0) bad "a WhatsApp notification plays the chime: the daemon played nothing" ;;
             (*) ok "a WhatsApp notification plays the same chime, not its own" ;;
         esac
+        # ── The per-app chime switch ──
+        # Muting one app's sound keeps its notification and drops only the
+        # chime -- the answer for an app that already plays its own. Set, probe,
+        # then put the config back the way it was found.
+        qs -c ii ipc call notifications chimeMute Check true >/dev/null 2>&1
+        case "$(qs -c ii ipc call notifications sound Check '' '' 2>/dev/null)" in
+            (*"chime muted"*) ok "an app whose chime is switched off says so" ;;
+            (*) bad "an app whose chime is switched off says so: '$(qs -c ii ipc call notifications sound Check '' '')'" ;;
+        esac
+        case "$(chime_nodes Check "an app with its chime switched off")" in
+            (0) ok "and it plays nothing for that app's notification" ;;
+            (*) bad "and it plays nothing for that app's notification: it chimed anyway" ;;
+        esac
+        qs -c ii ipc call notifications chimeMute Check false >/dev/null 2>&1
+        case "$(chime_nodes Check "the chime switched back on")" in
+            (0) bad "and switching it back on plays the chime again: nothing played" ;;
+            (*) ok "and switching it back on plays the chime again" ;;
+        esac
     else
         echo "  ..    nothing reached PipeWire for an ordinary notification --"
         echo "  ..    the System Sounds row is off or muted; the chime rules are not asserted"

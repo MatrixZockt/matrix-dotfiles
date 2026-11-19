@@ -131,6 +131,21 @@ nothing is closed for you.
 2026-11-12, which from the outside looks exactly like a crash; the kernel's own OOM
 killer, which takes one process rather than the session, is the last resort.
 
+`/etc/sysctl.d/99-memory-safety.conf` (kept here as
+`extras/etc/sysctl.d/99-memory-safety.conf`) is the second half of that: the disk
+tier only helps if the kernel actually reclaims to it *in the background*.
+`vm.min_free_kbytes = 262144` and `vm.watermark_scale_factor = 100` make `kswapd`
+wake early and keep reclaiming, instead of leaving the process that asked for
+memory to do the reclaim itself — that in-app reclaim is the "everything is
+frozen" state. `vm.swappiness` stays at 60 there; the old `99-zram-swap.conf`
+(150) and `99-swap-pressure.conf` (60) fought over load order and are gone.
+
+The two things that must survive are the compositor and the shell.
+`desktop-oom-protect.service` pins `Hyprland` and every `qs` process to
+`oom_score_adj -900` (ten times less attractive than an ordinary process) and
+hands the marker back to 0 on anything else that inherits it, so an app launched
+from the shell is never accidentally protected along with it.
+
 Check the tiers with `cat /proc/swaps`, the guard with `memory-guard --check`, and
 the budget with `systemctl --user show heavy.slice`.
 

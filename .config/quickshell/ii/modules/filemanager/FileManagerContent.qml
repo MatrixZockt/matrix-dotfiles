@@ -451,6 +451,15 @@ Item {
                 preview: !isDir && root.hasThumbnailSource(name)
             });
         }
+        // How much THIS folder matched. The wider search below only runs when
+        // the answer here is none, so the box still feels like "filter what I
+        // am looking at" until that has nothing left to offer.
+        root.localMatches = out.length;
+        if (needle.length > 0 && out.length === 0
+                && root.findQuery === needle && root.findRows.length > 0) {
+            for (const found of root.findRows)
+                out.push(found);
+        }
         const field = root.sortField;
         const dir = root.sortReversed ? -1 : 1;
         const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
@@ -467,6 +476,7 @@ Item {
         });
         root.rawCount = n;
         root.rows = out;
+        root.findIfNeeded(needle);
         // The listing was re-read, so the rows on screen may be looking at
         // folders that changed inside: see requestDirSize.
         root.listingGeneration++;
@@ -509,6 +519,160 @@ Item {
     onFilterChanged: rowsDebounce.restart()
     onSortFieldChanged: rowsDebounce.restart()
     onSortReversedChanged: rowsDebounce.restart()
+
+    // ── WHEN THE FOLDER HAS NOTHING, ASK THE WHOLE HOME ──────────────────
+    //
+    // The search box filtered the folder you are in and stopped there. Asked
+    // for (2026-11-20): a file that is not in this folder -- a dotfile, a
+    // config that belongs to one of the dotfile trees -- could only be found
+    // by navigating to it first, which is the opposite of searching. So when
+    // the folder AND its subfolders have no match, the same needle is looked
+    // for under $HOME, hidden directories included, and the hits are listed
+    // in the same view with their path (`~/.config/...`) so it is obvious
+    // where they live.
+    //
+    // The rules that keep it honest:
+    //   * it runs only when the local answer is EMPTY -- a search that still
+    //     matches something here never leaves the folder;
+    //   * from two characters up, after a pause, so typing does not spawn a
+    //     find per keystroke;
+    //   * `.cache`, `node_modules` and `.git` are pruned: they are noise and
+    //     they are huge, and nothing anybody searches for lives there;
+    //   * at most `findLimit` rows, because a two-letter needle in a home this
+    //     size matches thousands and a list nobody can read is not an answer;
+    //   * a stale answer is dropped -- the query it was run for is carried
+    //     with the result and compared when it lands.
+    readonly property string findRoot: String(Quickshell.env("HOME") ?? "")
+    readonly property int findLimit: 300
+    property var findRows: []
+    property string findQuery: ""      // the needle the rows belong to
+    property string findRanFor: ""     // the needle the running process was started with
+    property bool findFinished: false
+    property int localMatches: 0
+    readonly property bool findRunning: findProcess.running
+
+    function findIfNeeded(needle) {
+        if (needle.length < 2 || root.localMatches > 0) {
+            if (root.findQuery !== "") {
+                root.findQuery = "";
+                root.findRows = [];
+                root.findFinished = false;
+            }
+            return;
+        }
+        if (needle === root.findQuery)
+            return;
+        root.findQuery = needle;
+        root.findRows = [];
+        root.findFinished = false;
+        // Drop the previous needle's hits from the list now, not when the new
+        // walk paints its first line: they belong to a question nobody asked.
+        rowsDebounce.restart();
+        findDebounce.restart();
+    }
+
+    // The needle is a NAME fragment, never a glob: a typed `*` or `?` finds
+    // files with that character in the name, not everything on the disk.
+    function findCommand(needle) {
+        const pat = needle.replace(/[\\*?\[\]]/g, "\\$&");
+        // The walk STARTS PRINTING and is cut off at 300 rows or six seconds,
+        // whichever comes first -- it is read line by line (SplitParser), so
+        // hits appear while the disk is still being walked instead of after.
+        // Measured on this machine: the walk is ~1.3s with the disk warm and
+        // ~13s cold, so ten seconds is the cap -- long enough for a cold
+        // answer, short enough that "nothing" is still an answer. `-xdev`
+        // keeps it on the disk home lives on: a network or FUSE mount under
+        // home is not where the dotfiles of this PC are, and stat-ing one of
+        // those costs seconds per file.
+        //
+        // The needle and the root are passed as ARGUMENTS ($1/$2), never
+        // spliced into the script, so nothing typed in the search box can be
+        // read as shell syntax.
+        return ["bash", "-c",
+            "timeout 10 find \"$1\" -xdev -maxdepth 8 "
+                + "\\( -name .cache -o -name node_modules -o -name .git \\) -prune -o "
+                + "-iname \"*$2*\" -printf '%y\\t%s\\t%T@\\t%p\\n' | head -n 300",
+            "files-search", root.findRoot, pat];
+    }
+
+    function runFind() {
+        if (root.findQuery.length < 2 || findProcess.running)
+            return;                      // onExited picks up a newer needle
+        root.findRanFor = root.findQuery;
+        root.findRows = [];
+        root.findFinished = false;
+        findProcess.command = root.findCommand(root.findRanFor);
+        findProcess.running = true;
+    }
+
+    // One line of `find -printf`, turned into one row -- or dropped.
+    function absorbFindLine(line, query) {
+        // An answer to a needle nobody is looking for any more. Dropping it
+        // matters: results from a half-typed word would otherwise flash into
+        // the list of the finished one.
+        if (query !== root.findQuery || root.findRows.length >= root.findLimit)
+            return;
+        const parts = String(line ?? "").split("\t");
+        if (parts.length < 4)
+            return;
+        const type = parts[0];
+        const size = Number(parts[1]);
+        const mtime = Number(parts[2]);
+        const path = parts.slice(3).join("\t");
+        if (path === "" || path === root.findRoot)
+            return;
+        const nm = path.substring(path.lastIndexOf("/") + 1);
+        const isDir = type === "d";
+        // `~` in the name column is the whole feature being useful: a hit is
+        // a place, not just a word, and the folder it is in is what the user
+        // needs to know before opening it.
+        const shown = (root.findRoot !== "" && path.startsWith(root.findRoot + "/"))
+            ? "~" + path.substring(root.findRoot.length)
+            : path;
+        root.findRows.push({
+            name: shown,
+            path: String(path),
+            isDir: isDir,
+            size: isDir ? 0 : (Number.isFinite(size) ? size : 0),
+            modified: new Date((Number.isFinite(mtime) ? mtime : 0) * 1000),
+            kind: root.kindFor(nm, isDir),
+            icon: root.iconFor(nm, isDir),
+            preview: !isDir && root.hasThumbnailSource(nm),
+            elsewhere: true
+        });
+        // A row at a time would rebuild the whole list per hit; this paints
+        // what has arrived so far, four to six times a second.
+        findPaint.restart();
+    }
+
+    Timer {
+        id: findDebounce
+        // 350ms: long enough that a word typed at speed is one search, short
+        // enough that the fallback feels like part of the same gesture.
+        interval: 350
+        onTriggered: root.runFind()
+    }
+
+    Timer {
+        id: findPaint
+        interval: 150
+        onTriggered: root.rebuildRows()
+    }
+
+    Process {
+        id: findProcess
+        stdout: SplitParser {
+            onRead: line => root.absorbFindLine(String(line ?? ""), root.findRanFor)
+        }
+        onExited: {
+            root.findFinished = true;
+            root.rebuildRows();
+            // A newer needle arrived while this one was walking the disk: run
+            // it now rather than answering the last question the user asked.
+            if (root.findQuery !== root.findRanFor)
+                root.runFind();
+        }
+    }
 
     function entry(i) {
         return (i >= 0 && i < root.rows.length) ? root.rows[i] : null;
@@ -8815,8 +8979,12 @@ Item {
                                 ? root.listingLine
                                 : (root.currentMtpVolume !== null
                                     ? root.mtpUnlockHint(root.currentMtpVolume.mtp)
-                                    : ((root.filter.length > 0 && root.rawCount > 0)
-                                        ? Translation.tr("No items match your search")
+                                    : (root.filter.length > 0
+                                        ? (root.findRunning || (root.findQuery.length > 0 && !root.findFinished)
+                                            ? Translation.tr("Nothing here — searching the rest of your home…")
+                                            : (root.rawCount > 0
+                                                ? Translation.tr("No items here or anywhere in your home match")
+                                                : Translation.tr("No items match your search")))
                                         : Translation.tr("This folder is empty")))
                             font.pixelSize: Appearance.font.pixelSize.small
                             color: Appearance.colors.colSubtext

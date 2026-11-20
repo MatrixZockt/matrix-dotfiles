@@ -127,6 +127,46 @@ if pgrep -x freebuff >/dev/null 2>&1; then
     done
 fi
 
+# ── One-shot history trim, on the next cold start (2026-11-20) ───────────
+#
+# Switching sessions takes 6-30 s here, and the measured cause is transcript
+# hydration: the grafizum store alone is 426 MB / 2 922 messages / 179 MB of
+# text (one thread: 1 873 messages), and a full read+parse is ~2.9 s before
+# any markdown, highlighting and layout happen on top. Trimming the oldest
+# messages per thread was measured on a copy: read 2 098 -> 55 ms, parse
+# 834 -> 205 ms, 426 -> 66 MB, integrity_check ok, search still answering.
+#
+# That trim CANNOT be done while the app runs -- it holds these stores open in
+# WAL mode -- and the app is exactly where the work on it happens, so the fix
+# would otherwise wait for a restart nobody wants to make mid-session. This is
+# where it belongs: the launcher, at the one moment the stores are provably
+# closed (the checks above already returned, so no instance is running).
+#
+# OFF by default and armed with a marker, because it deletes history: the
+# script archives everything it removes to ~/.cache/freebuff-history-archive/
+# first. Arm it with `touch`; the marker is consumed only when the trim
+# succeeds, so a failed run retries at the next start instead of being lost.
+#
+#   touch ~/.config/freebuff-desktop/.trim-history-on-launch
+#   tail -f /tmp/freebuff-trim.log        # what it did
+TRIM_MARK="$HOME/.config/freebuff-desktop/.trim-history-on-launch"
+if [ -f "$TRIM_MARK" ]; then
+    TRIM="$HOME/.config/hypr/custom/scripts/freebuff-trim-history.sh"
+    if [ -x "$TRIM" ]; then
+        printf '%s trim-on-launch: start\n' "$(date '+%F %T')" >>/tmp/freebuff-trim.log
+        if "$TRIM" --apply >>/tmp/freebuff-trim.log 2>&1; then
+            rm -f "$TRIM_MARK"
+            printf '%s trim-on-launch: done\n' "$(date '+%F %T')" >>/tmp/freebuff-trim.log
+        else
+            printf '%s trim-on-launch: FAILED, marker kept for the next start\n' \
+                "$(date '+%F %T')" >>/tmp/freebuff-trim.log
+        fi
+    else
+        printf '%s trim-on-launch: %s missing or not executable\n' \
+            "$(date '+%F %T')" "$TRIM" >>/tmp/freebuff-trim.log
+    fi
+fi
+
 # ── Rendering backend ────────────────────────────────────────────────────
 # Read this before changing the flags again: the choice is not cosmetic, the
 # wrong one stops the app from opening at all.

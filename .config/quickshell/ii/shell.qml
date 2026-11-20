@@ -671,50 +671,24 @@ ShellRoot {
                 // ends. The following press brings back only the one that was
                 // heard last, decided by the switch's own memory (see
                 // `tapSwitch`), never by a guess at what is playing.
-                const handled = MprisController.tapSwitch();
-                // A press that is still measuring has not answered yet; the
-                // fallbacks below must not start a player in the meantime.
-                if (handled !== "" || MprisController.tapPending) {
-                    console.log(`[tap] 3-finger tap: ${handled}`);
-                    return;
-                }
-                // Nothing to stop and nothing remembered: start something, the
-                // way the tap always could. MPRIS is the right level for this:
-                // it is whatever the active player is -- mpv, Spotify, a
-                // browser, a video -- so one gesture covers "song or video or
-                // whatever" without this shell knowing what any of them are.
+                // ONE call, and the decision happens where the answer is.
                 //
-                // `togglePlaying` rather than reading isPlaying and picking a
-                // verb: the player owns that state, and a paused player still
-                // has to be resumable, so both directions go through it.
-                const played = MprisController.toggleBest();
-                if (played !== "") {
-                    console.log(`[tap] 3-finger tap: ${played}`);
-                    return;
-                }
-                // Nothing on the bus could play: the tab this was on is closed
-                // and no other player is left. The music saved on this PC is
-                // the last resort, in two steps.
-                //
-                // A track already loaded makes this a REAL play/pause -- the
-                // gesture has to be able to stop the local player too, which
-                // is the one thing a "start something" fallback must not
-                // break. Only with nothing loaded is it a start, and then it
-                // picks up where the library was left.
-                if (MusicPlayer.hasTrack) {
-                    MusicPlayer.playPause();
-                    console.log("[tap] 3-finger tap: local music");
-                    return;
-                }
-                if (MusicPlayer.startRemembered()) {
-                    console.log("[tap] 3-finger tap: local music, where the library was left");
-                    return;
-                }
-                // Nothing anywhere. Fall through to the old behaviour rather
-                // than making the gesture do nothing, since a desktop with no
-                // media running and no music on disk has no play/pause to
-                // perform.
-                Quickshell.execDetached(["hyprctl", "eval", "require('custom.popup').wallpaperCarousel()"]);
+                // `tapSwitch()` is asynchronous on purpose: it asks the
+                // browser which of its tabs is really audible before deciding,
+                // because Brave's bus follows ONE tab and that tab can be a
+                // stale paused one while another is playing. That is why the
+                // "start something" chain that used to follow this call could
+                // never run -- tapSwitch() returns "" on every press and
+                // `tapPending` is true by the time the handler looks, so the
+                // handler returned before reaching a single fallback. The
+                // whole chain (silence, resume, or start the best player, the
+                // local music, the carousel) now lives in
+                // MprisController.tapDecide, and logs what it did.
+                MprisController.tapSwitch();
+                // The branch ENDS here. Without a return the handler fell
+                // through to the "unrouted" warning below on every handled
+                // three-finger tap, which made a working tap look like a
+                // routing bug in the log.
                 return;
             }
             // A tap the shell has no action for. This branch exists because

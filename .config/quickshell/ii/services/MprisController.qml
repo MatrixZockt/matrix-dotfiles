@@ -757,10 +757,23 @@ Singleton {
 		return ""
 	}
 
+	// ── Who is REALLY playing ────────────────────────────────────────────
+	//
+	// A paused browser keeps its sink-input open and uncorked for a while, so
+	// "has a stream" is not "is playing" -- and counting that stream made the
+	// three-finger tap read a paused video as sounding: it chose "silence",
+	// silenced nothing, remembered the paused tab, and the next press tried to
+	// resume it with a DevTools verb this browser does not answer. Both
+	// directions looked dead (reported 2026-11-20).
+	//
+	// So a browser is counted on its PLAYER's own state, or on the audible-tab
+	// probe when DevTools is actually answering (that probe is the one thing
+	// that can see a second tab playing behind a paused media session). Its
+	// bare stream is no longer evidence.
 	readonly property var soundingNow:
 		root.players.filter(p => !root.isProxyBus(p)
 			&& (p.isPlaying === true
-				|| (root.browserKey(p) !== "" && root.audibleStreams(root.browserKey(p)).length > 0)))
+				|| (root.browserKey(p) !== "" && root.browserTabPlaying === true)))
 
 	// What the switch itself stopped, oldest first. Only players this gesture
 	// silenced are in here: a source the user paused by hand must not be
@@ -779,6 +792,12 @@ Singleton {
 	// player, which is the odd case the tap has to work around.
 	function isBrowser(player) {
 		return root.browserKey(player) !== ""
+	}
+
+	// The same test on a NAME -- the app name an audio stream or the bar carries,
+	// for the places where no player object exists to ask (see tapDecide).
+	function isBrowserName(name) {
+		return /brave|chromium|chrome/i.test(String(name ?? ""))
 	}
 
 	// ── The streams that are still sounding after the players were paused ──
@@ -933,7 +952,15 @@ Singleton {
 		root.browserActionIssued = false
 		// Stop the browser tab that is really playing. MPRIS only reaches the
 		// media-session tab, which is whichever one is in front.
-		if (root.browserSounding) {
+		// ONLY WHEN DEVTOOLS IS ANSWERING. The tab action is the only way to
+		// reach an audible tab that the browser's media session is not on, but
+		// it cannot act at all through a browser started without a debugging
+		// port -- it answers `ok: false` and pauses nothing. Issuing it anyway
+		// set `browserActionIssued`, which then told `pauseSounding` to SKIP the
+		// browser, so a browser video was left playing by a tap that had
+		// decided to silence everything. No probe, no CDP: the MPRIS verb below
+		// is the control that always works.
+		if (root.browserSounding && root.browserTabPlaying) {
 			root.browserActionIssued = true
 			root.browserTabAction("pause")
 		}
@@ -976,8 +1003,20 @@ Singleton {
 			if (Mpris.players.values.indexOf(entry) < 0) continue
 			if (root.isBrowser(entry)) {
 				// Bring back the tab the previous press stopped, not the one the
-				// browser's media session happens to point at.
-				root.browserTabAction("play")
+				// browser's media session happens to point at -- when the browser
+				// can be asked at all. Without a debugging port the tab action is
+				// a silent no-op (`ok: false`), and the press would resume
+				// nothing: the media-session verb is the one that works there.
+				if (root.browserTabPlaying) {
+					root.browserTabAction("play")
+				} else {
+					try {
+						if (typeof entry.play === "function") entry.play()
+						else entry.togglePlaying()
+					} catch (error) {
+						console.warn(`[tap] could not resume the browser: ${error}`)
+					}
+				}
 				root.tapSilenced = []
 				return "Brave"
 			}
@@ -1021,23 +1060,80 @@ Singleton {
 		const remembered = (root.tapSilenced ?? []).filter(x => x !== null && x !== undefined)
 		const browserPlaying = (browserTitles ?? []).length > 0
 		// Non-browser sources are asked about their own state; a browser is left
-		// out because its bus is one player for every tab and can be wrong.
+		// out here because its bus is one player for every tab.
 		const otherPlaying = root.players.some(p => !root.isProxyBus(p)
 			&& !root.isBrowser(p) && p.isPlaying === true)
 		const localPlaying = MusicPlayer.hasTrack && MusicPlayer.paused === false
-		if (browserPlaying || otherPlaying || localPlaying) {
+		// ── AND WHAT IS ACTUALLY MAKING SOUND ─────────────────────────────
+		//
+		// The two readings above only know about MPRIS, and a browser without
+		// its DevTools port open answers nothing: `browserPlaying` is always
+		// false here (the script prints [] when no port is listening), and
+		// `otherPlaying` deliberately excludes browsers. So a video playing in
+		// Brave counted as NOTHING, the press fell through to "start
+		// something", and `toggleBest()` toggled ONE player instead of
+		// silencing the desktop -- reported 2026-11-20 as "it does not stop
+		// multiple songs any more".
+		//
+		// The audio server is the honest reader, the same one `silenceEverything`
+		// uses: the player behind the app that is heard right now answers for
+		// itself (a browser video included), and an audible stream with no
+		// player behind it at all -- a game, Discord, a native app -- counts on
+		// its own, because there is nothing to ask.
+		// A browser counts by its own playback state (or by the audible-tab
+		// probe), never by its lingering stream -- see `soundingNow`. An app
+		// with a stream and NO player behind it -- a game, Discord, a native
+		// app -- is the only case where the audio server speaks for itself,
+		// and it needs a NAME to be sure it is not a browser's stale stream.
+		const audiblePlaying = (root.soundingNow ?? []).length > 0
+		const bareApp = root.soundAppName
+		const audibleWithoutPlayer = root.audibleCount > 0 && bareApp !== ""
+			&& root.soundAppPlayer === null && !root.isBrowserName(bareApp)
+		if (audiblePlaying || audibleWithoutPlayer || localPlaying
+				|| browserPlaying || otherPlaying) {
 			// Something is playing: stop that. A fresh stop starts a fresh memory.
 			root.tapSilenced = []
-			root.silenceEverything()
+			const silenced = root.silenceEverything()
+			console.log(`[tap] 3-finger tap: silenced ${silenced || "nothing"} (browser=${browserPlaying} players=${otherPlaying} local=${localPlaying} audible=${audiblePlaying || audibleWithoutPlayer})`)
 			return
 		}
 		if (remembered.length > 0) {
-			root.resumeLastSilenced()
+			const resumed = root.resumeLastSilenced()
+			console.log(`[tap] 3-finger tap: resumed ${resumed || "nothing"}`)
 			return
 		}
-		// Nothing is playing and nothing was stopped: doing nothing is the only
-		// answer that cannot start a video the user was not watching.
-		console.log("[tap] nothing playing and nothing remembered: leaving playback alone")
+		// ── NOTHING IS PLAYING: START SOMETHING ───────────────────────────
+		//
+		// The tap is a play/pause SWITCH, and a switch that can only pause is
+		// not one. This chain used to sit in shell.qml, after the call to
+		// `tapSwitch()` -- and it was unreachable from the day the press became
+		// a MEASUREMENT (`tapSwitch` asks the browser which tab is audible
+		// before answering, so it can only return "", and the handler bailed
+		// out on `tapPending` every single time). Reported 2026-11-20: "it does
+		// not stop and play any more". The decision and the action live in the
+		// same function now, because only here is the answer known.
+		const started = root.toggleBest()
+		if (started !== "") {
+			console.log(`[tap] 3-finger tap: ${started}`)
+			return
+		}
+		// Nothing on the bus could play: the tab this was on is closed and no
+		// other player is left. The music saved on this PC is the last resort,
+		// in two steps -- a loaded track makes this a REAL play/pause, and only
+		// with nothing loaded is it a start from where the library was left.
+		if (MusicPlayer.hasTrack) {
+			MusicPlayer.playPause()
+			console.log("[tap] 3-finger tap: local music")
+			return
+		}
+		if (MusicPlayer.startRemembered()) {
+			console.log("[tap] 3-finger tap: local music, where the library was left")
+			return
+		}
+		// Nothing anywhere: the wallpaper carousel, so the gesture still does
+		// something on a desktop with no media at all.
+		console.log("[tap] 3-finger tap: nothing to play, opening the wallpaper carousel")
+		Quickshell.execDetached(["hyprctl", "eval", "require('custom.popup').wallpaperCarousel()"])
 	}
 
 	function tapSwitch() {

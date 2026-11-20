@@ -1,5 +1,6 @@
 pragma Singleton
 
+import qs.modules.common
 import Quickshell
 import Quickshell.Io
 import QtQuick
@@ -55,12 +56,15 @@ Singleton {
     /// The colour dictation is drawn in, by both tells: the bar's island pill
     /// (NowBar) and the fullscreen drop-down (DictationIndicator). One value,
     /// because they are the same light on the same machine -- picking each
-    /// one's colour where it is drawn is how the two drifted apart (the bar a
-    /// fixed blue, the drop-down the theme's primary).
+    /// one's colour where it is drawn is how the two drifted apart.
     ///
-    /// A fixed hue on purpose: a theme can be greyscale, and a meter drawn in
-    /// whatever the wallpaper produces is not a meter anybody can read.
-    readonly property color accent: "#73b8ff"
+    /// THE THEME'S OWN ACCENT, not a fixed blue. A dictation is a thing the
+    /// desktop is doing, and everything else that says "this is active" here --
+    /// window borders, focused controls, the settings toggles -- is drawn in
+    /// colPrimary. The blue this used to be was borrowed from a different
+    /// product and read as one more foreign element on a monochrome desktop;
+    /// it now changes with the wallpaper like the rest of the shell.
+    readonly property color accent: Appearance.colors.colPrimary
 
     // A warm whisper answers a short dictation in a few hundred milliseconds,
     // so the working tell can arrive and leave inside a single blink -- which

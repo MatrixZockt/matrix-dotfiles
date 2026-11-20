@@ -71,6 +71,18 @@ ARM_MS = int(os.environ.get("II_DICTATE_ARM_MS", "300"))
 # A hold shorter than this is not worth sending to whisper even if armed.
 MIN_RECORD_S = float(os.environ.get("II_DICTATE_MIN_S", "0.35"))
 
+# How long the capture keeps running after the key comes up.
+#
+# A syllable does not end on the same millisecond as the key. The last word of
+# a sentence is the one a release lands on, and at the release the audio of it
+# is still travelling: PipeWire has it in its graph, pw-record has it in its own
+# output buffer, and the pipe has a block this process has not read yet. Cutting
+# the capture the instant SUPER goes up dropped that tail -- reported as "my
+# last word is not being heard even though I hold the key through it". A beat of
+# 150ms is invisible next to a whisper request, and it is the difference between
+# a sentence that ends on its last word and one that does not.
+RELEASE_GRACE_S = float(os.environ.get("II_DICTATE_RELEASE_GRACE_S", "0.15"))
+
 # ── Transcribing WHILE the user talks ───────────────────────────────────────
 # Whisper is fast per second of audio, but the whole clip used to be handed over
 # only after the key came up, so the wait grew with the dictation: measured on
@@ -465,6 +477,9 @@ class Recorder(threading.Thread):
         self.worker.start()
         self.quiet_run = 0
         self.cut_loud = False
+        # Wall clock after which a stopping run() may finally leave its read
+        # loop. Set by stop(); see the drain note in run().
+        self.drain_until = 0.0
 
     def run(self):
         # pw-record, not parec: parec on this machine exits without an error and
@@ -474,8 +489,18 @@ class Recorder(threading.Thread):
             ["pw-record", "--rate", "16000", "--channels", "1", "--format", "s16",
              *(["--target", SOURCE] if SOURCE else []), "-"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        while not self.stop_flag.is_set():
-            data = self.proc.stdout.read(1600)   # 100ms at 16kHz mono s16
+        # ── READ UNTIL END OF FILE, NOT UNTIL THE FLAG ────────────────────
+        #
+        # This used to be `while not self.stop_flag.is_set()`, which left the
+        # loop between two reads the instant SUPER came up. Everything already
+        # spoken but not yet read -- the block in hand, the ones behind it in
+        # the pipe, whatever pw-record had buffered -- was then dropped, and
+        # `self.total` never counted it, so the release handed whisper a
+        # sentence that ended early. The flag now only tells stop() to close the
+        # capture: this loop keeps reading until the pipe reports EOF, which is
+        # the only signal that says "all of it is in self.buf".
+        while True:
+            data = self.proc.stdout.read(1600)   # 50ms at 16kHz mono s16
             if not data:
                 break
             self.buf += data
@@ -519,6 +544,11 @@ class Recorder(threading.Thread):
             self.levels.append(self.level)
             set_level(self.level)
             self._maybe_cut(rms)
+            # The backstop for a capture that will not end on its own (a
+            # pw-record that ignored SIGINT): stop() has already given up on
+            # waiting by now, so leaving is better than hanging a dictation.
+            if self.stop_flag.is_set() and time.time() > self.drain_until:
+                break
 
     # ── cutting the recording into pieces as it arrives ──────────────────
     def _maybe_cut(self, rms):
@@ -623,17 +653,37 @@ class Recorder(threading.Thread):
         any chunk failed, which makes the caller transcribe the whole capture
         instead.
         """
+        # From here run() may leave its read loop -- but only after the grace
+        # plus a second, so a capture that will not end on its own cannot hang
+        # a dictation. The deadline is set BEFORE the flag: a flag that arrives
+        # with a stale deadline in the past would end the loop on the next block
+        # and throw away exactly the tail this is here to keep.
+        self.drain_until = time.time() + RELEASE_GRACE_S + 1.5
         self.stop_flag.set()
         proc = self.proc
-        if proc:
+        if proc is not None:
+            # A beat of grace first, then a polite end. SIGINT, not SIGTERM:
+            # pw-record finalises on it (dictate.sh's own recorder does the
+            # same) and exits through its normal path, so what it has already
+            # written reaches the pipe instead of being thrown away with the
+            # process. run() then drains that pipe to EOF -- see the note
+            # there -- so the tail includes the word the release landed on.
+            time.sleep(RELEASE_GRACE_S)
             try:
-                proc.terminate()
-                proc.wait(timeout=1.5)
+                proc.send_signal(signal.SIGINT)
             except Exception:
+                pass
+            self.join(timeout=2.0)
+            if self.is_alive():
                 try:
-                    proc.kill()
+                    proc.terminate()
+                    proc.wait(timeout=1.0)
                 except Exception:
-                    pass
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                self.join(timeout=1.0)
         # Everything below the last cut is the tail, whether or not it was
         # worth a chunk of its own.
         # Anything still queued is dropped and folded back into the tail.

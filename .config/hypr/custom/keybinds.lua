@@ -164,16 +164,26 @@ hl.bind("SUPER + mouse:273", hl.dsp.window.resize(), { mouse = true, description
 -- windows stay fixed here (the unbind above, and the note in custom/general.lua
 -- about the three-finger move gesture), but once a window is floating
 -- there is nothing to be fixed TO -- and a floating window that cannot be put
--- where you want it is the one thing that makes floating useless. So SUPER +
--- left-drag moves a window, and only a floating one: the guard reads the
--- window's own state at press time, not a remembered mode.
+-- where you want it is the one thing that makes floating useless. So
+-- SUPER + ALT + left-drag moves a window, and only a floating one: the guard
+-- reads the window's own state at press time, not a remembered mode.
+--
+-- WHY NOT PLAIN SUPER + LEFT, as it was for one day: the dictation gesture IS
+-- "hold SUPER alone", so a bind on SUPER + left swallows every click made with
+-- the dictation key held -- the compositor answers the bind instead of handing
+-- the button to the window, and the guard's `floating` test cannot give it back
+-- (a matched bind has already consumed the event). That read as "I cannot left
+-- click while I am dictating any more", and it is why this chord carries ALT.
+-- Nothing else in this config uses SUPER + ALT + left, so no click is lost to
+-- it either.
 --
 -- The bind is UNCONDITIONAL and the guard is what keeps the old rule intact --
 -- measured with a synthetic relative mouse (ydotool's own device advertises
 -- absolute axes and warps the pointer to a corner, so that one cannot test
 -- this): SUPER + left-drag moved a floating kitty 804px -> 909px, and the same
 -- drag over a TILED window left it exactly where it was.
-hl.bind("SUPER + mouse:272", function()
+hl.unbind("SUPER + ALT + mouse:272")
+hl.bind("SUPER + ALT + mouse:272", function()
     local w = hl.get_active_window()
     if w and w.floating then
         hl.dispatch(hl.dsp.window.drag())

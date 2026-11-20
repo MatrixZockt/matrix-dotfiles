@@ -1694,8 +1694,8 @@ finish_raw() {
     local landed=0
     if [ -s "$SHOT_BEFORE" ] && [ -s "$SHOT_PAIR" ]; then
         local attempt=1 verdict=""
-        while [ "$attempt" -le 3 ]; do
-            sleep 0.2
+        while [ "$attempt" -le 2 ]; do
+            sleep 0.15
             grab_window "$SHOT_AFTER" "$WINDOW_GEO" || break
             verdict="$(python3 "$(dirname "$0")/paste-landed.py" \
                 "$SHOT_BEFORE" "$SHOT_PAIR" "$SHOT_AFTER" \
@@ -1704,10 +1704,11 @@ finish_raw() {
             case "$verdict" in landed*) landed=1 ; break ;; esac
             # A grab can outrun the app's own paint, especially with a big
             # Electron window: the sentence is in the box but not on screen yet,
-            # so a single early look reads as a miss and raises a card over a
-            # sentence that is right there. Look again, up to three tries (~0.6s
-            # of extra waiting in the case where it really did not land, which is
-            # the cheap side of this trade).
+            # so a single early look reads as a miss. Look again -- TWO looks,
+            # not three: each one is a full-window grim read (~0.4s) plus the
+            # comparison, and a third bought a verdict nobody was waiting for
+            # any more while it held the clipboard and the transcript card
+            # back. Measured on the desktop app: three tries took 4.0s.
             attempt=$(( attempt + 1 ))
         done
     fi
@@ -1757,11 +1758,22 @@ finish_raw() {
     if [ "$landed" = "1" ]; then
         say "delivery landed in the focused window"
     else
-        say "delivery did not land -- showing the transcript card"
-        # The only copy of this sentence that exists: hand it to the card, which
-        # keeps it reachable (and copyable) for a few seconds.
-        show_transcript "$out"
+        say "delivery did not land -- the transcript card is the way to copy it"
     fi
+    # ── THE CARD GOES UP NOW, whatever the verdict was ────────────────────
+    #
+    # The words are in front of the user and the borrowed clipboard has just
+    # been handed back (above), so Copy on the card cannot race the borrow.
+    #
+    # It used to be shown only on a MISS, and only after the landed check had
+    # finished -- up to four seconds of screen grabs after the sentence had
+    # already landed. That is the "the copy button appears way too late"
+    # report: the card is a copy affordance, and an affordance that shows up
+    # after the moment has passed is not one. It appears as soon as the
+    # sentence exists and the clipboard is the user's again, which is under a
+    # second after the text -- sooner, and still not on top of the paste.
+
+    show_transcript "$out"
 
     # The sentence went through the clipboard in these two routes; cliphist is
     # asked to skip sensitive copies, but is not trusted to (forget_cliphist).

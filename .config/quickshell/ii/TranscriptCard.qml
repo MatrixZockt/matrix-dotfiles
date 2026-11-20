@@ -90,8 +90,13 @@ Scope {
         onTextChanged: root.ingest(text())
     }
 
+    // Fast enough that the pill is on screen a beat after the sentence exists,
+    // slow enough that a closed card costs nothing. It used to be 250ms; the
+    // script also publishes the transcript as soon as the clipboard is the
+    // user's again (see finish_raw in dictate.sh), so this is the only delay
+    // left between the words and the Copy affordance.
     Timer {
-        interval: 250
+        interval: 150
         repeat: true
         running: true
         onTriggered: transcriptFile.reload()

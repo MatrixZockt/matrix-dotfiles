@@ -98,6 +98,17 @@ Item {
     readonly property bool progressShowing: PackageUpdate.showsInBar
         || GlobalStates.downloadProgress >= 0
     readonly property bool dictationShowing: Dictation.showing
+    // The local model owns a tab of the ring (modeAi), and while llama-server
+    // is up it takes the island's RESTING view -- the place seven idle seconds
+    // put it, and the view it walks to the moment the server comes up. The
+    // System tab it replaces is the machine's gauges; a running model on this
+    // machine is the one reading there that changes sentence by sentence, so
+    // it is what an idle bar should be showing.
+    //
+    // `loading` counts as showing: llama.cpp binds its port only after the
+    // weights are in VRAM, so during a start `online` is false and the tab
+    // would arrive only at the end. Loading is the state worth watching.
+    readonly property bool llamaShowing: LlamaService.online || LlamaService.loading
 
     readonly property int modeCount: 6 + (root.progressShowing ? 1 : 0)
 
@@ -251,7 +262,8 @@ Item {
         ? root.modeProgress
         : (pomodoroRunning || stopwatchShowing)
             ? root.modePomodoro
-            : (audioPlaying ? root.modeMedia : root.modePerf)
+            : (audioPlaying ? root.modeMedia
+                : (root.llamaShowing ? root.modeAi : root.modePerf))
 
     // The activity tab comes and goes with the work itself. It is entered
     // automatically (nobody wants to hunt for the tab that is showing the
@@ -284,6 +296,26 @@ Item {
             if (!GlobalStates.nowBarPanelOpen)
                 root.setMode(root.modeDictation);
         } else if (root.mode === root.modeDictation) {
+            root.setMode((root.pomodoroRunning || root.stopwatchShowing)
+                ? root.modePomodoro
+                : (root.audioPlaying ? root.modeMedia : root.modePerf));
+        }
+    }
+
+    // The local model's tab, entered and left the same way dictation's is:
+    // nobody starts llama-server and then goes looking for the tab that shows
+    // it, and a tab left behind after the server stops is a dead end on a
+    // five-tab ring. Only the resting walk is automatic -- while the card is
+    // open the island follows it instead (see the nowBarMode connection).
+    //
+    // The step back spells the fallback out rather than reading `autoMode`:
+    // that property is derived from `llamaShowing`, so inside this
+    // notification it can still hold the answer from before the stop.
+    onLlamaShowingChanged: {
+        if (root.llamaShowing) {
+            if (root.mode !== root.modeAi && !GlobalStates.nowBarPanelOpen)
+                root.setMode(root.modeAi);
+        } else if (root.mode === root.modeAi) {
             root.setMode((root.pomodoroRunning || root.stopwatchShowing)
                 ? root.modePomodoro
                 : (root.audioPlaying ? root.modeMedia : root.modePerf));

@@ -62,21 +62,21 @@
 #   Real lag is not that clean: a GC pause, a browser hiccup, one sample
 #   reading 11% against a 12% line -- and the streak dies while the owner is
 #   still looking at a frozen window. So the last WINDOW (8) samples are kept
-#   and Performance is raised when at least HOT_MIN (5) of them were hot, at
-#   least RECENT_MIN (2) of the last 3 were, and the sample in hand is hot
+#   and Performance is raised when at least HOT_MIN (8) of them were hot, at
+#   least RECENT_MIN (3) of the last 3 were, and the sample in hand is hot
 #   still -- a window that filled during a stall and ended one sample later
-#   must not raise anything. That fires roughly 10-16 s into a
-#   sustained stall, tolerates the odd cold sample, and still cannot fire on a
-#   single spike, because a burst never fills the window.
+#   must not raise anything. At 3 s a sample that is ~27 s of sustained
+#   stalling, tolerates the odd cold sample, and still cannot fire on a
+#   single spike, because a burst never fills the window. The 5-of-8 at 2 s it
+#   replaced fired ~10-16 s in, which is shorter than one page compile.
 #
-# ── WHEN IT BACKS OUT (owner's rule, 2026-11-12) ───────────────────────────
+# ── WHEN IT BACKS OUT (owner's rule, 2026-11-21) ───────────────────────────
 #
-#   An automatic raise is NOT undone automatically unless the owner's mode is
-#   ECO. Eco was picked to save power, so a boost made under it belongs to Eco
-#   and goes back after RESTORE_QUIET of calm. On Normal or Performance the
-#   raise STAYS: picking a mode by hand is the only thing that ends it --
-#   "don't have it auto-switch back" -- and `--release` ends one without
-#   picking a mode.
+#   NEVER by itself. A raise stays until the owner picks a mode by hand --
+#   Eco, Normal or Performance, whichever -- or runs `power-failsafe
+#   --release`. The Eco-only stand-down used to walk a boost back to
+#   power-saver 90 s after the machine went quiet, so a working session had
+#   the mode changing under the owner twice per stall; that is gone.
 #
 #   A manual switch also cancels the watchdog's claim outright. The moment the
 #   config's mode changes while we hold a boost, this backs off and leaves
@@ -164,11 +164,20 @@
 # enough that only genuine oversubscription trips it. 12 % is inside the 4x band
 # and three times clear of the 1x band; it is a little under the old 20 because
 # the old line also demanded a pegged CPU, and this one does not.
-CPU_STALL=${CPU_STALL:-12}      # PSI cpu "some avg10" that counts as a stall
-WORK_BUSY=${WORK_BUSY:-50}      # busy% the throttle branch needs before it speaks
+# 2026-11-21: the owner's rule is that this may fire only when the machine is
+# unusable -- "if I can almost do nothing" -- never because it is merely loaded.
+# These lines were 12% PSI and 20% busy, and they fired three times in one
+# morning (08:24, 08:29, 08:32) on 88-99% busy at 12-18% PSI: a machine doing
+# work, with a task queueing here and there, not one nobody could use. 25% PSI
+# at 50% busy is the four-threads-per-core band measured further down (14-31%
+# lag), i.e. real queueing that a person feels at the keyboard.
+CPU_STALL=${CPU_STALL:-25}      # PSI cpu "some avg10" that counts as a stall
+WORK_BUSY=${WORK_BUSY:-85}      # busy% the throttle branch needs before it speaks
 # The throttle branch's own floor, so a slow clock alone cannot escalate:
 # see the 2026-11-04 note in the header.
-CPU_STALL_FLOOR=${CPU_STALL_FLOOR:-6}  # PSI cpu the throttle branch also needs
+# 15, not 6: at 6 the 08:24 raise ("cores throttled, 8% PSI, 99% busy") went
+# through, and 8% PSI on this chip is work being done, not a frozen desktop.
+CPU_STALL_FLOOR=${CPU_STALL_FLOOR:-15}  # PSI cpu the throttle branch also needs
 # Memory and io, on their `full` lines and as FLOORS over the idle baseline
 # (measured idle, 2026-11-12: memory full 0.2%, io full 2-4%). A desktop that is
 # merely loading a page never reaches these; a machine swapping or waiting on a
@@ -176,7 +185,7 @@ CPU_STALL_FLOOR=${CPU_STALL_FLOOR:-6}  # PSI cpu the throttle branch also needs
 # PSI's avg10 lags the load by ~10 s, so a stall line on its own kept firing
 # in that tail with the machine idle (measured 2026-11-12). The stall branch
 # therefore needs this much work to be happening as well.
-ACTIVE_BUSY=${ACTIVE_BUSY:-20}  # busy% required for the PSI-cpu stall branch
+ACTIVE_BUSY=${ACTIVE_BUSY:-50}  # busy% required for the PSI-cpu stall branch
 MEM_FULL=${MEM_FULL:-8}         # PSI memory "full avg10" that counts as thrash
 IO_FULL=${IO_FULL:-25}          # PSI io "full avg10" that counts as a disk stall
 # THE THROTTLE LINE IS DERIVED FROM THE CHIP, NOT HARD-CODED (2026-10-26).
@@ -192,7 +201,11 @@ IO_FULL=${IO_FULL:-25}          # PSI io "full avg10" that counts as a disk stal
 # fastest core cannot even reach CLOCK_PCT of its base clock" is throttling
 # on any profile, and it re-calibrates itself when the cap changes. 80% of
 # 2200 = 1760 MHz here. An explicit CLOCK_LINE in the environment still wins.
-CLOCK_PCT=${CLOCK_PCT:-80}      # fastest core below this % of base clock = throttled
+# 65%, not 80: 80% of 2200 is 1760 MHz, and this machine idles at 900-1400 on
+# the eco cap while it is perfectly usable -- the old line was reading normal
+# behaviour as throttling. 65% (1430 MHz here) held down under a heavy load is
+# the "nothing answers" state this exists to rescue.
+CLOCK_PCT=${CLOCK_PCT:-65}      # fastest core below this % of base clock = throttled
 CLOCK_LINE=${CLOCK_LINE:-}
 if [ -z "$CLOCK_LINE" ]; then
     _base=$(cat /sys/devices/system/cpu/cpufreq/policy0/base_frequency 2>/dev/null)
@@ -205,14 +218,19 @@ fi
 # 2026-10-26 17:20:41, the incident all of this comes from: 94.4% busy, PSI
 # 10.3%, 727-900 MHz, profile power-saver (20 W PL1, turbo off) while the AC
 # was plugged in. Nothing queued -- everything just ran at ~800 MHz.
-INTERVAL=${INTERVAL:-2}         # seconds between samples
-WINDOW=${WINDOW:-8}             # samples in the vote (x INTERVAL = 16 s)
-HOT_MIN=${HOT_MIN:-5}           # hot samples in that window needed to fire
-RECENT_MIN=${RECENT_MIN:-2}     # of the last 3 samples, needed to fire
-COOLDOWN=${COOLDOWN:-300}       # min seconds between raises
-# The Eco stand-down: this many seconds of calm, and only when the owner's mode
-# is eco (see the header -- on normal/performance the boost stays).
-RESTORE_QUIET=${RESTORE_QUIET:-90}
+# A longer, stricter ladder (2026-11-21): 8 of 12 samples at 3 s is ~27 s of
+# near-continuous hard stall before anything moves, and all of the last three
+# samples must be hot when it fires, so a machine that has just recovered never
+# trips it. 15 minutes between raises, because a mode change costs the owner a
+# screen modeset (see the memory/disk lane note in the loop).
+INTERVAL=${INTERVAL:-3}         # seconds between samples
+WINDOW=${WINDOW:-12}            # samples in the vote (x INTERVAL = 36 s)
+HOT_MIN=${HOT_MIN:-8}           # hot samples in that window needed to fire
+RECENT_MIN=${RECENT_MIN:-3}     # of the last 3 samples, needed to fire
+COOLDOWN=${COOLDOWN:-900}       # min seconds between raises
+# There is no automatic stand-down any more: a raise is released by picking a
+# mode by hand, or with `--release`. It never walks itself back to Eco while
+# the owner is working.
 
 # Set the moment WE raise performance; cleared when we hand it back (Eco only)
 # or when the owner picks a mode while we hold it. Only our own engagement is
@@ -220,7 +238,7 @@ RESTORE_QUIET=${RESTORE_QUIET:-90}
 engaged=0
 engaged_at=0
 engaged_mode=""     # the owner's mode at the instant we engaged
-calm_run=0          # consecutive cold samples (the Eco stand-down's clock)
+calm_run=0          # consecutive cold samples (logged only; no stand-down on calm)
 quiet_since=0
 
 hist=""             # the vote: one "0"/"1" per sample, newest last
@@ -558,21 +576,20 @@ apply_performance() {
 }
 
 stand_down() {
-    # Back out of OUR OWN performance engagement: sustained calm (every one of
-    # the last RESTORE_QUIET sampling seconds below all the lines), profile
-    # still on performance (never fight a user who has already moved it).
+    # Back out of OUR OWN performance engagement, ON REQUEST: this is
+    # `power-failsafe --release` and nothing else (2026-11-21). The daemon no
+    # longer calls it -- a boost raised by the ladder stays until the owner
+    # picks a mode by hand (the loop notices that and honours it) or releases
+    # the boost with --release.
     #
-    # $1 = "forced" is `power-failsafe --release`: hand the boost back now
-    # whatever the owner's mode is. Every other caller is the Eco rule: on
-    # normal/performance an automatic raise is left in place, because the owner
-    # asked for it not to be taken away behind their back.
-    local forced="${1:-}" mode target
+    # The profile is only ever moved back to the OWNER'S OWN mode, never to a
+    # hardcoded power-saver: the shell re-asserts battery.powerMode, so writing
+    # something else here is undone a minute later anyway -- and getting that
+    # wrong is the whole reason this daemon once looked like it was "jumping
+    # back". If the mode IS performance there is nothing of ours to undo.
+    local mode target
     mode=$(desired_mode)
-    if [ "$forced" != "forced" ] && [ "$mode" != "eco" ]; then
-        log "calm, but the owner's mode is '${mode}' (not eco) — leaving the boost in place"
-        return 0
-    fi
-    log "calm for ${RESTORE_QUIET}s: standing down (owner's mode: ${mode}$([ "$forced" = "forced" ] && echo ', released by hand'))"
+    log "releasing the boost by hand (owner's mode: ${mode})"
     # What it returns to is the USER'S MODE, not a hardcoded power-saver. The
     # shell re-asserts battery.powerMode, so writing power-saver here over a
     # user who picked balanced or performance is undone a minute later anyway --
@@ -597,8 +614,8 @@ stand_down() {
         quiet_since=0
         last_action=0
         notify -i "local_fire_department" "Performance mode is yours" \
-            "Machine has been quiet for ${RESTORE_QUIET}s. Leaving the CPU profile and the GPU boost exactly as your Performance mode set them."
-        blink green "Failsafe: CPU calm — Performance mode is yours"
+            "Boost released. Leaving the CPU profile and the GPU boost exactly as your Performance mode set them."
+        blink green "Failsafe: boost released — Performance mode is yours"
         return
     fi
     if [ "$(powerprofilesctl get 2>/dev/null)" != "$target" ]; then
@@ -615,16 +632,13 @@ stand_down() {
     fi
     engaged=0
     quiet_since=0
-    # The cooldown guards rapid fire-fire repeats, but a stand-down needed 90
-    # s of sustained calm to happen at all -- pressure coming back after that
-    # is genuinely new load, and the vote is the guard against blips.
-    # Leaving last_action set here would blind the re-raise
-    # for up to a full COOLDOWN after the restore (raise at t=0, calm, restore
-    # at t=95, pressure at t=100 -> 200 s of lag with no action). Reset it.
+    # A hand release is not a reason to blind the next raise: the ladder's own
+    # vote is what stops a blip from escalating, and keeping last_action here
+    # would leave a real stall unanswered for up to a full COOLDOWN.
     last_action=0
-    notify -i "check_circle" "Performance no longer needed" \
-        "CPU has been calm for ${RESTORE_QUIET}s. Back to ${mode}."
-    blink green "Failsafe: CPU calm — back to ${mode}"
+    notify -i "check_circle" "Boost released" \
+        "Back to ${mode}."
+    blink green "Failsafe: boost released — back to ${mode}"
 }
 
 # ── classifying one sample ─────────────────────────────────────────────────
@@ -696,7 +710,7 @@ report_sample() {
     echo "PPD profile      : $(powerprofilesctl get 2>/dev/null || echo '?')"
     echo "nvidia-powerd    : $(systemctl is-active nvidia-powerd.service 2>/dev/null || true)"
     echo "ladder           : ${HOT_MIN}/${WINDOW} hot, ${RECENT_MIN} of the last 3, ${INTERVAL}s apart, cooldown ${COOLDOWN}s"
-    echo "auto-restore     : only when the owner's mode is eco (after ${RESTORE_QUIET}s calm)"
+    echo "auto-restore     : never — the boost stays until you pick a mode or run --release"
 }
 
 if [ "$STATUS_ONLY" = 1 ]; then
@@ -746,17 +760,23 @@ if [ "$SELFTEST" = 1 ]; then
     check "idle"                              0   2   0  0  4 3000
     check "busy at full clock, no stall"      0  99   3  0  4 3000
     check "busy but capped, PSI under floor"  0  96   5  0  4  900
-    check "throttled work with a stall"       1  96  10  0  4  800
-    check "stalling at 55% busy (the old miss)" 1 55 15  0  4 2400
+    check "throttled hard with a hard stall"  1  96  20  0  4  800
+    # The 08:24 raise this tuning exists for: throttled, but PSI only 8%.
+    check "throttled, small stall (was a raise)" 0 99  8  0  4  800
+    check "stalling hard at 60% busy"          1  60  30  0  4 2400
+    # Used to be hot at 55% busy / 15% PSI; that is a loaded machine, not a
+    # frozen one, and the owner felt every one of these as a mode change.
+    check "mild stall at 55% busy"             0  55  15  0  4 2400
     check "PSI still decaying, machine idle"   0   4 40  0  4 2400
     check "memory thrash"                     1  20   2 12  4 3000
     check "disk stall"                        1  10   1  0 30 3000
     echo "vote:"
-    vcase "one spike, rest cold"              0 "10000000"
-    vcase "window not full yet"               0 "111"
-    vcase "5 hot but the lag already stopped" 0 "11111000"
-    vcase "sustained with a hiccup"           1 "11110111"
-    vcase "jittery but sustained"             1 "10110110"
+    vcase "one spike, rest cold"                0 "100000000000"
+    vcase "window not full yet"                 0 "111"
+    vcase "8 hot but the lag already stopped"   0 "111111110000"
+    vcase "7 of 12 (the old 5-of-8 line)"       0 "110110101100"
+    vcase "sustained with a hiccup"             1 "111110111111"
+    vcase "jittery but sustained"               1 "101101110111"
     echo
     if [ "$fails" -eq 0 ]; then
         echo "selftest: all checks passed"
@@ -772,7 +792,7 @@ if [ "${FAILSAFE_ESCALATE:-0}" = "1" ]; then
     if [ "${FAILSAFE_DRY_RUN:-0}" = "1" ]; then
         log "action: ESCALATE, DRY-RUN — decisions are logged, nothing is written"
     else
-        log "action: ESCALATE — performance profile + GPU Dynamic Boost; backs out by itself ONLY on eco (after ${RESTORE_QUIET}s calm), stays put on normal/performance until the mode changes or --release"
+        log "action: ESCALATE — performance profile + GPU Dynamic Boost; NEVER backs out by itself: it stays until the mode is changed by hand or --release"
     fi
 else
     log "action: ALARM ONLY — log, notify and blink; no profile, cap, turbo or GPU change (FAILSAFE_ESCALATE=1 opts in)"
@@ -871,9 +891,11 @@ while true; do
         elif [ "$profile" != "performance" ]; then
             log "cpu profile is '${profile}', not the performance this raised — nothing of ours left to undo"
             engaged=0; engaged_mode=""; hist=""
-        elif [ "$owner_mode" = "eco" ] && [ "$calm_run" -ge "$((RESTORE_QUIET / INTERVAL))" ]; then
-            stand_down
-            hist=""
+        # NO stand-down on calm (2026-11-21). The boost stays until the owner
+        # picks a mode or runs --release; backing out to Eco by itself was the
+        # "it keeps switching itself back" the owner asked to stop. A manual
+        # Eco still ends it through the profile branch above, which sees the
+        # profile leave performance and drops our claim without a fight.
         fi
     fi
     sleep "$INTERVAL"

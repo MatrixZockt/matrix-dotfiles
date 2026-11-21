@@ -131,7 +131,21 @@ if xdisp=$(find_x_display); then
     # 2026-11-05 hit-test fix): with no zero-copy there is a real copy from
     # the GPU raster target to the CPU compositor, which is what makes the
     # window paint at all.
+    # ── Responsive layout patch (2026-11-21) ─────────────────────────────
+    # WhatsApp Web hard-codes min-width:748px on its layout root, so a narrow
+    # window keeps the contact list and pushes the conversation -- message box
+    # included -- off the right edge. No window-manager rule can fix that: the
+    # page decides. So the wrapper exposes Chromium's DevTools port on loopback
+    # and starts extras/bin/whatsapp-responsive.mjs, which rewrites the layout
+    # CSS inside the page (nothing else is injected, and the port is 127.0.0.1
+    # only). It retries until the port answers, so starting it here is safe.
+    # Started unconditionally: the helper takes a lock file and exits at once if
+    # another instance already holds it, so a stale "is it running?" check can
+    # never leave the app without a patch.
+    setsid -f node "$HOME/.local/bin/whatsapp-responsive.mjs" \
+        </dev/null >>"${XDG_STATE_HOME:-$HOME/.local/state}/whatsapp-responsive.log" 2>&1
     exec "$APP" --ozone-platform=x11 \
+        --remote-debugging-port=0 \
         --force-device-scale-factor="$(panel_scale)" \
         --enable-gpu-rasterization \
         --disable-gpu-compositing \

@@ -456,3 +456,15 @@ hl.window_rule({
     float = true,
     center = true,
 })
+
+-- Thunderbird squeezes its folder pane and thread list into unreadable strips
+-- when the window is dragged narrow -- it sets no minimum of its own, so the
+-- message pane and its header end up clipped instead of the panes collapsing.
+-- The compositor holds a floor: the window stops shrinking rather than turning
+-- into three slivers. 760x480 is where the thread list and the reading pane
+-- still fit side by side on this panel's 1.5 scale.
+hl.window_rule({
+    name     = "thunderbird-readable-minimum",
+    match    = { class = "^(org%.mozilla%.Thunderbird)$" },
+    min_size = { 760, 480 },
+})

@@ -1813,34 +1813,15 @@ Scope {
                         maximumLineCount: entryRoot.expanded ? 4 : 1
                         linkColor: Appearance.colors.colPrimary
 
-                        // The full content as a tooltip -- but only once the
-                        // row is CLICKED open. On hover it used to pop the
-                        // whole paste up over the list while the pointer was
-                        // merely crossing it, which was noise; now the full
-                        // value appears exactly when you ask for the row.
-                        // (The expanded row itself shows at most four wrapped
-                        // lines, so this is still what reveals the rest.)
-                        // `alternativeVisibleCondition` is the documented way
-                        // to drive a StyledToolTip from a parent that has no
-                        // `hovered` property -- relying on the internal
-                        // condition silently renders nothing.
-                        StyledToolTip {
-                            alternativeVisibleCondition: entryRoot.expanded
-                                && entryRoot.flatText.length > 0
-                            // Wider than the card: clipboard entries are
-                            // arbitrary pasted text, and this is the one place
-                            // that shows one in full. It WRAPS at this width
-                            // rather than running off the screen.
-                            //
-                            // entryRoot.width, not the card's width property:
-                            // this is an inline `component`, which is its own
-                            // scope -- `clipboardWindow` is not visible in here
-                            // and naming it is a ReferenceError. The row is
-                            // exactly as wide as the card's list, so this is
-                            // the same number by a shorter path.
-                            maximumTextWidth: entryRoot.width + 120
-                            text: Cliphist.entryContent(entryRoot.entry)
-                        }
+                        // NO tooltip on the entry text. It used to pop the
+                        // whole paste up in a bubble above the row (on hover,
+                        // and always while the row was expanded), and that
+                        // bubble floated over the row ABOVE -- which is where
+                        // the pointer had to go to pick a different copy, so
+                        // it swallowed the click. Nothing is lost by removing
+                        // it: the preview pane on the right already shows the
+                        // selected entry in full, and the screenshot/mockup
+                        // reports confirm the row text itself stays readable.
                     }
 
                     // The hint line -- type of entry, or the host of a link.

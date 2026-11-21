@@ -741,7 +741,10 @@ def finish(raw_bytes, parts=None, full_bytes=None):
     try:
         say("release: %.2fs of tail left, %d part(s) already transcribed" % (
             len(raw_bytes) / 32000.0, len(parts)))
-        if len(raw_bytes) < 1600 * MIN_RECORD_S and not parts:
+        # 32000 bytes a second (16 kHz mono s16), not 1600: the 1600 made the
+        # documented 0.35s floor a 17ms one, so a 50ms crumb of tail counted as
+        # a dictation and was sent to whisper.
+        if len(raw_bytes) < 32000 * MIN_RECORD_S and not parts:
             say("too short (%.2fs), dropped" % (len(raw_bytes) / 32000.0))
             return
         with open(raw_path, "wb") as f:

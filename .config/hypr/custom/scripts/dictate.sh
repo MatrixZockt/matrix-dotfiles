@@ -1162,21 +1162,26 @@ def rms_frames(path):
     return frames
 
 
-def heard_anything(frames, start, end, reference):
+def heard_anything(frames, start, end, reference, margin=14.0):
     """Was there a voice in this segment's window, or only room tone?
 
     Two lines, and both are needed. -50 dB is the same silence line the level
     gate draws: under it this is not a recording of anything. The relative one
-    is what makes a noisy room work -- 14 dB under the loudness of the rest of
-    the take is room tone, not somebody talking (speech stays within a few dB
-    of itself, a fan or a breath does not). No measurement means no opinion.
+    is what makes a noisy room work -- `margin` dB under the loudness of the
+    rest of the take is room tone, not somebody talking (speech stays within a
+    few dB of itself, a fan or a breath does not). No measurement means no
+    opinion.
+
+    `margin` is a parameter because a whole invented SENTENCE and a single WORD
+    are not the same measurement; see the word-level caller for why the second
+    one needs a wider margin.
     """
     if not frames:
         return True
     window = [level for at, level in frames if start - 0.06 <= at < end + 0.06]
     if not window:
         return True
-    floor = max(-50.0, reference - 14.0)
+    floor = max(-50.0, reference - margin)
     return (sum(window) / len(window)) >= floor
 
 
@@ -1218,6 +1223,17 @@ def trim_silent_words(kept, frames):
     if not isinstance(words, list) or len(words) < 2:
         return kept
     reference = speech_level(frames, before=float(last.get("start") or 0.0))
+    # A WORD is allowed to be much quieter than the take before it counts as
+    # room tone. The 14 dB margin above is right for a whole invented sentence
+    # and wrong for the last word of a real one: a sentence trails off, a
+    # microphone's gain rides down with it, and this cut deletes everything
+    # from the first word it disbelieves to the end of the segment -- the
+    # report "my last words are cut off". Measured on this machine (the last
+    # two words of a take attenuated by a fixed amount): at 18 dB under the
+    # rest of the take they survived, at 22 dB they were deleted, so 14 dB was
+    # eating ordinary speech. 24 dB still takes room tone, which sits 30-50 dB
+    # down, and the model's own confidence is the second gate below.
+    word_margin = 24.0
     spoken = 0
     for index, word in enumerate(words):
         if not isinstance(word, dict):
@@ -1225,7 +1241,17 @@ def trim_silent_words(kept, frames):
         start, end = word.get("start"), word.get("end")
         if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
             return kept
-        if heard_anything(frames, float(start), float(end), reference):
+        heard = heard_anything(frames, float(start), float(end), reference, word_margin)
+        if not heard:
+            # Level alone must not overrule the model. whisper puts a
+            # probability on every word, and an invention is what a low one
+            # looks like (the "Wow!" it appends to a clip ends on 0.5-0.7);
+            # a word it decoded at 0.99 is speech it heard, however softly it
+            # was spoken. Cutting on level alone is what took the last word.
+            probability = word.get("probability")
+            if isinstance(probability, (int, float)) and probability >= 0.6:
+                heard = True
+        if heard:
             spoken = index + 1
     if spoken == 0 or spoken == len(words):
         return kept

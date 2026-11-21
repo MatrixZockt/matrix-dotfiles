@@ -626,8 +626,18 @@ Scope {
             // Height is decided together with the position (see below) so the
             // two cannot chase each other: the card is never taller than the
             // room on whichever side of the pointer it opens towards.
+            // Diagnostics only now: the card no longer sizes itself to the
+            // selected entry. That height fed anchoredY and placeAbove, so
+            // every selection made the card jump to a new position and a long
+            // paste made it grow. It is one fixed box instead, and the preview
+            // scrolls inside it (2026-11-21).
             readonly property real naturalContentHeight: popupCard.naturalHeight
             readonly property real minPopupHeight: 180
+            // ONE size, whatever is selected: 560 tall (or the screen, on a
+            // short display). Nothing about the entry can change this number,
+            // so neither the position nor the size moves while clicking
+            // through the history.
+            readonly property real fixedCardHeight: 560
             // 400 (was 360): with 46px rows and the wider card the list was
             // showing barely six entries before scrolling. "slightly bigger"
             // (2026-10-28).
@@ -658,11 +668,11 @@ Scope {
             // never clipped by an edge, never under the bar.
             readonly property real roomBelow: Math.max(0, screenH - root.edgeMargin - (localY + root.gap))
             readonly property real roomAbove: Math.max(0, localY - root.gap - root.edgeMargin)
-            readonly property bool placeAbove: (naturalContentHeight > roomBelow) && (roomAbove > roomBelow)
-            readonly property real roomBeside: Math.max(minPopupHeight, placeAbove ? roomAbove : roomBelow)
+            // Decided from the FIXED height, so it is a property of where the
+            // pointer is on this screen, not of what is selected.
+            readonly property bool placeAbove: (fixedCardHeight > roomBelow) && (roomAbove > roomBelow)
             readonly property real cardH: Math.max(minPopupHeight,
-                Math.min(naturalContentHeight,
-                    Math.min(maxPopupHeight, Math.min(roomBeside, screenH - root.edgeMargin * 2))))
+                Math.min(fixedCardHeight, screenH - root.edgeMargin * 2))
 
             // Flip to the other side of the pointer when there is not enough
             // room on the preferred one, then clamp. The clamp is what
@@ -1152,22 +1162,21 @@ Scope {
                     }
 
                     // ── Empty states ─────────────────────────────────────
-                                          RowLayout {
-                          id: listRow
-                          Layout.fillWidth: true
-                          Layout.fillHeight: true
-                          // Same bound as the list below, and for the same
-                          // reason: a RowLayout's implicit height is the tallest
-                          // child, so without a maximum it asked for every row at
-                          // once and pushed the preview pane's actions out of the
-                          // card (measured: the card is 460 tall, the left
-                          // column asked for 1092).
-                          //
-                          // The maximum is the CARD's, not the list's: this row
-                          // also holds the preview pane, and the pane is what is
-                          // allowed to make the card tall (see maxListHeight).
-                          Layout.maximumHeight: clipboardWindow.maxPopupHeight
-                          spacing: 10
+                    RowLayout {
+                        id: listRow
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        // Same bound as the list below, and for the same
+                        // reason: a RowLayout's implicit height is the tallest
+                        // child, so without a maximum it asked for every row at
+                        // once and pushed the preview pane's actions out of the
+                        // card (measured: the left column asked for 1092).
+                        //
+                        // The card is one fixed height now, so this row just
+                        // fills it: the list takes what is left and the
+                        // preview scrolls inside its own half.
+                        Layout.maximumHeight: clipboardWindow.maxPopupHeight
+                        spacing: 10
 
                         ColumnLayout {
                             id: listColumn

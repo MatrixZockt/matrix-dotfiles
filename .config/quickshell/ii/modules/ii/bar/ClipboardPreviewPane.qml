@@ -379,8 +379,12 @@ Rectangle {
     // actually given. `cliphist list` cut it to ~100 characters, so this
     // number is also the check that the decode above happened.
     readonly property int bodyChars: pane.textBody.length
-    // Asked of the Layout the pane sits in: this is the whole mechanism.
-    Layout.preferredHeight: pane.desiredHeight
+    // The pane does NOT ask for its entry's height any more. It did, and the
+    // card grew and moved with every selection; now the pane fills the fixed
+    // card and a long value scrolls inside the body Flickable below
+    // (2026-11-21). `desiredHeight` stays for the geometry diagnostic.
+    Layout.fillHeight: true
+    Layout.preferredHeight: 0
 
     // Measured, never drawn (it is hidden), at the exact width and font of the
     // real body text.

@@ -73,6 +73,16 @@ Singleton {
     readonly property bool isPerformance: root.current === "performance"
     readonly property var currentMode: root.modes.find(mode => mode.value === root.current) ?? root.modes[0]
 
+    // What the MACHINE is on right now, as opposed to `current`, which is the
+    // SETTING. The two drift: power-failsafe raises Performance on a stall and
+    // backs out to the setting when it calms, the bar's circular button writes
+    // PPD directly, a hand-run `powerprofilesctl set` moves it, and PPD itself
+    // can decline a write. Anything that DRAWS the mode must read this one, or
+    // it says "Eco" while the processor is unlocked and the notice says
+    // Performance -- the report that started this. Anything that WRITES a mode
+    // still writes the setting, because that is what announces the switch.
+    readonly property string liveMode: root.modeFor(PowerProfiles.profile)
+
     // ── What the last switch changed ─────────────────────────────────────
     //
     // Switching mode used to be silent: the platform profile, the graphics cap

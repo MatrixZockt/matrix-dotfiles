@@ -66,8 +66,16 @@ BarAnchoredPanel {
         // Re-picking the mode the machine is already on is a no-op on purpose:
         // the config write is what announces a switch, and announcing a
         // non-switch would put the notice on screen for nothing.
+        //
+        // The one exception is drift: the setting already holds `value` while
+        // the machine is somewhere else (failsafe raised it, something wrote
+        // PPD). There the write is swallowed above, so re-apply instead --
+        // otherwise the row marked off and the row marked on are the same one
+        // and the pick reads as a dead row.
         if (Config.options?.battery && Config.options.battery.powerMode !== value)
             Config.options.battery.powerMode = value
+        else if (PowerMode.liveMode !== value)
+            PowerMode.apply(value)
         root.close()
     }
 
@@ -80,9 +88,11 @@ BarAnchoredPanel {
             spacing: 8
 
             MaterialSymbol {
-                text: root.glyphFor(PowerMode.current)
+                // The live mode, not the setting: this header must agree with
+                // the icon in the bar it was opened from (see liveMode).
+                text: root.glyphFor(PowerMode.liveMode)
                 iconSize: Appearance.font.pixelSize.larger
-                color: root.tintFor(PowerMode.current)
+                color: root.tintFor(PowerMode.liveMode)
             }
             StyledText {
                 Layout.fillWidth: true
@@ -112,7 +122,10 @@ BarAnchoredPanel {
             delegate: Rectangle {
                 id: modeRow
                 required property var modelData
-                readonly property bool active: PowerMode.current === modeRow.modelData.value
+                // Marked by what the machine is ON, so a mode raised by
+                // power-failsafe shows its fire here instead of Eco being
+                // ticked while the processor runs unlocked.
+                readonly property bool active: PowerMode.liveMode === modeRow.modelData.value
                 property bool hovered: false
 
                 Layout.fillWidth: true

@@ -12,32 +12,25 @@ QuickToggleModel {
 
     name: Translation.tr("Power Profile")
 
-    // ── The MODE, read from the setting, not from the live profile ──────────
+    // ── The MODE, read from the LIVE profile ──────────────────────────────
     //
-    // This pin used to read `PowerProfiles.profile` for everything: the glyph,
-    // the colour, the label -- and, worst of all, the starting point of the
-    // cycle below. That is the machine's CURRENT PROFILE, which is a different
-    // fact from the shell's setting, and the two drift apart:
+    // This pin was moved to the setting (`PowerMode.current`) to fix a cycle
+    // that computed its next notch from the wrong place. That cured the dead
+    // tap and caused a worse bug: the setting is NOT what the machine is on.
+    // power-failsafe raises Performance on a stall and backs out to the setting
+    // when it calms, the bar's circular button writes PPD directly, and PPD can
+    // decline a write -- and in every one of those the pin kept drawing Eco
+    // while the notice said Performance and the processor ran unlocked. That is
+    // the "switched to performance and the bar did not change" report.
     //
-    //   * apply() skips the profile write while `hasPerformanceProfile` is
-    //     false, so for a beat after a shell start the setting can say
-    //     Performance while the profile is still balanced;
-    //   * anything else on the system may move the profile (a TLP hook, a
-    //     manual `powerprofilesctl set`, a resume);
-    //   * PPD can decline a write -- and then the setting and the profile say
-    //     different things with nothing to reconcile them.
-    //
-    // When they drift, the cycle below started from the wrong notch: a tap on a
-    // pin sitting on Performance computed "next = performance", wrote the value
-    // the setting already held, and NOTHING HAPPENED. Repeatedly, until
-    // something resynced them. That is the "changing the power mode sometimes
-    // does nothing" report, and it is why the mode comes from here now.
-    //
-    // `PowerMode.current` is the setting itself -- the same value the mode menu
-    // marks as active and the settings page shows -- so the bar, the menu and
-    // the page can no longer disagree about where the machine is, and the cycle
-    // has a starting point that moves the instant you tap.
-    readonly property string mode: PowerMode.current ?? "default"
+    // So the glyph, the colour, the label and the cycle's starting point all
+    // come from `PowerMode.liveMode` (the PPD profile, mapped to a mode key):
+    // the pin now always says what the machine is DOING. Taps still write the
+    // SETTING, because that is the value PowerMode watches and the write that
+    // announces the switch; the cycle's own guard below turns the old dead-tap
+    // case (setting already holds `next`) into a re-apply, so a tap can never
+    // be swallowed.
+    readonly property string mode: PowerMode.liveMode
 
     toggled: root.mode !== "default"
     // A leaf for eco, a flame for performance: the glyph names the mode, the
@@ -104,17 +97,21 @@ QuickToggleModel {
         // first notch, rather than jumping straight past two.
         const order = ["eco", "default", "performance"]
             .filter(value => value !== "performance" || PowerProfiles.hasPerformanceProfile)
+        // The ring is walked from the LIVE mode (root.mode), so the notch a tap
+        // lands on is always a real move from where the machine is standing --
+        // including out of a Performance that power-failsafe raised and the
+        // setting never held.
         const found = order.indexOf(root.mode)
         const at = found < 0 ? -1 : found
         const next = order[(at + 1) % order.length]
         if (Config.options?.battery && Config.options.battery.powerMode !== next)
             Config.options.battery.powerMode = next
         else
-            // Same-mode guard above, and the case it leaves open: the setting
-            // already holds `next` (a config that was reloaded from disk under
-            // us) while the hardware is elsewhere. apply() is idempotent, so
-            // re-applying is the way to make the tap mean something rather than
-            // doing nothing.
+            // The setting already holds `next` while the hardware is elsewhere
+            // (a failsafe raise, a direct PPD write, a config reloaded from
+            // disk under us). The write above would be swallowed by the
+            // same-mode guard in PowerMode, so re-apply is what makes the tap
+            // mean something; apply() is idempotent.
             PowerMode.apply(next)
     }
     tooltipText: Translation.tr("Click: Eco → Balanced → Performance → Eco")

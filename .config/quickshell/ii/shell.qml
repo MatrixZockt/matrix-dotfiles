@@ -71,6 +71,14 @@ ShellRoot {
         // Hyprland's animation keyword has to be pushed once at startup.
         PowerMode.load()
         Hyprsunset.load()
+        // The startup list, read from its store and run once per login. Reading
+        // the singleton CREATES it, which is the whole point: an autostart
+        // feature that only exists after the page that edits it has been opened
+        // starts nothing. `beginSession` is a no-op on every shell reload after
+        // the first (it checks a per-login marker), so a QML save does not
+        // launch a second copy of every app on the list.
+        Startup.load()
+        Startup.beginSession()
         FirstRunExperience.load()
         ConflictKiller.load()
         Cliphist.refresh()

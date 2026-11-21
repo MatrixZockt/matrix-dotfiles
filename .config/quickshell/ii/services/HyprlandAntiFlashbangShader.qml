@@ -97,20 +97,34 @@ Singleton {
     //
     // Which players count. MPRIS cannot tell a video from an audio stream: a
     // browser publishes the same one title for a YouTube video and for a web
-    // radio station. The list below is therefore by APP -- browsers and video
-    // players suspend, everything else (Spotify, the shell's own iiMusic, mpd,
-    // cmus) is left alone, because those never put white frames on screen. The
-    // cost of the heuristic is that music playing in a browser also suspends
-    // the shader; the cost of the opposite default is the effect glitching
-    // through every video, which is what was reported.
+    // radio station. So the list is by APP, in two tiers:
+    //
+    //   videoApps    dedicated players. Playing means video, so they suspend
+    //                the shader outright (Spotify, iiMusic, mpd and cmus are
+    //                absent on purpose: they never put white frames on screen).
+    //
+    //   browserApps  everything that can play both. A browser suspends the
+    //                shader ONLY while one of its windows is on screen in real
+    //                fullscreen -- the state a video is actually watched in.
+    //
+    // WHY BROWSERS NEED THAT SECOND TEST (2026-11-21). Keying a browser off the
+    // app name alone meant that music playing in a tab -- and every pause and
+    // play in it -- wrote the shader off and back on: the screen brightened on
+    // pause (no more white-patch dim) and dimmed on play, with the anti-flash
+    // switch flipping under it. Reported as "pausing or playing the music
+    // changes the screen brightness or removes the anti-flash". A background
+    // tab is not a video, and a fullscreen value below 2 is not fullscreen
+    // (1 is maximized, which a music tab can also be), so neither holds now.
     readonly property var videoApps: [
-        "brave", "chromium", "chrome", "vivaldi", "opera", "edge",
-        "firefox", "zen", "librewolf", "waterfox",
         "mpv", "vlc", "celluloid", "haruna", "totem", "smplayer",
         "kodi", "freetube", "qutebrowser", "epiphany"
     ]
+    readonly property var browserApps: [
+        "brave", "chromium", "chrome", "vivaldi", "opera", "edge",
+        "firefox", "zen", "librewolf", "waterfox"
+    ]
 
-    function isVideoPlayer(player) {
+    function matchesApp(player, names) {
         const identity = String(player?.identity ?? "").toLowerCase();
         // The bus name carries an instance suffix (…MediaPlayer2.brave.instance2189035),
         // so it is matched from the start rather than by containment.
@@ -119,7 +133,7 @@ Singleton {
         const tail = bus.indexOf(marker) >= 0
             ? bus.slice(bus.indexOf(marker) + marker.length).split(".")[0]
             : "";
-        for (const name of root.videoApps) {
+        for (const name of names) {
             if (identity.includes(name))
                 return true;
             if (tail !== "" && tail.startsWith(name))
@@ -138,16 +152,71 @@ Singleton {
     // BOTH ways -- event-driven when the controller's array changes (the common
     // case, immediate) and on a slow poll (the arrival, and any signal a given
     // Quickshell build does not emit).
-    property var videoPlayers: []
+    property bool dedicatedPlaying: false
+    property bool browserPlaying: false
+    property bool browserFullscreen: false
     property bool videoPlaying: false
+    property string videoName: ""
 
     function refreshVideoHold() {
-        const playing = (Mpris.players.values ?? [])
-            .filter(p => p?.isPlaying === true && root.isVideoPlayer(p));
-        root.videoPlayers = playing;
+        const playing = (Mpris.players.values ?? []).filter(p => p?.isPlaying === true);
+        const dedicated = playing.filter(p => root.matchesApp(p, root.videoApps));
+        const browsers = playing.filter(p => root.matchesApp(p, root.browserApps));
+        root.dedicatedPlaying = dedicated.length > 0;
+        root.browserPlaying = browsers.length > 0;
+        root.videoName = String((dedicated[0] ?? browsers[0])?.identity ?? "");
+        if (root.browserPlaying) {
+            root.refreshBrowserWindow();
+        } else {
+            root.browserFullscreen = false;
+            root.updateVideoPlaying();
+        }
+    }
+
+    function updateVideoPlaying() {
         // Assigning the same boolean does not emit, so a poll that changes
         // nothing costs nothing: no write, no re-apply.
-        root.videoPlaying = playing.length > 0;
+        root.videoPlaying = root.dedicatedPlaying
+            || (root.browserPlaying && root.browserFullscreen);
+    }
+
+    // Is a browser window in REAL fullscreen right now? Only asked while a
+    // browser is playing, and one readback is queued rather than stacked.
+    property bool pendingWindowRead: false
+
+    function refreshBrowserWindow() {
+        if (activeWindowProc.running) {
+            root.pendingWindowRead = true;
+            return;
+        }
+        activeWindowProc.running = true;
+    }
+
+    Process {
+        id: activeWindowProc
+        command: ["hyprctl", "-j", "activewindow"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                let full = false;
+                try {
+                    const win = JSON.parse(text);
+                    const cls = String(win?.class ?? "").toLowerCase();
+                    const fullscreen = Number(win?.fullscreen ?? 0);
+                    // 2 is fullscreen; 1 is only maximized.
+                    full = fullscreen >= 2 && root.browserApps.some(n => cls.includes(n));
+                } catch (e) {
+                    full = false;
+                }
+                root.browserFullscreen = full;
+            }
+        }
+        onExited: {
+            root.updateVideoPlaying();
+            if (root.pendingWindowRead) {
+                root.pendingWindowRead = false;
+                root.refreshBrowserWindow();
+            }
+        }
     }
 
     Timer {
@@ -162,8 +231,6 @@ Singleton {
         target: MprisController
         function onPlayingPlayersChanged() { root.refreshVideoHold(); }
     }
-    readonly property string videoName:
-        root.videoPlaying ? String(root.videoPlayers[0]?.identity ?? "") : ""
 
     // Cleared when the user sets a level BY HAND during playback -- a click that
     // visibly does nothing reads as a broken switch -- and re-armed when the

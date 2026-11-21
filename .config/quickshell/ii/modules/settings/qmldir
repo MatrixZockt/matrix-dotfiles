@@ -15,6 +15,7 @@ Overview 1.0 Overview.qml
 QuickConfig 1.0 QuickConfig.qml
 ServicesConfig 1.0 ServicesConfig.qml
 SidebarsConfig 1.0 SidebarsConfig.qml
+StartupConfig 1.0 StartupConfig.qml
 StatTile 1.0 StatTile.qml
 SettingsAppContent 1.0 SettingsAppContent.qml
 SettingsSearchBox 1.0 SettingsSearchBox.qml

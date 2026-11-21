@@ -5999,47 +5999,60 @@ local LAUNCH_REGISTRY = (os.getenv("XDG_RUNTIME_DIR") or "/tmp") .. "/ii-super-l
 -- enough that it cannot claim a window the user opened by hand much later.
 local LAUNCH_WINDOW = 45
 
+-- A line is "<pid> <unix-seconds> [<workspace-id>]". The third column was
+-- added 2026-11-21 and is OPTIONAL on purpose: an older line has to keep
+-- reading as "started from the launcher, desktop unknown" instead of being
+-- dropped, and a line with no desktop is still the answer to "was this window
+-- launched from the launcher" for the attach half of this sweep.
 local function recentLauncherPids()
     local now = os.time()
     local set = {}
     local fh = io.open(LAUNCH_REGISTRY, "r")
     if not fh then return set end
     for line in fh:lines() do
-        local pid, ts = string.match(line, "^(%d+)%s+(%d+)$")
+        local pid, ts, ws = string.match(line, "^(%d+)%s+(%d+)%s*(%-?%d*)$")
         if pid and ts and (now - tonumber(ts)) <= LAUNCH_WINDOW then
-            set[tonumber(pid)] = true
+            local id = tonumber(ws or "")
+            set[tonumber(pid)] = (id and id > 0) and id or true
         end
     end
     fh:close()
     return set
 end
 
-local function launchedByLauncher(win, pids)
-    if not pids or next(pids) == nil then return false end
+-- The registry VALUE for the window's process tree: the desktop it was
+-- launched from (a positive id), or `true` when the line predates the column.
+-- nil means the launcher did not start it.
+local function launcherPidFor(win, pids)
+    if not pids or next(pids) == nil then return nil end
     local pid = win and win.pid
-    if not pid or pid <= 0 then return false end
+    if not pid or pid <= 0 then return nil end
     -- Up the tree, not just the window's own pid: the launcher starts a
     -- wrapper which may fork the real binary, and it is the WRAPPER's pid
     -- that got recorded. Bounded, because ppid is not guaranteed to
     -- terminate and a cycle must not hang the sweep.
     local seen = {}
     for _ = 1, 12 do
-        if not pid or pid <= 1 or seen[pid] then return false end
+        if not pid or pid <= 1 or seen[pid] then return nil end
         seen[pid] = true
-        if pids[pid] then return true end
+        if pids[pid] then return pids[pid] end
         local fh = io.open("/proc/" .. tostring(pid) .. "/stat", "r")
-        if not fh then return false end
+        if not fh then return nil end
         local stat = fh:read("*a")
         fh:close()
         -- The ppid is field 4, and the comm field (2) is parenthesised and
         -- may itself contain spaces or parentheses, so the scan starts after
         -- the LAST ')' rather than splitting on whitespace.
         local close = stat and stat:find("%)[^%)]*$")
-        if not close then return false end
+        if not close then return nil end
         local rest = stat:match("^.*%)%s+(%d+)")
         pid = rest and tonumber(rest) or nil
     end
-    return false
+    return nil
+end
+
+local function launchedByLauncher(win, pids)
+    return launcherPidFor(win, pids) ~= nil
 end
 
 -- THE TRIGGER IS A SWEEP, NOT THE EVENT, and that is measured rather than
@@ -6056,6 +6069,12 @@ end
 -- of the busy case is one focus and one float dispatch, which is what
 -- attaching a window costs anyway.
 local clientFullscreen = {}
+
+-- Windows the launcher has already been given their desktop. One attempt per
+-- window, marked BEFORE the dispatch: a window the user then moves by hand
+-- must stay where they put it, and the registry's 45-second memory outlives
+-- the placement.
+local launchPlaced = {}
 
 -- Undo a COMPOSITOR fullscreen whose client has already withdrawn its own
 -- request: the window goes back into the layout as a tile, which is the
@@ -6137,6 +6156,40 @@ local function attachSweep()
                         clientFullscreen[addr] = nil
                     end
                 end
+                -- ── The desktop it was started FROM ─────────────────────
+                -- A window started from the launcher carries no
+                -- HL_INITIAL_WORKSPACE_TOKEN -- that token is only planted on
+                -- processes the COMPOSITOR spawns, and the launcher starts
+                -- apps itself so it can watch them -- so the window lands on
+                -- whatever desktop is focused when it finally maps. Launch on
+                -- desktop 1, flip to 2 while it starts, and it appeared on 2:
+                -- the report this answers.
+                --
+                -- open.sh records the desktop it was asked from in the same
+                -- registry this sweep already reads, and the window is put
+                -- there the first time the sweep sees it. `follow = false`,
+                -- so the desktop the user is actually on does not move; only
+                -- the new window does, and only if it landed somewhere else.
+                --
+                -- Special workspaces are excluded on both ends: open.sh
+                -- records "-" for a launch from one, and a window that landed
+                -- in one is left alone rather than dragged out.
+                local launchWs = launcherPidFor(win, pids)
+                if type(launchWs) == "number" and win.address
+                    and not launchPlaced[win.address] then
+                    launchPlaced[win.address] = true
+                    local ws = win.workspace
+                    if ws and (ws.id or 0) > 0 and ws.id ~= launchWs then
+                        hl.dispatch(hl.dsp.window.move({
+                            workspace = launchWs,
+                            follow = false,
+                            address = win.address,
+                        }))
+                        tracef("launch: %s started on desktop %s, landed on %s -> moved back",
+                            tostring(cls), tostring(launchWs), tostring(ws.id))
+                    end
+                end
+
                 -- Two states a window of ours must not arrive in: floating
                 -- with broken geometry (un-float it) or fullscreen (demote
                 -- it, ONCE). Everything else is left as it arrived -- a
@@ -6208,6 +6261,11 @@ local function attachSweep()
         end
         for addr in pairs(userFullscreen) do
             if not seen[addr] then userFullscreen[addr] = nil end
+        end
+        -- Placement markers ride the same prune: a closed window's address
+        -- must not stop a relaunched app from getting its desktop.
+        for addr in pairs(launchPlaced) do
+            if not seen[addr] then launchPlaced[addr] = nil end
         end
         -- Drop a cover memory that has stopped being true: a window PARKED in
         -- the tray vault (special:tray) is not covering anything, by
@@ -6428,3 +6486,30 @@ hl.on("window.fullscreen", function(win)
         settleStaleFullscreen(addr)
     end, { timeout = 32, type = "oneshot" })
 end)
+
+-- ═══ A window opens on the desktop it was started from ═══════════════════
+--
+-- The base config sets `misc:initial_workspace_tracking = false`, which means a
+-- window is placed on whatever desktop is focused at MAP time. Launch on
+-- desktop 1, flip to 2 while a cold Electron start is still loading its window,
+-- and it appears on 2. Turned on here, for every process the COMPOSITOR spawns
+-- (keybinds, exec-once lines, the shell's own dispatchers): Hyprland plants
+-- HL_INITIAL_WORKSPACE_TOKEN with the desktop that was active when the exec
+-- ran, and the window lands there instead.
+--
+-- 1, not 2: single-shot. A token per launch, good for
+-- `misc:initial_workspace_token_timeout` seconds (10 by default), so only the
+-- window that launch is starting is pinned -- NOT every child the app opens
+-- afterwards. Persistent (2) would keep a browser's windows on the desktop the
+-- browser was started from for the whole session, which is the opposite of what
+-- "keep it where I opened it" means.
+--
+-- Apps from the shell's launcher do not travel this path at all: open.sh starts
+-- them itself so it can watch them, so it has no token from the compositor.
+-- Those are handled by the launcher registry and the sweep in this file, which
+-- records the desktop at launch time and moves the window there.
+hl.config({
+    misc = {
+        initial_workspace_tracking = 1,
+    },
+})

@@ -131,6 +131,17 @@ Window {
             icon: "apps",
             component: "QuickConfig.qml"
         },
+        // Startup apps: the same list the Task Manager's Startup page shows
+        // (modules/common/widgets/StartupAppsPanel.qml), so it is one store and
+        // two doors rather than two places to disagree.
+        {
+            name: Translation.tr("Startup apps"),
+            slug: "startup",
+            section: "",
+            group: Translation.tr("Apps"),
+            icon: "rocket_launch",
+            component: "StartupConfig.qml"
+        },
         // The Accounts page, which is now about the account. It used to open
         // KeybindsConfig.qml -- the rail said "Accounts", the search index sent
         // the words account/user/login/password to the keybinds page, and the

@@ -93,6 +93,9 @@ Item {
         // "what is the hardware doing".
         out.push({ key: "apps", icon: "apps", label: Translation.tr("Apps"), accent: Appearance.colors.colPrimary, listPage: true });
         out.push({ key: "processes", icon: "list_alt", label: Translation.tr("Processes"), accent: Appearance.colors.colPrimary, listPage: true });
+        // Startup apps: what opens with the desktop, and whether it opens in
+        // the tray. The same panel Settings hosts (Settings > Startup apps).
+        out.push({ key: "startup", icon: "rocket_launch", label: Translation.tr("Startup"), accent: Appearance.colors.colPrimary });
         // "developer_board" (chip) for the CPU, "memory" (DIMM) for memory --
         // both verified ligatures in this font build; "memory_alt" and "ram"
         // are not, and an absent ligature draws its own text as the icon.
@@ -390,7 +393,7 @@ Item {
             }
 
             StyledText { // footer: the machine this page is describing
-                visible: !root.isListPage
+                visible: !root.isPanelPage
                 Layout.fillWidth: true
                 Layout.leftMargin: 12
                 Layout.bottomMargin: 4
@@ -423,6 +426,51 @@ Item {
             // The two pages share this one view; the grouped flag is the
             // difference between "Apps" and "Processes".
             groupedByApp: root.selectedKey === "apps"
+        }
+
+        // ── The Startup page ────────────────────────────────────────────────
+        // A scroller rather than a plain ColumnLayout: the list grows with
+        // every app added, and the panel is a layout with its own rows.
+        StyledFlickable {
+            id: startupFlick
+            visible: root.isStartupPage
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Layout.topMargin: 14
+            Layout.rightMargin: 14
+            Layout.bottomMargin: 10
+            contentWidth: width
+            contentHeight: startupColumn.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+
+            ColumnLayout {
+                id: startupColumn
+                width: startupFlick.width
+                spacing: 10
+
+                StyledText {
+                    Layout.fillWidth: true
+                    text: Translation.tr("Startup apps")
+                    font {
+                        family: Appearance.font.family.title
+                        pixelSize: Appearance.font.pixelSize.larger
+                        variableAxes: Appearance.font.variableAxes.title
+                    }
+                    color: Appearance.colors.colOnLayer0
+                }
+                StyledText {
+                    Layout.fillWidth: true
+                    text: Translation.tr("Programs that open with the desktop. “Start in tray” keeps the window out of sight: the app runs in the background and its icon appears in the bar.")
+                    font.pixelSize: Appearance.font.pixelSize.small
+                    color: Appearance.colors.colSubtext
+                    wrapMode: Text.WordWrap
+                }
+
+                StartupAppsPanel {
+                    Layout.fillWidth: true
+                }
+            }
         }
 
         // ── The device page ────────────────────────────────────────────────
@@ -649,6 +697,15 @@ Item {
     // must stop when the app closes -- a task manager that keeps sampling
     // after it is gone is exactly the background cost this shell avoids.
     readonly property bool isListPage: selectedKey === "apps" || selectedKey === "processes"
+
+    // The Startup page: not a "list page" (that word means the process
+    // tables, which own the live total) but not a device page either -- it
+    // hosts modules/common/widgets/StartupAppsPanel.qml, the same panel the
+    // Settings page renders, so the two can never disagree about what starts
+    // with the desktop. `isPanelPage` is what the device-page furniture (the
+    // divider, the hostname footer, the whole hardware column) hides for.
+    readonly property bool isStartupPage: selectedKey === "startup"
+    readonly property bool isPanelPage: isListPage || isStartupPage
 
     // The one-line total under the rail on the list pages: "214 processes ·
     // CPU 12% · Memory 5.2 GB". Reads ProcessList directly (revision keeps it

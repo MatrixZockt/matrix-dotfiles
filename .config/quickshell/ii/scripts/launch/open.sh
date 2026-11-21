@@ -39,6 +39,34 @@ fi
 
 shell="${II_SHELL_NAME:-ii}"
 
+# ── The desktop this launch was ASKED FOR ──────────────────────────────────
+#
+# Captured here, once, before anything is spawned, and handed to the
+# compositor through the registry at the bottom of this file. The window is
+# placed at MAP time, which can be seconds later and on whatever desktop is
+# focused by then -- that is the "I opened it here and it appeared over there"
+# report.
+#
+# `misc:initial_workspace_tracking` cannot do this job for us: Hyprland only
+# plants the token for processes IT spawns (a registered
+# HL_INITIAL_WORKSPACE_TOKEN uuid), and this script starts the app itself so it
+# can watch it and report a launch that never arrives. So the answer is taken
+# here and re-asserted by custom/general.lua, which moves the window to the
+# recorded desktop the moment it exists.
+#
+# `awk` over the plain output rather than a JSON parse: this sits on the launch
+# path, and hyprctl's first line is enough --
+#
+#     workspace ID 3 (3) on monitor eDP-1: ...
+#
+# A special workspace answers a NEGATIVE id, and those are deliberately not
+# recorded ("-"): an app started from the vault or a scratchpad belongs where
+# it is opened, not back in the vault.
+launch_ws="$(hyprctl activeworkspace 2>/dev/null | awk 'NR == 1 { print $3 }')"
+case "$launch_ws" in
+    ''|*[!0-9]*) launch_ws="-" ;;
+esac
+
 # Close-to-tray apps (TrayApps.enforceTray) read a window appearing where
 # there was none as the app dragging itself out of the tray, and put it
 # straight back. A launch from THIS launcher is the user letting it out, so
@@ -208,14 +236,17 @@ announce_child() {
         local tmp="${registry}.$$"
         : >"$tmp"
         if [ -f "$registry" ]; then
-            while read -r _pid _ts; do
+            while read -r _pid _ts _ws; do
                 [ -n "${_pid:-}" ] || continue
                 if [ "$((now - ${_ts:-0}))" -le 300 ]; then
-                    printf '%s %s\n' "$_pid" "$_ts" >>"$tmp"
+                    # Keep an older line's (missing) workspace column missing
+                    # rather than inventing one: the reader treats a two-column
+                    # line as "launched from the launcher, desktop unknown".
+                    printf '%s %s %s\n' "$_pid" "$_ts" "${_ws:-}" >>"$tmp"
                 fi
             done <"$registry"
         fi
-        printf '%s %s\n' "$child" "$now" >>"$tmp"
+        printf '%s %s %s\n' "$child" "$now" "${launch_ws:--}" >>"$tmp"
         mv -f "$tmp" "$registry" 2>/dev/null || rm -f "$tmp" 2>/dev/null
     } 2>/dev/null || true
 }

@@ -75,6 +75,20 @@ if [ "${FREEBUFF_0188_SESSION_UI:-1}" != "0" ]; then
         run="$tree/freebuff"
         [ -x "$run" ] || run="$patched"
         export APPDIR="$tree"
+        # The page can only read same-origin files, and the app's own account
+        # proxy drops the header the server needs to list the running hours, so
+        # a companion writes the answered session state next to the interface.
+        # It stops by itself once this process (the app, after the exec below)
+        # is gone, and it is only started for a patched tree.
+        refresher="$(dirname "$(readlink -f "$0")")/freebuff-0188-session-time-refresh"
+        if [ -x "$refresher" ]; then
+            setsid "$refresher" \
+                --state "$PROFILE/state.json" \
+                --out "$tree/resources/orchestrator/ui/session-time.json" \
+                --parent $$ >>"$log" 2>&1 &
+        else
+            echo "[launcher] session state refresher missing; the badge will show unavailable" >>"$log"
+        fi
     else
         echo "[launcher] session countdown unavailable; running the AppImage" >>"$log"
     fi

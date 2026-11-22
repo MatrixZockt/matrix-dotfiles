@@ -89,9 +89,9 @@ ui="$payload/resources/orchestrator/ui"
 cat >"$ui/session-time.js" <<'JS'
 // Session countdown for the Freebuff Desktop interface.
 //
-// Served same-origin with the app, and the preload exposes apiToken(), so the
-// session endpoint is read exactly the way the app's own settings screen reads
-// it. Everything here is presentation: no request mutates anything.
+// Reads /session-time.json, written next to this file by
+// freebuff-0188-session-time-refresh, and renders the nearest session expiry.
+// Everything here is presentation: no request mutates anything.
 (() => {
   const POLL_MS = 15000;
   const RETRY_MS = 8000;
@@ -121,14 +121,6 @@ cat >"$ui/session-time.js" <<'JS'
     const m = Math.floor((total % 3600) / 60);
     const s = total % 60;
     return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
-  }
-
-  function token() {
-    try {
-      return window.freebuffDesktop?.apiToken?.() ?? null;
-    } catch {
-      return null;
-    }
   }
 
   function badge() {
@@ -192,13 +184,13 @@ cat >"$ui/session-time.js" <<'JS'
     ].join("\n");
   }
 
-  function apply(status) {
-    const data = status && typeof status === "object" ? status : {};
+  function apply(payload) {
+    const data = payload && typeof payload === "object" ? payload : {};
     const now = Date.now();
-    live = (Array.isArray(data.desktopPurchases) ? data.desktopPurchases : [])
+    live = (Array.isArray(data.sessions) ? data.sessions : [])
       .filter((p) => p && Date.parse(p.expiresAt) > now)
       .sort((a, b) => Date.parse(a.expiresAt) - Date.parse(b.expiresAt));
-    const next = Date.parse(data.desktopSessionCounts?.nextExpiryAt || "");
+    const next = Date.parse(data.expiresAt || "");
     // The session that ends soonest is the one worth warning about.
     expiresAt = live.length
       ? Date.parse(live[0].expiresAt)
@@ -208,33 +200,27 @@ cat >"$ui/session-time.js" <<'JS'
     render();
   }
 
+  // The page cannot ask the account itself: the app's proxy drops the header
+  // that makes the server list the running hours. A small companion process
+  // makes that call and leaves the answer in /session-time.json, which is
+  // same-origin and therefore readable here.
   async function refresh() {
     clearTimeout(poll);
-    const t = token();
-    if (!t) {
-      poll = setTimeout(refresh, RETRY_MS);
-      return;
-    }
     try {
-      // 0.0.18x proxies the account's web endpoints through /api/account/web?
-      // path=…; older builds have no direct /api/web/* route (that answers 404).
-      const res = await fetch(
-        `/api/account/web?path=${encodeURIComponent("/api/web/freebuff-session")}`,
-        {
-          headers: { "x-freebuff-launch-id": t },
-          cache: "no-store",
-        },
-      );
+      const res = await fetch(`/session-time.json?t=${Date.now()}`, { cache: "no-store" });
       if (!res.ok) throw new Error(String(res.status));
+      const payload = await res.json();
+      if (payload && payload.ok === false) throw new Error(payload.error || "unavailable");
+      apply(payload);
       phase = "ok";
-      apply(await res.json());
+      lastError = "";
       poll = setTimeout(refresh, POLL_MS);
     } catch (error) {
       phase = "error";
       lastError = String(error?.message ?? error).slice(0, 44);
-      render();
       poll = setTimeout(refresh, RETRY_MS);
     }
+    render();
   }
 
   function start() {

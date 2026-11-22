@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""Write the live Freebuff session expiry where the interface can read it.
+
+The countdown badge runs inside the app's page, so it can only fetch same-origin
+files. The app's own account proxy strips the header that makes the server list
+the running hours (`x-freebuff-multi-session`), and without it the session
+endpoint answers with no purchases at all — which is why the badge kept saying
+"no session" while hours were running.
+
+So this sidecar does the one call the page cannot make, and writes the answer as
+a plain JSON file into the interface directory the app serves. It is read-only
+against the account, keeps the token in memory only, and stops as soon as the
+app it was started for is gone.
+
+    freebuff-0188-session-time-refresh --state <state.json> --out <file> --parent <pid>
+"""
+import argparse
+import datetime
+import json
+import os
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+
+API = "https://www.codebuff.com/api/v1/freebuff/session"
+HEADERS = {
+    "x-freebuff-client": "desktop",
+    # Without this the server reports only this instance's hours, which for a
+    # freshly started window is none.
+    "x-freebuff-multi-session": "1",
+    "x-freebuff-include-unused-rate-limits": "1",
+    "User-Agent": "freebuff-session-time",
+}
+
+
+def parent_alive(pid):
+    if pid <= 0:
+        return True
+    return os.path.exists(f"/proc/{pid}")
+
+
+def read_token(path):
+    with open(path, encoding="utf8") as handle:
+        state = json.load(handle)
+    sessions = state.get("authSessions") or {}
+    entry = sessions.get("https://www.codebuff.com") or {}
+    return entry.get("token")
+
+
+def fetch_session(token):
+    headers = dict(HEADERS, Authorization=f"Bearer {token}")
+    try:
+        zone = datetime.datetime.now().astimezone().tzinfo
+        headers["x-fb-timezone"] = str(zone)
+    except Exception:
+        pass
+    request = urllib.request.Request(API, headers=headers)
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return json.load(response)
+
+
+def summarise(body):
+    now = datetime.datetime.now(datetime.timezone.utc)
+    live = []
+    for purchase in body.get("desktopPurchases") or []:
+        try:
+            expiry = datetime.datetime.fromisoformat(purchase["expiresAt"].replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if expiry > now:
+            live.append({"model": purchase.get("model"), "expiresAt": purchase["expiresAt"]})
+    live.sort(key=lambda item: item["expiresAt"])
+    next_expiry = (body.get("desktopSessionCounts") or {}).get("nextExpiryAt")
+    return {
+        "ok": True,
+        "status": body.get("status"),
+        "expiresAt": live[0]["expiresAt"] if live else next_expiry,
+        "sessions": live,
+        "updatedAt": now.isoformat().replace("+00:00", "Z"),
+    }
+
+
+def write_atomic(path, payload):
+    directory = os.path.dirname(path) or "."
+    handle, temporary = tempfile.mkstemp(dir=directory, prefix=".session-time.")
+    try:
+        with os.fdopen(handle, "w", encoding="utf8") as stream:
+            json.dump(payload, stream, separators=(",", ":"))
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--state", required=True)
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--parent", type=int, default=0)
+    parser.add_argument("--interval", type=float, default=15.0)
+    parser.add_argument("--once", action="store_true")
+    args = parser.parse_args()
+
+    while parent_alive(args.parent):
+        try:
+            token = read_token(args.state)
+            if not token:
+                payload = {"ok": False, "error": "signed out", "updatedAt": None}
+            else:
+                payload = summarise(fetch_session(token))
+        except urllib.error.HTTPError as failure:
+            payload = {"ok": False, "error": f"HTTP {failure.code}"}
+        except Exception as failure:  # network, JSON, missing file
+            payload = {"ok": False, "error": str(failure)[:80]}
+        try:
+            write_atomic(args.out, payload)
+        except Exception as failure:
+            print(f"session-time-refresh: cannot write {args.out}: {failure}", file=sys.stderr)
+        if args.once:
+            return 0
+        time.sleep(args.interval)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

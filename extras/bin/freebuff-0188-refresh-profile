@@ -1,0 +1,48 @@
+#!/bin/bash
+# Rebuild the 0.0.188 profile from the CURRENT profile, so work done in the
+# running build shows up in 0.0.188 too.
+#
+# Runs while the current build is open: each store is copied with
+# `sqlite3 .backup`, which takes a consistent snapshot of a live WAL database
+# instead of copying a torn file. Nothing in the source profile is modified.
+#
+# 0.0.188 must be closed while this runs — it opens these same files — and it
+# will show the refreshed history on its next start.
+set -eu
+
+SRC="${FREEBUFF_SRC_PROFILE:-$HOME/.config/freebuff-desktop}"
+DST="${FREEBUFF_0188_PROFILE:-$HOME/.config/freebuff-desktop-0.0.188}"
+
+if pgrep -f "Freebuff-0.0.188-linux-x86_64.AppImage" >/dev/null 2>&1; then
+    echo "refresh: close Freebuff 0.0.188 first (it holds $DST open)" >&2
+    exit 1
+fi
+
+mkdir -p "$DST/projects"
+cp -a "$SRC/state.json" "$DST/state.json"
+[ -f "$SRC/state.json.device-key.json" ] && cp -a "$SRC/state.json.device-key.json" "$DST/"
+[ -d "$SRC/account-skills" ] && cp -a "$SRC/account-skills" "$DST/"
+[ -d "$SRC/no-folder" ] && cp -a "$SRC/no-folder" "$DST/"
+
+for d in "$SRC"/projects/*/; do
+    name=$(basename "$d")
+    mkdir -p "$DST/projects/$name"
+    [ -f "$d/project.json" ] && cp -a "$d/project.json" "$DST/projects/$name/"
+    sqlite3 "$d/desktop-v2.db" ".backup '$DST/projects/$name/desktop-v2.db'"
+done
+
+# The copy must point at itself, not at the live profile: state.json stores
+# absolute paths for the no-folder project.
+python3 - "$DST" <<'EOF'
+import sys, pathlib
+dst = pathlib.Path(sys.argv[1]); p = dst / "state.json"
+p.write_text(p.read_text().replace("/.config/freebuff-desktop/", "/.config/freebuff-desktop-0.0.188/"))
+EOF
+
+t=0; m=0
+for db in "$DST"/projects/*/desktop-v2.db; do
+    a=$(sqlite3 "file:$db?mode=ro" 'select count(*) from threads' 2>/dev/null || echo 0)
+    b=$(sqlite3 "file:$db?mode=ro" 'select count(*) from messages' 2>/dev/null || echo 0)
+    t=$((t + a)); m=$((m + b))
+done
+echo "refresh: $DST now has $t threads / $m messages"

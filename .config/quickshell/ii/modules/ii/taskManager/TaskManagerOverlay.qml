@@ -223,7 +223,9 @@ Scope {
                 TaskManagerUI.TaskManagerContent {
                     id: content
                     anchors.fill: parent
-                    selectedKey: root.requestedKey !== "" ? root.requestedKey : "apps"
+                    // No page named by the caller: land where the app was
+                    // last left, not on the front door every time.
+                    selectedKey: root.requestedKey !== "" ? root.requestedKey : rememberedKey()
                     onSelectedKeyChanged: root.requestedKey = selectedKey
                     // This skin is standalone: there is no settings window
                     // behind it to return to, and Escape closes the surface.

@@ -168,6 +168,13 @@ properties menu per row (end task, force kill, copy name) instead of an instant 
 `CTRL + SHIFT + Escape` is bound to `btop` for the terminal view.
 (`modules/taskmanager/`, `modules/ii/taskManager/`)
 
+Typing while Apps or Processes is up goes straight into the search box: the page
+hands it focus when it comes on screen (and when you switch to it), and a
+keystroke that reaches the table is put in the box rather than dropped. The page
+you leave is where the app reopens, kept in `Persistent.states.taskManager`, so
+closing it on Processor or Processes and opening it again does not start over at
+Apps. (`TaskManagerContent.qml`, `ProcessesView.qml`, `TaskManagerOverlay.qml`)
+
 ### Notifications
 
 Popups hang directly below the bar, aligned with the status cluster. Hovering the

@@ -553,6 +553,11 @@ Window {
     }
 
     function convertToTaskManager(key) {
+        // A conversion that names no page (the launcher's plain "Task
+        // Manager") resumes the page the app was last left on, the same way
+        // the overlay does; named pages still win.
+        if (!key || key.length === 0)
+            key = Persistent.states.taskManager.selectedKey ?? "";
         // Normalize like the old standalone app's launch did (resolveKey).
         key = resolveTmKey(key);
         root.taskManagerKey = key;

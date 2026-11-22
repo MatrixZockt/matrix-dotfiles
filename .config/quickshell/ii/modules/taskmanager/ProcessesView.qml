@@ -37,6 +37,43 @@ ColumnLayout {
     // Processes page = flat. The page the host is showing picks the mode.
     property bool groupedByApp: true
 
+    // Put the caret in the search box, text selected, so the first thing
+    // typed replaces the old filter. The host calls this when the page hits
+    // the screen (opening on Apps/Processes, or switching to one).
+    function focusSearch() {
+        if (!root.visible)
+            return;
+        searchField.forceActiveFocus();
+        searchField.selectAll();
+    }
+
+    // A key that reached this far was NOT taken by a focused control: the
+    // table or a toolbar button had focus, and at that moment the user is
+    // typing the name of the thing they came here to find. Hand it to the
+    // box instead of dropping it.
+    Keys.onPressed: (event) => {
+        if (event.key < Qt.Key_Space || event.key > Qt.Key_asciitilde)
+            return;
+        if (event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))
+            return;
+        if (searchField.activeFocus)
+            return;
+        searchField.forceActiveFocus();
+        searchField.text = searchField.text + event.text;
+        searchField.cursorPosition = searchField.text.length;
+        event.accepted = true;
+    }
+
+    // Also when this view itself is revealed inside a window that is
+    // already up (switching from a hardware page back to Apps/Processes).
+    onVisibleChanged: {
+        if (!visible)
+            return;
+        if (root.Window.window === null || !root.Window.window.visible)
+            return;
+        Qt.callLater(root.focusSearch);
+    }
+
     onGroupedByAppChanged: {
         ProcessList.grouped = groupedByApp;
         ProcessList.collapseAll();

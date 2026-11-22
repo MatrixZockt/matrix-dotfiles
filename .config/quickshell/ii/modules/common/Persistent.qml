@@ -297,6 +297,18 @@ Singleton {
                 property bool inhibit: false
             }
 
+            // The task manager's last page.
+            //
+            // Apps, Processes and the hardware pages are all "where I left
+            // it": closing the app while watching the CPU graph and opening
+            // it again on the Apps front door means navigating there twice
+            // every time. One key shared by both skins (the overlay and the
+            // settings window's task-manager face), declared here because an
+            // adapter serialises only the properties it knows about.
+            property JsonObject taskManager: JsonObject {
+                property string selectedKey: ""
+            }
+
             property JsonObject overlay: JsonObject {
                 property list<string> open: ["crosshair", "recorder", "volumeMixer", "resources"]
                 property JsonObject crosshair: JsonObject {

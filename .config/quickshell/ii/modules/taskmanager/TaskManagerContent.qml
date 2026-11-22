@@ -28,6 +28,26 @@ Item {
     // running apps.
     property string selectedKey: "apps"
 
+    // The page is a choice and it outlives the surface: it is written down
+    // the moment it changes, so closing the task manager (or the whole
+    // shell) and opening it again lands on the page that was last read.
+    // Kept in Persistent, not here, because the two skins -- this overlay
+    // and the settings window's task-manager face -- are separate trees and
+    // must agree about where the app was left.
+    onSelectedKeyChanged: {
+        if (selectedKey !== "")
+            Persistent.states.taskManager.selectedKey = selectedKey;
+    }
+
+    // What a plain "open the task manager" lands on: the remembered page,
+    // as long as it still exists (a GPU or disk can be gone since).
+    function rememberedKey() {
+        const saved = String(Persistent.states.taskManager.selectedKey ?? "");
+        if (saved.length > 0 && railModel.some(entry => entry.key === saved))
+            return saved;
+        return "apps";
+    }
+
     // Escape inside the app quits it, whichever skin it is wearing; what
     // "quitting" means is the host's business (popup close vs window close).
     signal quitRequested()
@@ -417,6 +437,7 @@ Item {
         // Same directory, so the type resolves directly (the qmldir export
         // is for other modules).
         ProcessesView {
+            id: processesView
             visible: root.isListPage
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -736,14 +757,31 @@ Item {
     onIsListPageChanged: {
         ProcessList.setActive("taskmanager", root.isListPage && root.onScreenNow);
         GpuProcesses.setActive("taskmanager", root.isListPage && root.onScreenNow);
+        root.focusProcessSearch();
     }
     onVisibleChanged: {
         ProcessList.setActive("taskmanager", root.isListPage && root.onScreenNow);
         GpuProcesses.setActive("taskmanager", root.isListPage && root.onScreenNow);
+        root.focusProcessSearch();
     }
     onOnScreenNowChanged: {
         ProcessList.setActive("taskmanager", root.isListPage && root.onScreenNow);
         GpuProcesses.setActive("taskmanager", root.isListPage && root.onScreenNow);
+        root.focusProcessSearch();
+    }
+
+    // Typing belongs in the search box the moment a list page is on screen.
+    // The surface owns the keyboard while it is open, but active focus
+    // inside it is another matter: without this, opening on Apps/Processes
+    // left every keystroke to land on whatever item happened to hold focus,
+    // so typing a process name did nothing until the box was clicked.
+    function focusProcessSearch() {
+        if (!root.isListPage || !root.onScreenNow)
+            return;
+        Qt.callLater(() => {
+            if (root.isListPage && root.onScreenNow)
+                processesView.focusSearch();
+        });
     }
     // Opened directly on a list page (QS_TM_KEY=apps): no change signal ever
     // fires, so the initial state has to be applied by hand too.

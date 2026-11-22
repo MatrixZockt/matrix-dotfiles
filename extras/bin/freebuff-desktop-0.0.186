@@ -69,8 +69,10 @@ if [ "${FREEBUFF_0188_SESSION_UI:-1}" != "0" ]; then
         patched=$("$helper" "$APP" "$tree" 2>>"$log")
     fi
     if [ -n "$patched" ] && [ -x "$patched" ]; then
-        run="$patched"
-        # AppRun resolves its own copy only when the runtime set this up itself.
+        # The extracted binary directly, not AppRun: AppRun re-derives APPDIR by
+        # walking its own path against $1, which any leading flag breaks.
+        run="$tree/freebuff"
+        [ -x "$run" ] || run="$patched"
         export APPDIR="$tree"
     else
         echo "[launcher] session countdown unavailable; running the AppImage" >>"$log"

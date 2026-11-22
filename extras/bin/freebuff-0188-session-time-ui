@@ -32,6 +32,30 @@ if [ ! -x "$app" ]; then
     exit 1
 fi
 
+# Never move a tree that is still executing: the running app would keep deleted
+# inodes, hold its single-instance lock, and silently swallow the next launch.
+tree_in_use() {
+    python3 - "$tree" <<'PY'
+import glob, os, sys
+root = os.path.realpath(sys.argv[1])
+for entry in glob.glob("/proc/[0-9]*"):
+    try:
+        exe = os.readlink(entry + "/exe")
+    except OSError:
+        continue
+    exe = exe.split(" (deleted)")[0]
+    if exe == root or exe.startswith(root + "/"):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+if [ -d "$tree" ] && tree_in_use; then
+    echo "session-time-ui: $tree is in use by a running Freebuff; close it first" >&2
+    printf '%s\n' "$tree/AppRun"
+    exit 0
+fi
+
 stamp="$tree/.source-stamp"
 current=$(stat -c '%s-%Y' "$app" 2>/dev/null || echo unknown)
 if [ -f "$stamp" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$current" ] && [ -x "$tree/AppRun" ]; then
@@ -69,12 +93,24 @@ cat >"$ui/session-time.js" <<'JS'
 // session endpoint is read exactly the way the app's own settings screen reads
 // it. Everything here is presentation: no request mutates anything.
 (() => {
-  const POLL_MS = 30000;
-  const RETRY_MS = 10000;
+  const POLL_MS = 15000;
+  const RETRY_MS = 8000;
   let expiresAt = 0;
   let live = [];
   let timer = null;
   let poll = null;
+  let baseTitle = "";
+  // "loading" until the first answer, so a broken fetch is never mistaken for
+  // "no session".
+  let phase = "loading";
+  let lastError = "";
+
+  // The window title is the one surface that is visible even when the notice
+  // pill is covered by other UI, and it doubles as proof the counter is live.
+  function setTitle(text) {
+    if (!baseTitle) baseTitle = document.title || "Freebuff Desktop";
+    if (document.title !== text) document.title = text;
+  }
 
   const pad = (n) => String(n).padStart(2, "0");
   function clock(ms) {
@@ -123,13 +159,31 @@ cat >"$ui/session-time.js" <<'JS'
 
   function render() {
     const el = badge();
+    el.style.display = "block";
     if (!expiresAt || expiresAt <= Date.now()) {
-      el.style.display = "none";
+      // Always visible: an absent badge is indistinguishable from a broken one.
+      el.style.opacity = "0.55";
+      const text =
+        phase === "ok"
+          ? "no active session"
+          : phase === "error"
+            ? `session time unavailable${lastError ? ` (${lastError})` : ""}`
+            : "checking session…";
+      el.textContent = text;
+      el.title =
+        phase === "ok"
+          ? "Freebuff: no session is running, so no time to count down"
+          : phase === "error"
+            ? "Freebuff: the session endpoint did not answer"
+            : "Freebuff: asking for the session state";
+      setTitle(`${baseTitle} · ${phase === "ok" ? "no session" : text}`);
       return;
     }
-    el.style.display = "block";
+    el.style.opacity = "0.92";
     const label = live.length > 1 ? `${live.length} sessions · ` : "session ";
-    el.textContent = `${label}${clock(expiresAt - Date.now())} left`;
+    const remaining = clock(expiresAt - Date.now());
+    el.textContent = `${label}${remaining} left`;
+    setTitle(`${baseTitle} · ${remaining} left`);
     el.title = [
       `Time left in the running Freebuff session${live.length > 1 ? "s" : ""}`,
       ...live.map((p) => `${p.model} until ${new Date(p.expiresAt).toLocaleTimeString()}`),
@@ -160,14 +214,23 @@ cat >"$ui/session-time.js" <<'JS'
       return;
     }
     try {
-      const res = await fetch("/api/web/freebuff-session", {
-        headers: { "x-freebuff-launch-id": t },
-        cache: "no-store",
-      });
+      // 0.0.18x proxies the account's web endpoints through /api/account/web?
+      // path=…; older builds have no direct /api/web/* route (that answers 404).
+      const res = await fetch(
+        `/api/account/web?path=${encodeURIComponent("/api/web/freebuff-session")}`,
+        {
+          headers: { "x-freebuff-launch-id": t },
+          cache: "no-store",
+        },
+      );
       if (!res.ok) throw new Error(String(res.status));
+      phase = "ok";
       apply(await res.json());
       poll = setTimeout(refresh, POLL_MS);
-    } catch {
+    } catch (error) {
+      phase = "error";
+      lastError = String(error?.message ?? error).slice(0, 44);
+      render();
       poll = setTimeout(refresh, RETRY_MS);
     }
   }
@@ -178,7 +241,9 @@ cat >"$ui/session-time.js" <<'JS'
       return;
     }
     if (timer) return;
+    console.info("[session-time] counter installed");
     timer = setInterval(render, 1000);
+    render();
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) refresh();
     });

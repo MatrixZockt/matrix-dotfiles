@@ -863,6 +863,34 @@ transcribe() { # transcribe <wav> -> prints the text
         say "input is silent (${level} dB), nothing to transcribe"
         return 0
     fi
+    # ── Room tone is not silence enough ─────────────────────────────────
+    #
+    # THIS IS THE "it typed a random word while my hands were off the
+    # keyboard" FIX. -50 dB mean sits under a soft whisper, but it also sits
+    # under this machine's ROOM: the daemon logs take after take of 0.5-0.7 s
+    # at -33..-38 dB, all of them with nobody speaking. Whisper is handed that
+    # and answers with a word, not with nothing -- and because every request
+    # carries the vocabulary prompt (words.txt), the word it reaches for is one
+    # of those. Reproduced 2026-11-22: 0.64 s of pink noise at -33 dB posted to
+    # the warm server came back as "Higgsfield", a words.txt term, with the
+    # identical shape to the delivered dictations in the log (10 characters, no
+    # speech).
+    #
+    # Speech separates from room tone by PEAK, not by mean: measured here,
+    # syllables peak at -6..-15 dB, while room tone peaks around -23..-26 dB.
+    # So a quiet take -- mean under -25 dB, which no real dictation on this
+    # machine is (they sit at -17..-21) -- must also be judged by its peak, and
+    # dropped when nothing in it was ever loud enough to be a voice. A normal
+    # dictation never reaches this branch, so it never pays for the extra pass.
+    if [ -n "$level" ] && awk -v l="$level" 'BEGIN { exit !(l + 0 < -25) }'; then
+        local peak
+        peak="$(ffmpeg -hide_banner -nostats -i "$wav" -af volumedetect -f null - 2>&1 \
+            | sed -n 's/.*max_volume: \([-0-9.]*\) dB.*/\1/p' | head -1)"
+        if [ -n "$peak" ] && awk -v p="$peak" 'BEGIN { exit !(p + 0 < -20) }'; then
+            say "no voice in the take (mean ${level} dB, peak ${peak} dB), nothing to transcribe"
+            return 0
+        fi
+    fi
     # ── Cut the silence off both ends before anybody hears it ─────────────
     #
     # THIS IS THE "thank you" FIX, and it is about the audio, not the words.

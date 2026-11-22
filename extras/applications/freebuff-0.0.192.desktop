@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Freebuff (0.0.192)
+GenericName=Freebuff Desktop, pinned build
+Comment=The pinned 0.0.192 desktop build: the last release before the 0.0.194 rewrite, with the full thread history and the session countdown
+Exec=/home/matrix/.local/bin/freebuff-desktop-0.0.192 %U
+Icon=freebuff
+Terminal=false
+Categories=Development;
+StartupWMClass=Freebuff

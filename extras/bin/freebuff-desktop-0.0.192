@@ -1,16 +1,17 @@
 #!/bin/bash
-# Freebuff Desktop 0.0.186 — 0.0.184 plus one release: the last step that still
-# predates the 0.0.194 web-UI rewrite (which is what made 0.0.204 lag on this
-# machine), while carrying the session plumbing used for the countdown badge.
+# Freebuff Desktop 0.0.192 — the last release before 0.0.194, the hybrid web
+# interface and cloud runner that made 0.0.204 lag on this machine. It is as
+# close to the rewritten build as the old interface goes, and it carries the
+# session plumbing used for the countdown badge.
 # It runs on a COPY of the live profile so every thread/session from the current
 # build is already there, while the current build keeps writing to its own.
 #
 # Why a copy and not the same profile: the running build holds
 # ~/.config/freebuff-desktop/state.json, its orchestrator lock and every
 # desktop-v2.db open in WAL mode. Pointing a second app at them means two
-# writers and, at best, a refused start (`code 75`) — so 0.0.186 gets
-#     sessions: ~/.config/freebuff-desktop-0.0.186   (state.json + projects/*)
-#     browser : ~/.config/Freebuff-0.0.186           (--user-data-dir)
+# writers and, at best, a refused start (`code 75`) — so 0.0.192 gets
+#     sessions: ~/.config/freebuff-desktop-0.0.192   (state.json + projects/*)
+#     browser : ~/.config/Freebuff-0.0.192           (--user-data-dir)
 # The copy was made with `sqlite3 .backup` per store, so it is a consistent
 # snapshot taken while the app was running, not a torn file copy.
 #
@@ -27,23 +28,23 @@
 # with GBM/SCANOUT and Intel execbuf ENOMEM here, and this build is the same
 # Electron generation. FREEBUFF_0188_RENDER=wayland tries the other backend.
 #
-# To refresh the copy later (after working in the current build), close 0.0.186
+# To refresh the copy later (after working in the current build), close 0.0.192
 # and run extras/bin/freebuff-0188-refresh-profile with FREEBUFF_0188_PROFILE set
 # to this profile (installed in ~/.local/bin).
 set -u
 
-APP="$HOME/Applications/Freebuff-0.0.186-linux-x86_64.AppImage"
-PROFILE="${FREEBUFF_0188_PROFILE:-$HOME/.config/freebuff-desktop-0.0.186}"
-DATA="${FREEBUFF_0188_DATA:-$HOME/.config/Freebuff-0.0.186}"
+APP="$HOME/Applications/Freebuff-0.0.192-linux-x86_64.AppImage"
+PROFILE="${FREEBUFF_0188_PROFILE:-$HOME/.config/freebuff-desktop-0.0.192}"
+DATA="${FREEBUFF_0188_DATA:-$HOME/.config/Freebuff-0.0.192}"
 SCALE="${FREEBUFF_0188_SCALE:-1.5}"
 
 if [ ! -x "$APP" ]; then
-    echo "freebuff-desktop-0.0.186: $APP is missing or not executable" >&2
-    echo "  download: github.com/CodebuffAI/codebuff-community/releases/tag/freebuff-desktop-v0.0.186" >&2
+    echo "freebuff-desktop-0.0.192: $APP is missing or not executable" >&2
+    echo "  download: github.com/CodebuffAI/codebuff-community/releases/tag/freebuff-desktop-v0.0.192" >&2
     exit 1
 fi
 if [ ! -f "$PROFILE/state.json" ]; then
-    echo "freebuff-desktop-0.0.186: $PROFILE/state.json is missing" >&2
+    echo "freebuff-desktop-0.0.192: $PROFILE/state.json is missing" >&2
     echo "  it holds the sign-in and the thread index; recreate it from the live profile first" >&2
     exit 1
 fi
@@ -63,7 +64,7 @@ log="$DATA/launch.log"
 run="$APP"
 if [ "${FREEBUFF_0188_SESSION_UI:-1}" != "0" ]; then
     helper="$(dirname "$(readlink -f "$0")")/freebuff-0188-session-time-ui"
-    tree="$DATA/app-0186"
+    tree="$DATA/app-0192"
     patched=""
     if [ -x "$helper" ]; then
         patched=$("$helper" "$APP" "$tree" 2>>"$log")
@@ -118,7 +119,7 @@ if [ "${FREEBUFF_0188_RENDER:-x11}" = "wayland" ]; then
 fi
 
 if ! xdisp=$(find_x_display); then
-    echo "freebuff-desktop-0.0.186: no X display answered; start XWayland or run FREEBUFF_0188_RENDER=wayland $0" >&2
+    echo "freebuff-desktop-0.0.192: no X display answered; start XWayland or run FREEBUFF_0188_RENDER=wayland $0" >&2
     exit 1
 fi
 export DISPLAY="$xdisp"

@@ -108,7 +108,9 @@ cat >"$ui/session-time.js" <<'JS'
   // The window title is the one surface that is visible even when the notice
   // pill is covered by other UI, and it doubles as proof the counter is live.
   function setTitle(text) {
-    if (!baseTitle) baseTitle = document.title || "Freebuff Desktop";
+    // At first paint the document can still have no title, and "· 42:13 left"
+    // with nothing in front of it reads as a bug.
+    if (!baseTitle) baseTitle = document.title || "Freebuff";
     if (document.title !== text) document.title = text;
   }
 

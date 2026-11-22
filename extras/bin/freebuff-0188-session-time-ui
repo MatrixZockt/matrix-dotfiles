@@ -107,7 +107,6 @@ cat >"$ui/session-time.js" <<'JS'
   // Which thread's hour to show. The app never puts it in the URL, so it is
   // learned from the requests the interface itself makes for the open thread.
   let activeThread = null;
-  let scope = "account";
   let mine = {};
   let lastPayload = null;
 
@@ -169,9 +168,14 @@ cat >"$ui/session-time.js" <<'JS'
     const wrapped = function (input, init) {
       try {
         const url = typeof input === "string" ? input : input && input.url;
-        const match = /\/api\/thread\/([0-9a-f-]{36})/.exec(url || "");
+        const match = /\/api\/thread(?:s)?\/([0-9a-f-]{36})/.exec(url || "");
         if (match && match[1] !== activeThread) {
+          // Switching chats: drop the old number at once instead of leaving it
+          // on screen until the next answer about the new one.
           activeThread = match[1];
+          expiresAt = 0;
+          mine = {};
+          render();
           lastPayload && apply(lastPayload);
         }
       } catch {
@@ -181,6 +185,22 @@ cat >"$ui/session-time.js" <<'JS'
     };
     wrapped.__sessionTimeWrapped = true;
     window.fetch = wrapped;
+
+    // Some builds move between chats with the URL instead of a request.
+    for (const method of ["pushState", "replaceState"]) {
+      const original = history[method];
+      if (typeof original !== "function" || original.__sessionTimeWrapped) continue;
+      const wrappedHistory = function () {
+        original.apply(this, arguments);
+        const seen = fromUrl(location.search) || fromUrl(location.pathname);
+        if (seen && seen !== activeThread) {
+          activeThread = seen;
+          lastPayload && apply(lastPayload);
+        }
+      };
+      wrappedHistory.__sessionTimeWrapped = true;
+      history[method] = wrappedHistory;
+    }
   }
 
   // Keep the label just above the composer's mode row (Build / Plan / Mission /
@@ -208,39 +228,34 @@ cat >"$ui/session-time.js" <<'JS'
     el.style.top = `${Math.round(anchor.top - 22)}px`;
   }
 
+  function shorten(text, limit = 24) {
+    const value = String(text || "").trim();
+    return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+  }
+
   function render() {
     const el = badge();
-    el.style.display = "block";
-    place(el);
+    // Nothing for this chat means nothing on screen: a chat with no running
+    // hour must not borrow another one's countdown.
     if (!expiresAt || expiresAt <= Date.now()) {
-      // Always visible: an absent badge is indistinguishable from a broken one.
-      el.style.opacity = "0.55";
-      const text =
-        phase === "ok"
-          ? "no session"
-          : phase === "error"
-            ? `session time unavailable${lastError ? ` (${lastError})` : ""}`
-            : "checking session…";
-      el.textContent = text;
-      el.title =
-        phase === "ok"
-          ? "Freebuff: no session is running, so no time to count down"
-          : phase === "error"
-            ? "Freebuff: the session endpoint did not answer"
-            : "Freebuff: asking for the session state";
-      setTitle(`${baseTitle} · ${phase === "ok" ? "no session" : text}`);
+      el.style.display = "none";
+      setTitle(baseTitle);
       return;
     }
+    el.style.display = "block";
+    place(el);
     el.style.opacity = "0.92";
     const remaining = clock(expiresAt - Date.now());
-    el.textContent = `${remaining} left`;
+    const name = mine.title ? `${shorten(mine.title)} · ` : "";
+    el.textContent = `${name}${remaining} left`;
     setTitle(`${baseTitle} · ${remaining} left`);
     el.title = [
-      scope === "thread"
-        ? `Time left in this tab's session${mine.model ? ` (${mine.model})` : ""}`
-        : `Time left in the nearest running Freebuff session${live.length > 1 ? "s" : ""}`,
+      `Time left in this chat's session${mine.title ? ` (${mine.title})` : ""}`,
+      mine.model ? `Model: ${mine.model}` : "",
       ...live.map((p) => `${p.model} until ${new Date(p.expiresAt).toLocaleTimeString()}`),
-    ].join("\n");
+    ]
+      .filter(Boolean)
+      .join("\n");
   }
 
   function apply(payload) {
@@ -251,23 +266,16 @@ cat >"$ui/session-time.js" <<'JS'
       .filter((item) => item && Date.parse(item.expiresAt) > now)
       .sort((a, b) => Date.parse(a.expiresAt) - Date.parse(b.expiresAt));
 
-    // The hour that belongs to the open thread wins; the nearest one is only a
-    // fallback for a thread whose session was bought elsewhere.
+    // Only the open chat's own hour counts. No open chat, or a chat whose hour
+    // belongs to another window: show nothing at all.
     const byThread = data.byThread && typeof data.byThread === "object" ? data.byThread : {};
     const own = activeThread ? byThread[activeThread] : null;
     if (own && Date.parse(own.expiresAt) > now) {
-      scope = "thread";
       mine = own;
       expiresAt = Date.parse(own.expiresAt);
     } else {
-      scope = "account";
       mine = {};
-      const next = Date.parse(data.expiresAt || "");
-      expiresAt = live.length
-        ? Date.parse(live[0].expiresAt)
-        : Number.isFinite(next) && next > now
-          ? next
-          : 0;
+      expiresAt = 0;
     }
     render();
   }
@@ -317,13 +325,21 @@ JS
 
 # One override script line, after the app's own module entry so nothing waits on
 # it. Idempotent: a second run must not add a second copy.
-python3 - "$ui/index.html" <<'PY' || { echo "session-time-ui: could not patch index.html" >&2; rm -rf "$payload"; exit 1; }
+# The tag carries a digest of the script, because the renderer caches it: with a
+# bare name an updated script kept being ignored until the disk cache was
+# cleared, and the old badge logic quietly ran instead of the new one.
+js_hash=$(sha1sum "$ui/session-time.js" | cut -c1-12)
+python3 - "$ui/index.html" "$js_hash" <<'PY' || { echo "session-time-ui: could not patch index.html" >&2; rm -rf "$payload"; exit 1; }
+import re
 import sys
 
-path = sys.argv[1]
-tag = '<script src="/session-time.js" defer></script>'
+path, digest = sys.argv[1], sys.argv[2]
+tag = f'<script src="/session-time.js?v={digest}" defer></script>'
 html = open(path, encoding="utf8").read()
-if tag in html:
+match = re.search(r'<script src="/session-time\.js[^"]*" defer></script>', html)
+if match:
+    if match.group(0) != tag:
+        open(path, "w", encoding="utf8").write(html.replace(match.group(0), tag, 1))
     sys.exit(0)
 anchor = '<script type="module" crossorigin src="/assets/'
 index = html.find(anchor)

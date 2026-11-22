@@ -104,6 +104,12 @@ cat >"$ui/session-time.js" <<'JS'
   // "no session".
   let phase = "loading";
   let lastError = "";
+  // Which thread's hour to show. The app never puts it in the URL, so it is
+  // learned from the requests the interface itself makes for the open thread.
+  let activeThread = null;
+  let scope = "account";
+  let mine = {};
+  let lastPayload = null;
 
   // The window title is the one surface that is visible even when the notice
   // pill is covered by other UI, and it doubles as proof the counter is live.
@@ -151,6 +157,33 @@ cat >"$ui/session-time.js" <<'JS'
     return el;
   }
 
+  function watchActiveThread() {
+    const fromUrl = (value) => {
+      const match = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/.exec(value || "");
+      return match ? match[0] : null;
+    };
+    const seen = fromUrl(location.search) || fromUrl(location.pathname);
+    if (seen) activeThread = seen;
+
+    const original = window.fetch;
+    if (typeof original !== "function" || original.__sessionTimeWrapped) return;
+    const wrapped = function (input, init) {
+      try {
+        const url = typeof input === "string" ? input : input && input.url;
+        const match = /\/api\/thread\/([0-9a-f-]{36})/.exec(url || "");
+        if (match && match[1] !== activeThread) {
+          activeThread = match[1];
+          lastPayload && apply(lastPayload);
+        }
+      } catch {
+        /* never break the app's own requests */
+      }
+      return original.apply(this, arguments);
+    };
+    wrapped.__sessionTimeWrapped = true;
+    window.fetch = wrapped;
+  }
+
   function render() {
     const el = badge();
     el.style.display = "block";
@@ -174,29 +207,44 @@ cat >"$ui/session-time.js" <<'JS'
       return;
     }
     el.style.opacity = "0.92";
-    const label = live.length > 1 ? `${live.length} sessions · ` : "session ";
     const remaining = clock(expiresAt - Date.now());
+    const label = scope === "thread" ? "this session · " : live.length > 1 ? `${live.length} sessions · ` : "session ";
     el.textContent = `${label}${remaining} left`;
     setTitle(`${baseTitle} · ${remaining} left`);
     el.title = [
-      `Time left in the running Freebuff session${live.length > 1 ? "s" : ""}`,
+      scope === "thread"
+        ? `Time left in this tab's session${mine.model ? ` (${mine.model})` : ""}`
+        : `Time left in the nearest running Freebuff session${live.length > 1 ? "s" : ""}`,
       ...live.map((p) => `${p.model} until ${new Date(p.expiresAt).toLocaleTimeString()}`),
     ].join("\n");
   }
 
   function apply(payload) {
     const data = payload && typeof payload === "object" ? payload : {};
+    lastPayload = data;
     const now = Date.now();
     live = (Array.isArray(data.sessions) ? data.sessions : [])
-      .filter((p) => p && Date.parse(p.expiresAt) > now)
+      .filter((item) => item && Date.parse(item.expiresAt) > now)
       .sort((a, b) => Date.parse(a.expiresAt) - Date.parse(b.expiresAt));
-    const next = Date.parse(data.expiresAt || "");
-    // The session that ends soonest is the one worth warning about.
-    expiresAt = live.length
-      ? Date.parse(live[0].expiresAt)
-      : Number.isFinite(next) && next > now
-        ? next
-        : 0;
+
+    // The hour that belongs to the open thread wins; the nearest one is only a
+    // fallback for a thread whose session was bought elsewhere.
+    const byThread = data.byThread && typeof data.byThread === "object" ? data.byThread : {};
+    const own = activeThread ? byThread[activeThread] : null;
+    if (own && Date.parse(own.expiresAt) > now) {
+      scope = "thread";
+      mine = own;
+      expiresAt = Date.parse(own.expiresAt);
+    } else {
+      scope = "account";
+      mine = {};
+      const next = Date.parse(data.expiresAt || "");
+      expiresAt = live.length
+        ? Date.parse(live[0].expiresAt)
+        : Number.isFinite(next) && next > now
+          ? next
+          : 0;
+    }
     render();
   }
 
@@ -230,6 +278,7 @@ cat >"$ui/session-time.js" <<'JS'
     }
     if (timer) return;
     console.info("[session-time] counter installed");
+    watchActiveThread();
     timer = setInterval(render, 1000);
     render();
     document.addEventListener("visibilitychange", () => {

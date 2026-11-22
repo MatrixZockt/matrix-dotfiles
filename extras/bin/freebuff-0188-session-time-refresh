@@ -16,8 +16,10 @@ app it was started for is gone.
 """
 import argparse
 import datetime
+import glob
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import time
@@ -61,7 +63,32 @@ def fetch_session(token):
         return json.load(response)
 
 
-def summarise(body):
+def thread_instances(profile_dir):
+    """thread id -> (freebuff instance id, title) for every thread that has one.
+
+    A running hour belongs to the thread that bought it: the purchase carries the
+    holder's instance id, and the thread stores that same id. Read-only.
+    """
+    mapping = {}
+    for path in glob.glob(os.path.join(profile_dir, "projects", "*", "desktop-v2.db")):
+        try:
+            connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        except sqlite3.Error:
+            continue
+        try:
+            rows = connection.execute(
+                "select id, freebuff_instance_id, title from threads where freebuff_instance_id is not null"
+            )
+            for thread_id, instance_id, title in rows:
+                mapping[thread_id] = (instance_id, title)
+        except sqlite3.Error:
+            pass
+        finally:
+            connection.close()
+    return mapping
+
+
+def summarise(body, profile_dir):
     now = datetime.datetime.now(datetime.timezone.utc)
     live = []
     for purchase in body.get("desktopPurchases") or []:
@@ -70,14 +97,37 @@ def summarise(body):
         except Exception:
             continue
         if expiry > now:
-            live.append({"model": purchase.get("model"), "expiresAt": purchase["expiresAt"]})
+            live.append(
+                {
+                    "model": purchase.get("model"),
+                    "expiresAt": purchase["expiresAt"],
+                    "holderInstanceId": purchase.get("holderInstanceId"),
+                }
+            )
     live.sort(key=lambda item: item["expiresAt"])
+
+    by_instance = {}
+    titles = {}
+    for thread_id, (instance_id, title) in thread_instances(profile_dir).items():
+        by_instance[instance_id] = thread_id
+        titles[thread_id] = title
+    by_thread = {}
+    for session in live:
+        thread_id = by_instance.get(session.get("holderInstanceId"))
+        if thread_id:
+            by_thread[thread_id] = {
+                "expiresAt": session["expiresAt"],
+                "model": session["model"],
+                "title": titles.get(thread_id),
+            }
+
     next_expiry = (body.get("desktopSessionCounts") or {}).get("nextExpiryAt")
     return {
         "ok": True,
         "status": body.get("status"),
         "expiresAt": live[0]["expiresAt"] if live else next_expiry,
         "sessions": live,
+        "byThread": by_thread,
         "updatedAt": now.isoformat().replace("+00:00", "Z"),
     }
 
@@ -107,13 +157,14 @@ def main():
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
 
+    profile_dir = os.path.dirname(os.path.abspath(args.state))
     while parent_alive(args.parent):
         try:
             token = read_token(args.state)
             if not token:
                 payload = {"ok": False, "error": "signed out", "updatedAt": None}
             else:
-                payload = summarise(fetch_session(token))
+                payload = summarise(fetch_session(token), profile_dir)
         except urllib.error.HTTPError as failure:
             payload = {"ok": False, "error": f"HTTP {failure.code}"}
         except Exception as failure:  # network, JSON, missing file

@@ -74,6 +74,26 @@ hl.window_rule({ match = { fullscreen = true }, border_size = 0 })
 -- genuinely misbehave are named here, once, instead of sweeping up everything:
 hl.window_rule({ match = { class = "^(@codebuff/freebuff%-desktop|Freebuff|WhatsApp Desktop|com%.anthropic%.Claude|discord|opcode|TradingView|code%-oss|jetbrains%-studio|AusweisApp)$" }, float = false })
 
+-- The same apps, un-animated.
+--
+-- Going fullscreen animates the window's box over ~200ms, but the client is
+-- told its new size once and then needs a moment to repaint. On these apps --
+-- Electron, and one of them (Freebuff) also running without its GPU -- the
+-- repaint loses that race, so the frame glides while the content sits at the
+-- old size and snaps in at the end. They are the only windows here where that
+-- is visible; every native Wayland client follows the animation closely enough
+-- to hide it.
+--
+-- `no_anim` is per-window, so this fixes the transition without shortening the
+-- animations for the rest of the desktop. What it costs is the popin on open
+-- and close for these nine windows: they now appear and disappear in one frame,
+-- which is honest about what the content inside them is doing anyway.
+hl.window_rule({
+    name    = "electron-instant-geometry",
+    match   = { class = "^(@codebuff/freebuff%-desktop|Freebuff|WhatsApp Desktop|com%.anthropic%.Claude|discord|opcode|TradingView|code%-oss|jetbrains%-studio|AusweisApp)$" },
+    no_anim = true,
+})
+
 -- Windows with no identity at all -- a drag image, a drag proxy, a ghost
 -- painted under the cursor by the toolkit while a drag is in flight. They are
 -- never an application and must never own a tile: without this they map as a

@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""Fill empty 0.0.188 chats from the account's cloud chat history.
+
+Why this exists: 0.0.204 keeps hosted ("cloud") sessions on codebuff's servers
+and streams them on open, so their local desktop-v2.db has zero messages. The
+pre-rewrite build cannot reach that service, so those chats open blank. This
+pulls the same history the current build shows, over the same endpoint its own
+client uses (GET /api/v1/cloud/history/...), and writes it into the local
+message table in the format the old UI renders.
+
+Unsupported, therefore defensive:
+  * read-only against the API; nothing is written back to the server
+  * every store it modifies is backed up first (sqlite .backup)
+  * threads that already have messages are skipped
+  * --dry-run reports what it would do and writes nothing
+
+Usage:
+  freebuff-0188-pull-cloud-chats --dry-run
+  freebuff-0188-pull-cloud-chats
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sqlite3
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+from pathlib import Path
+
+PROFILE = Path(
+    os.environ.get("FREEBUFF_0188_PROFILE", "~/.config/freebuff-desktop-0.0.188")
+).expanduser()
+API = "https://www.codebuff.com/api/v1/cloud/history"
+UA = "freebuff-desktop/0.0.188 (unsupported local history pull)"
+
+
+def token() -> str:
+    state = json.loads((PROFILE / "state.json").read_text())
+    for host, session in state.get("authSessions", {}).items():
+        if host == "https://www.codebuff.com" and session.get("token"):
+            return session["token"]
+    sys.exit("no codebuff.com session in state.json; sign in to 0.0.188 first")
+
+
+def get(path: str, tok: str, params: dict | None = None) -> dict:
+    url = f"{API}/{path}"
+    if params:
+        query = "&".join(f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v is not None)
+        if query:
+            url += "?" + query
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {tok}",
+            "x-freebuff-device-chats": "1",
+            "User-Agent": UA,
+            "Accept": "application/json",
+        },
+    )
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as failure:
+            if failure.code == 429 or failure.code >= 500:
+                time.sleep(2 * (attempt + 1))
+                continue
+            body = failure.read()[:200].decode("utf8", "replace")
+            raise RuntimeError(f"{path}: HTTP {failure.code} {body}") from failure
+        except urllib.error.URLError:
+            time.sleep(2 * (attempt + 1))
+    raise RuntimeError(f"{path}: unreachable after retries")
+
+
+def paged(path: str, tok: str, params: dict | None = None) -> list[dict]:
+    out: list[dict] = []
+    cursor = None
+    while True:
+        page = get(path, tok, {**(params or {}), "limit": 100, "cursor": cursor})
+        out.extend(page.get("items") or [])
+        cursor = page.get("nextCursor")
+        if not cursor:
+            return out
+
+
+def ms(stamp: str | None) -> int:
+    if not stamp:
+        return int(time.time() * 1000)
+    try:
+        return int(datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp() * 1000)
+    except ValueError:
+        return int(time.time() * 1000)
+
+
+def payload(event: dict) -> dict:
+    raw = event.get("payload")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def run_messages(run: dict, tok: str) -> list[tuple[str, list[dict], int, str]]:
+    """One run -> its user prompt and one assistant message, or [] when empty."""
+    events = paged(f"runs/{run['id']}/events", tok)
+    events.sort(key=lambda event: (ms(event.get("createdAt")), event.get("id") or ""))
+    out: list[tuple[str, list[dict], int, str]] = []
+    reasoning: list[str] = []
+    text: list[str] = []
+    for event in events:
+        kind = event.get("kind")
+        data = payload(event)
+        if kind == "user":
+            prompt = data.get("prompt")
+            if isinstance(prompt, str) and prompt.strip():
+                out.append(("user", [{"kind": "text", "text": prompt}], ms(event.get("createdAt")), str(event.get("id"))))
+        elif kind == "chunk":
+            raw = event.get("payload")
+            if isinstance(raw, str):
+                # The assistant's prose arrives as a bare string payload, with no
+                # type wrapper; only reasoning chunks carry one.
+                text.append(raw)
+            elif data.get("type") == "reasoning_chunk":
+                reasoning.append(data.get("chunk") or "")
+            elif data.get("type") in ("text_chunk", "content_chunk"):
+                text.append(data.get("chunk") or data.get("text") or "")
+    parts: list[dict] = []
+    if reasoning:
+        parts.append({"kind": "reasoning", "text": "".join(reasoning)})
+    if text:
+        parts.append({"kind": "text", "text": "".join(text)})
+    if parts:
+        finished = run.get("finishedAt") or run.get("createdAt")
+        out.append(("assistant", parts, ms(finished), "z" + str(event_seq(run, events))))
+    return out
+
+
+def event_seq(run: dict, events: list[dict]) -> str:
+    """Sort key that keeps the assistant message after its prompt."""
+    ids = [str(e.get("id")) for e in events if e.get("kind") == "chunk"]
+    return max(ids) if ids else str(run.get("createdAt"))
+
+
+def rebuild(chat_id: str, tok: str) -> list[tuple[str, list[dict], int]]:
+    """Return [(role, parts, ts_ms)] oldest first, reconstructed from run events.
+
+    Runs are independent, so they are fetched in parallel: a single run of a
+    long chat is one chunk event per streamed token, which is thousands of
+    events, and doing that serially takes minutes per chat.
+    """
+    runs = paged(f"chats/{chat_id}/runs", tok)
+    runs.sort(key=lambda run: run.get("createdAt") or "")
+    collected: list[tuple[tuple[int, str], str, list[dict], int]] = []
+    done = 0
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(run_messages, run, tok): run for run in runs}
+        for future in as_completed(futures):
+            run = futures[future]
+            done += 1
+            if done % 10 == 0 or done == len(runs):
+                print(f"    {done}/{len(runs)} runs", flush=True)
+            try:
+                produced = future.result()
+            except RuntimeError as failure:
+                print(f"    run {run['id'][:8]}: skipped ({failure})", file=sys.stderr, flush=True)
+                continue
+            for role, parts, ts, order in produced:
+                collected.append(((ts, order), role, parts, ts))
+    collected.sort(key=lambda item: item[0])
+    return [(role, parts, ts) for _, role, parts, ts in collected]
+
+
+def all_threads() -> list[tuple[Path, str, str]]:
+    found = []
+    for db in sorted(PROFILE.glob("projects/*/desktop-v2.db")):
+        connection = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            found.extend((db, thread_id, title) for thread_id, title in connection.execute("select id, title from threads"))
+        finally:
+            connection.close()
+    return found
+
+
+def empty_threads() -> list[tuple[Path, str, str]]:
+    found = []
+    for db in sorted(PROFILE.glob("projects/*/desktop-v2.db")):
+        connection = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            for thread_id, title in connection.execute(
+                "select id, title from threads t where not exists"
+                " (select 1 from messages m where m.thread_id = t.id)"
+            ):
+                found.append((db, thread_id, title))
+        finally:
+            connection.close()
+    return found
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--redo", action="store_true", help="replace messages a previous run imported")
+    parser.add_argument("--only", action="append", default=[], metavar="TITLE")
+    args = parser.parse_args()
+
+    tok = token()
+    targets = all_threads() if args.redo else empty_threads()
+    if args.only:
+        wanted = [part.lower() for part in args.only]
+        targets = [t for t in targets if any(w in t[2].lower() for w in wanted)]
+    print(f"{len(targets)} chat(s) with no local messages")
+
+    backup_dir = Path("~/.cache/freebuff-0188-db-backup").expanduser() / time.strftime("%Y%m%d-%H%M%S")
+    backups: dict[Path, Path] = {}
+    total = 0
+    for db, thread_id, title in targets:
+        print(f"\n{title[:56]!r}  ({thread_id[:8]})")
+        try:
+            messages = rebuild(thread_id, tok)
+        except RuntimeError as failure:
+            print(f"  skipped: {failure}")
+            continue
+        if not messages:
+            print("  the cloud has no readable events for this chat either")
+            continue
+        print(f"  {len(messages)} messages from the cloud")
+        if args.dry_run:
+            continue
+
+        if db not in backups:
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            destination = backup_dir / f"{db.parent.name}.db"
+            source = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            target = sqlite3.connect(destination)
+            source.backup(target)
+            source.close()
+            target.close()
+            backups[db] = destination
+
+        connection = sqlite3.connect(db)
+        try:
+            if args.redo:
+                connection.execute("delete from messages where thread_id = ?", (thread_id,))
+            connection.executemany(
+                "insert into messages (thread_id, role, parts_json, attachments_json, metrics_json, ts)"
+                " values (?, ?, ?, '[]', '{}', ?)",
+                [(thread_id, role, json.dumps(parts), ts) for role, parts, ts in messages],
+            )
+            last = messages[-1][2]
+            connection.execute(
+                "update threads set last_prompt_at = max(ifnull(last_prompt_at, 0), ?),"
+                " last_turn_finished_at = max(ifnull(last_turn_finished_at, 0), ?) where id = ?",
+                (last, last, thread_id),
+            )
+            connection.commit()
+            total += len(messages)
+        finally:
+            connection.close()
+
+    if backups:
+        print(f"\nbackups: {backup_dir}")
+    print(f"imported {total} message(s)" if not args.dry_run else "\ndry run: nothing written")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -135,19 +135,18 @@ cat >"$ui/session-time.js" <<'JS'
     el = document.createElement("div");
     el.id = "session-time-badge";
     el.setAttribute("role", "status");
+    // Plain text, no pill: it reads as part of the window, not as a floating
+    // chip someone bolted on.
     el.style.cssText = [
       "position:fixed",
-      "bottom:10px",
-      "left:14px",
       "z-index:2147483000",
-      "padding:3px 9px",
-      "border-radius:999px",
-      "font:500 11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace",
-      "letter-spacing:.02em",
-      "color:#dedfdd",
-      "background:rgba(34,36,35,.86)",
-      "border:1px solid #2f322f",
-      "box-shadow:0 1px 4px rgba(0,0,0,.35)",
+      "padding:0",
+      "font:500 11px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif",
+      "letter-spacing:.015em",
+      "color:rgba(222,223,221,.6)",
+      "background:none",
+      "border:0",
+      "box-shadow:none",
       "pointer-events:none",
       "user-select:none",
       "display:none",
@@ -184,15 +183,41 @@ cat >"$ui/session-time.js" <<'JS'
     window.fetch = wrapped;
   }
 
+  // Keep the label just above the composer's mode row (Build / Plan / Mission /
+  // Skills) and aligned with it, rather than in a corner of the window.
+  function place(el) {
+    const wanted = ["Build", "Plan", "Mission"];
+    let anchor = null;
+    for (const button of document.querySelectorAll("button")) {
+      if (!wanted.includes((button.textContent || "").trim())) continue;
+      const rect = button.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        anchor = rect;
+        break;
+      }
+    }
+    if (!anchor) {
+      // No composer on screen (splash, settings): stay out of the way.
+      el.style.bottom = "10px";
+      el.style.top = "auto";
+      el.style.left = "14px";
+      return;
+    }
+    el.style.bottom = "auto";
+    el.style.left = `${Math.round(anchor.left + 2)}px`;
+    el.style.top = `${Math.round(anchor.top - 22)}px`;
+  }
+
   function render() {
     const el = badge();
     el.style.display = "block";
+    place(el);
     if (!expiresAt || expiresAt <= Date.now()) {
       // Always visible: an absent badge is indistinguishable from a broken one.
       el.style.opacity = "0.55";
       const text =
         phase === "ok"
-          ? "no active session"
+          ? "no session"
           : phase === "error"
             ? `session time unavailable${lastError ? ` (${lastError})` : ""}`
             : "checking session…";
@@ -208,8 +233,7 @@ cat >"$ui/session-time.js" <<'JS'
     }
     el.style.opacity = "0.92";
     const remaining = clock(expiresAt - Date.now());
-    const label = scope === "thread" ? "this session · " : live.length > 1 ? `${live.length} sessions · ` : "session ";
-    el.textContent = `${label}${remaining} left`;
+    el.textContent = `${remaining} left`;
     setTitle(`${baseTitle} · ${remaining} left`);
     el.title = [
       scope === "thread"

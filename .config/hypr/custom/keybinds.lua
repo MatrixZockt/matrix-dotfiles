@@ -1251,6 +1251,40 @@ hl.bind("SUPER + SHIFT + ALT + O",
 -- modules/ii/bar/NowBar.qml.
 local dictate = nil -- (kept as a name for the next reader: see above)
 
+--#! Utilities
+--# Freebuff: stack its session windows into one tabbed window (SUPER + ALT + G)
+-- Clicking a session in Freebuff's tab strip reloads the hosted page and waits
+-- for their cloud handshake (3.6-5.8 s measured). Sessions popped out into their
+-- own windows have already paid that, but then it is four windows instead of
+-- the single window with every project listed that the cloud app gives you.
+--
+-- Hyprland groups are the middle ground: those windows become tabs of ONE window
+-- frame, so the group bar is the project list and picking a tab is a focus
+-- change, not a page load. The script does the merge because no single
+-- dispatcher does it (`group.toggle` only ever makes a group of one window).
+-- SHIFT pulls the stack back apart.
+hl.bind("SUPER + ALT + G",
+    hl.dsp.exec_cmd("$HOME/.config/hypr/custom/scripts/freebuff-session-group.sh group"),
+    { description = "App: Stack Freebuff sessions into one tabbed window" })
+hl.bind("SUPER + ALT + SHIFT + G",
+    hl.dsp.exec_cmd("$HOME/.config/hypr/custom/scripts/freebuff-session-group.sh ungroup"),
+    { description = "App: Unstack Freebuff sessions" })
+
+--# Freebuff: cycle its session windows (SUPER + ALT + `)
+-- Freebuff's chat is a hosted web page, so clicking a session tab reloads it and
+-- waits for a server handshake -- measured here at 3.6-5.8 s of silence per
+-- switch, and it is their round-trip, not local work. A session moved to its own
+-- window (right-click the tab -> Move to New Window) has already paid that once,
+-- so switching between those windows is a focus change: instant.
+--
+-- Once the windows are stacked by the key above, this walks the stack's tabs
+-- instead (the script checks which case it is in); before that it walks the
+-- windows in address order, wrapping at the end. Either way it is safe to press
+-- with a single Freebuff window.
+hl.bind("SUPER + ALT + Grave",
+    hl.dsp.exec_cmd("$HOME/.config/hypr/custom/scripts/freebuff-session-windows.sh cycle"),
+    { description = "App: Cycle Freebuff session windows" })
+
 --#! Shell
 -- TAB belongs to the focused application: it moves between form fields, indents
 -- code, steps through a table's cells. Nothing on this desktop may own the bare

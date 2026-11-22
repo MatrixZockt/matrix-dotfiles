@@ -151,7 +151,15 @@ def snapshot():
     data = {}
     for pid, cmd in procs().items():
         inst = instance_of(cmd)
-        data.setdefault(inst, {"procs": {}, "version": version_of(cmd)})
+        data.setdefault(inst, {"procs": {}, "version": ""})
+        # Only the child processes carry --freebuff-host-version; the
+        # mount's app-update.yml has no version of its own, so prefer whatever
+        # names a real version over the profile directory's name.
+        claimed = version_of(cmd)
+        if claimed[:1].isdigit() and not data[inst]["version"][:1].isdigit():
+            data[inst]["version"] = claimed
+        elif not data[inst]["version"]:
+            data[inst]["version"] = claimed
         data[inst]["procs"][pid] = {
             "kind": kind_of(cmd),
             "cmd": cmd,

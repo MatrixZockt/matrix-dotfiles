@@ -28,36 +28,13 @@
 # --- this desktop ---
 Hyprland
 hyprctl
-Quickshell
-Wayland
-XWayland
 Kitty
 Brave
 Electron
-hyprlock
-hypridle
-fuzzel
-cliphist
-wl-copy
-wl-paste
-ydotool
-wtype
-grim
-slurp
-pipewire
-wireplumber
-systemd
 
 # --- engines and formats ---
-whisper.cpp
-WhisperFlow
-llama.cpp
-llama-server
-GGUF
 CUDA
 NVIDIA
-Vulkan
-GGML
 
 # --- work ---
 GitHub
@@ -75,18 +52,13 @@ SQL
 Docker
 
 # --- German terms that get mangled ---
-Zwischenablage
-Tastenkürzel
-Konfiguration
-Terminal
-Bildschirm
-Netzwerk
-Sicherung
+
 
 # --- the names that actually come out wrong: last on purpose ---
 Grafizum
 MatrixZockt
 Codebuff
+Freebuff
 Claude
 ChatGPT
 Higgsfield

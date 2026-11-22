@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""What is Freebuff Desktop actually doing? One line per running copy.
+
+The desktop app's typing lag tracks the DOM its renderer is holding, not the
+graphics stack, so `ps %CPU` is the wrong instrument twice over: it is a
+LIFETIME average (a renderer that has burned one core for an hour still reads
+30%), and it sums a renderer's worker threads into a number that says nothing
+about the thread that has to answer a keypress.
+
+So this samples /proc directly, per thread, and reports the one number that
+correlates with input lag: the renderer's MAIN thread (tid == pid), which is
+the thread that also handles keydown, selection and scroll.
+
+Usage:
+    freebuff-lag-report              # every copy, 8 s sample each
+    freebuff-lag-report -s 20        # longer sample
+    freebuff-lag-report -w           # watch: reprint every 5 s
+
+Why more than one copy matters: several AppImage instances can run side by
+side (different --user-data-dir), and each one pays its own renderer cost
+while only one is the app you are typing in.
+
+No dependencies outside the standard library; Linux only (reads /proc).
+"""
+
+import argparse
+import os
+import sys
+import time
+
+HZ = os.sysconf("SC_CLK_TCK")
+
+
+def read_cmdline(pid):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return f.read().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+    except OSError:
+        return ""
+
+
+def read_rss_kb(pid):
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])
+    except OSError:
+        pass
+    return 0
+
+
+def thread_ticks(pid, tid):
+    try:
+        with open(f"/proc/{pid}/task/{tid}/stat") as f:
+            fields = f.read().split(") ", 1)[1].split()
+        return int(fields[11]) + int(fields[12])
+    except (OSError, IndexError):
+        return None
+
+
+def process_ticks(pid):
+    total = 0
+    try:
+        tids = os.listdir(f"/proc/{pid}/task")
+    except OSError:
+        return 0
+    for tid in tids:
+        ticks = thread_ticks(pid, tid)
+        if ticks:
+            total += ticks
+    return total
+
+
+def thread_name(pid, tid):
+    try:
+        with open(f"/proc/{pid}/task/{tid}/comm") as f:
+            return f.read().strip()
+    except OSError:
+        return "?"
+
+
+def procs():
+    out = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        cmd = read_cmdline(pid)
+        argv0 = cmd.split(" ", 1)[0]
+        # The AppImage runtime process is argv[0]=<...>.AppImage and only
+        # execs the real thing; counting it would report the launcher's
+        # handful of seconds as if it were the app.
+        if argv0.endswith(".AppImage"):
+            continue
+        # Everything that matters runs out of the mounted tree. Note the dot:
+        # the path is /tmp/.mount_XXXX/freebuff, so "/mount_Freebu" never
+        # matches it -- only the /tmp/. part does.
+        if "/.mount_Freebu" not in cmd or "freebuff" not in cmd.lower():
+            continue
+        out[pid] = cmd
+    return out
+
+
+def instance_of(cmd):
+    """Group a process by the copy of the app it belongs to.
+
+    Each AppImage mounts itself at /tmp/.mount_<randomish>; the short-lived
+    launcher process carries the real filename, which has the version in it.
+    """
+    for token in cmd.split():
+        if token.startswith("/tmp/.mount_Freebu"):
+            return token.split("/")[2]  # "/tmp/.mount_XXXX/freebuff" -> .mount_XXXX
+    return "?"
+
+
+def kind_of(cmd):
+    if "--type=" in cmd:
+        return cmd.split("--type=", 1)[1].split()[0]
+    return "browser"
+
+
+def version_of(cmd):
+    """The version the app itself reports, then the mount's own metadata.
+
+    Every child process of a current build carries
+    --freebuff-host-version; a build that predates that flag still has
+    resources/app-update.yml inside its mount.
+    """
+    if "--freebuff-host-version=" in cmd:
+        return cmd.split("--freebuff-host-version=", 1)[1].split()[0]
+    for token in cmd.split():
+        if token.startswith("/tmp/.mount_Freebu"):
+            mount = "/".join(token.split("/")[:3])
+            try:
+                with open(f"{mount}/resources/app-update.yml") as f:
+                    for line in f:
+                        if line.startswith("version:"):
+                            return line.split(":", 1)[1].strip()
+            except OSError:
+                pass
+    # A build too old for either marker still names itself in its profile
+    # directory (the launcher passes --user-data-dir=.../Freebuff-0.0.184).
+    for token in cmd.split():
+        if token.startswith("--user-data-dir="):
+            return os.path.basename(token.split("=", 1)[1])
+    return ""
+
+
+def snapshot():
+    data = {}
+    for pid, cmd in procs().items():
+        inst = instance_of(cmd)
+        data.setdefault(inst, {"procs": {}, "version": version_of(cmd)})
+        data[inst]["procs"][pid] = {
+            "kind": kind_of(cmd),
+            "cmd": cmd,
+            "rss": read_rss_kb(pid),
+            "ticks": process_ticks(pid),
+            "main": thread_ticks(pid, pid),
+        }
+        if not data[inst]["version"]:
+            data[inst]["version"] = version_of(cmd)
+    return data
+
+
+def main_thread_percent(pid, a, b, seconds):
+    # The renderer's main thread can be renumbered only if the renderer died;
+    # a vanished pid is reported as -1 by the caller.
+    if a is None or b is None:
+        return None
+    return (b - a) / HZ / seconds * 100.0
+
+
+def report(seconds):
+    first = snapshot()
+    time.sleep(seconds)
+    second = snapshot()
+
+    if not first:
+        print("No Freebuff Desktop instance found.")
+        return 1
+
+    for inst, data in sorted(second.items()):
+        before = first.get(inst, {}).get("procs", {})
+        procs = data["procs"]
+        if not procs:
+            continue
+        version = data.get("version") or inst
+        rss_total = sum(p["rss"] for p in procs.values())
+        cpu_total = sum(
+            (p["ticks"] - before.get(pid, {}).get("ticks", p["ticks"])) / HZ / seconds * 100.0
+            for pid, p in procs.items()
+        )
+
+        renderers = [(pid, p) for pid, p in procs.items() if p["kind"] == "renderer"]
+        gpus = [p for p in procs.values() if p["kind"] == "gpu-process"]
+        browsers = [p for p in procs.values() if p["kind"] == "browser"]
+
+        print(f"== {version}  ({len(procs)} processes, {rss_total / 1048576:.2f} GB RSS, "
+              f"{cpu_total:.0f}% of one core total)")
+        if browsers:
+            b = browsers[0]
+            print(f"   browser      {b['ticks'] / HZ:6.0f}s cpu lifetime")
+        if renderers:
+            # The one holding the transcript is the biggest.
+            pid, p = max(renderers, key=lambda kv: kv[1]["rss"])
+            prev = before.get(pid, {})
+            main = main_thread_percent(pid, prev.get("main"), p["main"], seconds)
+            rss = p["rss"] / 1024
+            if main is None:
+                print(f"   renderer     {rss:6.0f} MB  (main thread gone)")
+            else:
+                verdict = ""
+                if main > 40:
+                    verdict = "  <- this is the input lag"
+                elif main > 10:
+                    verdict = "  <- busy"
+                print(f"   renderer     {rss:6.0f} MB  main thread {main:5.1f}% of one core{verdict}")
+            if len(renderers) > 1:
+                others = sum(r["rss"] for _, r in renderers) - p["rss"]
+                print(f"   other renders {others / 1024:5.0f} MB across {len(renderers) - 1}")
+        if gpus:
+            g = gpus[0]
+            gpid = next(k for k, v in procs.items() if v is g)
+            pct = (g["ticks"] - before.get(gpid, {}).get("ticks", g["ticks"])) / HZ / seconds * 100.0
+            print(f"   gpu-process  {g['rss'] / 1024:6.0f} MB  {pct:5.1f}% of one core")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Per-instance, per-thread Freebuff Desktop cost.")
+    ap.add_argument("-s", "--seconds", type=float, default=8.0,
+                    help="sample window in seconds (default 8)")
+    ap.add_argument("-w", "--watch", action="store_true", help="repeat every 5 s")
+    args = ap.parse_args()
+    if not os.path.isdir("/proc"):
+        print("This needs Linux: it reads /proc.", file=sys.stderr)
+        return 2
+    while True:
+        if args.watch:
+            print(time.strftime("%H:%M:%S"))
+        report(max(1.0, args.seconds))
+        if not args.watch:
+            return 0
+        time.sleep(5)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

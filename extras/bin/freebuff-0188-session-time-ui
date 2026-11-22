@@ -1,0 +1,231 @@
+#!/bin/bash
+# Add a "time left in this session" badge to Freebuff Desktop 0.0.18x.
+#
+# The packaged app resolves its interface as resources/orchestrator/ui next to
+# the running binary and passes that to the orchestrator unconditionally, so
+# FREEBUFF_UI_DIR cannot override it and the AppImage's squashfs is read-only.
+# The way in is therefore a runnable tree: the AppImage is extracted once into
+# a user-owned directory, the interface inside that tree is patched, and the
+# launcher runs <tree>/AppRun instead of the image.
+#
+# Only the extracted tree is written. The AppImage, the profile, its state.json
+# and every desktop-v2.db are left alone, so nothing the app stores can be lost
+# by re-running this: a changed AppImage only triggers a fresh extraction.
+#
+# Where the numbers come from: the page has window.freebuffDesktop.apiToken(),
+# and the orchestrator proxies /api/web/freebuff-session to the account's
+# session state. desktopPurchases[].expiresAt are the running sessions' expiry
+# times, so "time left" is the nearest of those.
+#
+# Usage: freebuff-0188-session-time-ui <appimage> <tree-dir>
+# Prints the AppRun path and exits 0 when <tree-dir> is ready to run.
+set -u
+
+app=${1:-}
+tree=${2:-}
+if [ -z "$app" ] || [ -z "$tree" ]; then
+    echo "usage: $(basename "$0") <appimage> <tree-dir>" >&2
+    exit 2
+fi
+if [ ! -x "$app" ]; then
+    echo "session-time-ui: $app is not executable" >&2
+    exit 1
+fi
+
+stamp="$tree/.source-stamp"
+current=$(stat -c '%s-%Y' "$app" 2>/dev/null || echo unknown)
+if [ -f "$stamp" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$current" ] && [ -x "$tree/AppRun" ]; then
+    printf '%s\n' "$tree/AppRun"
+    exit 0
+fi
+
+mkdir -p "$(dirname "$tree")" || exit 1
+staging="$tree.new.$$"
+rm -rf "$staging"
+mkdir -p "$staging" || exit 1
+
+# Extract the whole image: the binary, resources/app.asar, the bundled bun and
+# the Electron libs all have to sit where the app expects them.
+if ! ( cd "$staging" && "$app" --appimage-extract >/dev/null 2>&1 ); then
+    echo "session-time-ui: could not extract $app" >&2
+    rm -rf "$staging"
+    exit 1
+fi
+if [ ! -d "$staging/squashfs-root/resources/orchestrator/ui" ]; then
+    echo "session-time-ui: the extracted image has no interface to patch" >&2
+    rm -rf "$staging"
+    exit 1
+fi
+
+mv "$staging/squashfs-root" "$tree.stage.$$" || { rm -rf "$staging"; exit 1; }
+rmdir "$staging" 2>/dev/null
+payload="$tree.stage.$$"
+ui="$payload/resources/orchestrator/ui"
+
+cat >"$ui/session-time.js" <<'JS'
+// Session countdown for the Freebuff Desktop interface.
+//
+// Served same-origin with the app, and the preload exposes apiToken(), so the
+// session endpoint is read exactly the way the app's own settings screen reads
+// it. Everything here is presentation: no request mutates anything.
+(() => {
+  const POLL_MS = 30000;
+  const RETRY_MS = 10000;
+  let expiresAt = 0;
+  let live = [];
+  let timer = null;
+  let poll = null;
+
+  const pad = (n) => String(n).padStart(2, "0");
+  function clock(ms) {
+    const total = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+  }
+
+  function token() {
+    try {
+      return window.freebuffDesktop?.apiToken?.() ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  function badge() {
+    let el = document.getElementById("session-time-badge");
+    if (el) return el;
+    el = document.createElement("div");
+    el.id = "session-time-badge";
+    el.setAttribute("role", "status");
+    el.style.cssText = [
+      "position:fixed",
+      "bottom:10px",
+      "left:14px",
+      "z-index:2147483000",
+      "padding:3px 9px",
+      "border-radius:999px",
+      "font:500 11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace",
+      "letter-spacing:.02em",
+      "color:#dedfdd",
+      "background:rgba(34,36,35,.86)",
+      "border:1px solid #2f322f",
+      "box-shadow:0 1px 4px rgba(0,0,0,.35)",
+      "pointer-events:none",
+      "user-select:none",
+      "display:none",
+      "white-space:nowrap",
+    ].join(";");
+    document.body.appendChild(el);
+    return el;
+  }
+
+  function render() {
+    const el = badge();
+    if (!expiresAt || expiresAt <= Date.now()) {
+      el.style.display = "none";
+      return;
+    }
+    el.style.display = "block";
+    const label = live.length > 1 ? `${live.length} sessions · ` : "session ";
+    el.textContent = `${label}${clock(expiresAt - Date.now())} left`;
+    el.title = [
+      `Time left in the running Freebuff session${live.length > 1 ? "s" : ""}`,
+      ...live.map((p) => `${p.model} until ${new Date(p.expiresAt).toLocaleTimeString()}`),
+    ].join("\n");
+  }
+
+  function apply(status) {
+    const data = status && typeof status === "object" ? status : {};
+    const now = Date.now();
+    live = (Array.isArray(data.desktopPurchases) ? data.desktopPurchases : [])
+      .filter((p) => p && Date.parse(p.expiresAt) > now)
+      .sort((a, b) => Date.parse(a.expiresAt) - Date.parse(b.expiresAt));
+    const next = Date.parse(data.desktopSessionCounts?.nextExpiryAt || "");
+    // The session that ends soonest is the one worth warning about.
+    expiresAt = live.length
+      ? Date.parse(live[0].expiresAt)
+      : Number.isFinite(next) && next > now
+        ? next
+        : 0;
+    render();
+  }
+
+  async function refresh() {
+    clearTimeout(poll);
+    const t = token();
+    if (!t) {
+      poll = setTimeout(refresh, RETRY_MS);
+      return;
+    }
+    try {
+      const res = await fetch("/api/web/freebuff-session", {
+        headers: { "x-freebuff-launch-id": t },
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error(String(res.status));
+      apply(await res.json());
+      poll = setTimeout(refresh, POLL_MS);
+    } catch {
+      poll = setTimeout(refresh, RETRY_MS);
+    }
+  }
+
+  function start() {
+    if (!document.body) {
+      document.addEventListener("DOMContentLoaded", start, { once: true });
+      return;
+    }
+    if (timer) return;
+    timer = setInterval(render, 1000);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) refresh();
+    });
+    refresh();
+  }
+
+  start();
+})();
+JS
+
+# One override script line, after the app's own module entry so nothing waits on
+# it. Idempotent: a second run must not add a second copy.
+python3 - "$ui/index.html" <<'PY' || { echo "session-time-ui: could not patch index.html" >&2; rm -rf "$payload"; exit 1; }
+import sys
+
+path = sys.argv[1]
+tag = '<script src="/session-time.js" defer></script>'
+html = open(path, encoding="utf8").read()
+if tag in html:
+    sys.exit(0)
+anchor = '<script type="module" crossorigin src="/assets/'
+index = html.find(anchor)
+if index == -1:
+    close = html.find("</head>")
+    if close == -1:
+        raise SystemExit("no </head> to inject into")
+    html = html[:close] + tag + "\n" + html[close:]
+else:
+    end = html.find("</script>", index)
+    if end == -1:
+        raise SystemExit("unterminated module script")
+    end += len("</script>")
+    html = html[:end] + "\n    " + tag + html[end:]
+open(path, "w", encoding="utf8").write(html)
+PY
+
+# Swap the finished tree in, keeping the old one until the move succeeded.
+old="$tree.old.$$"
+if [ -e "$tree" ]; then
+    mv "$tree" "$old" || { rm -rf "$payload"; echo "session-time-ui: could not move $tree aside" >&2; exit 1; }
+fi
+if ! mv "$payload" "$tree"; then
+    [ -e "$old" ] && mv "$old" "$tree"
+    echo "session-time-ui: could not install $tree" >&2
+    exit 1
+fi
+rm -rf "$old"
+printf '%s\n' "$current" >"$stamp"
+printf '%s\n' "$tree/AppRun"
+exit 0

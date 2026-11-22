@@ -8,6 +8,18 @@
 #
 # 0.0.188 must be closed while this runs — it opens these same files — and it
 # will show the refreshed history on its next start.
+#
+# It also has to undo two things the current build writes that 0.0.188 cannot
+# act on, or the migrated chats stop opening (both measured 2026-11-22):
+#
+#   * absolute paths inside state.json for the no-folder project, which would
+#     otherwise point the copy back at the live profile;
+#   * the cloud flags — every thread is recorded with
+#     execution_target='cloud' (a hosted workspace) and projects carry
+#     deviceCloud/accountId. 0.0.188 predates hosted workspaces, so opening
+#     such a chat fails with "cloud workspace not found" even though the
+#     transcript is right there in the local database. Setting them back to
+#     local is what makes the migrated chats open.
 set -eu
 
 SRC="${FREEBUFF_SRC_PROFILE:-$HOME/.config/freebuff-desktop}"
@@ -31,18 +43,52 @@ for d in "$SRC"/projects/*/; do
     sqlite3 "$d/desktop-v2.db" ".backup '$DST/projects/$name/desktop-v2.db'"
 done
 
-# The copy must point at itself, not at the live profile: state.json stores
-# absolute paths for the no-folder project.
 python3 - "$DST" <<'EOF'
-import sys, pathlib
-dst = pathlib.Path(sys.argv[1]); p = dst / "state.json"
-p.write_text(p.read_text().replace("/.config/freebuff-desktop/", "/.config/freebuff-desktop-0.0.188/"))
-EOF
+import json, pathlib, sqlite3, sys
 
-t=0; m=0
-for db in "$DST"/projects/*/desktop-v2.db; do
-    a=$(sqlite3 "file:$db?mode=ro" 'select count(*) from threads' 2>/dev/null || echo 0)
-    b=$(sqlite3 "file:$db?mode=ro" 'select count(*) from messages' 2>/dev/null || echo 0)
-    t=$((t + a)); m=$((m + b))
-done
-echo "refresh: $DST now has $t threads / $m messages"
+dst = pathlib.Path(sys.argv[1])
+
+# 1. Point the copy at itself.
+state_path = dst / "state.json"
+state_path.write_text(
+    state_path.read_text().replace(
+        "/.config/freebuff-desktop/", "/.config/freebuff-desktop-0.0.188/"
+    )
+)
+
+# 2. Drop the cloud flags from every project entry.
+state = json.loads(state_path.read_text())
+for entry in state["projects"].values():
+    for key in ("deviceCloud", "accountId", "apiHost", "cloudProjectId"):
+        entry.pop(key, None)
+    entry["location"] = "local"
+    for source in entry.get("sources") or []:
+        for key in ("deviceCloud", "accountId", "apiHost", "cloudProjectId"):
+            source.pop(key, None)
+state_path.write_text(json.dumps(state, indent=2))
+
+# 3. Drop the cloud flags from every thread.
+wanted = {
+    "execution_target": "execution_target='local'",
+    "next_execution_target": "next_execution_target='local'",
+    "cloud_account_id": "cloud_account_id=null",
+    "cloud_api_host": "cloud_api_host=null",
+    "cloud_handoff_pending": "cloud_handoff_pending=0",
+    "cloud_continuation_queued": "cloud_continuation_queued=0",
+    "cloud_handback_at": "cloud_handback_at=null",
+    "local_handoff_pending": "local_handoff_pending=0",
+}
+threads = messages = 0
+for db in sorted(dst.glob("projects/*/desktop-v2.db")):
+    con = sqlite3.connect(db)
+    have = {row[1] for row in con.execute("pragma table_info(threads)")}
+    stmts = [sql for col, sql in wanted.items() if col in have]
+    if stmts:
+        con.execute("update threads set " + ", ".join(stmts))
+    threads += con.execute("select count(*) from threads").fetchone()[0]
+    messages += con.execute("select count(*) from messages").fetchone()[0]
+    con.commit()
+    con.close()
+
+print(f"refresh: {dst} now has {threads} threads / {messages} messages")
+EOF
